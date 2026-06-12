@@ -93,6 +93,62 @@ if [[ "$YES" == false ]]; then
     [[ "$reply" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
 fi
 
+# ── SDRangel install helper ──────────────────────────────────────────────────
+
+install_sdrangel_from_github() {
+    local api_url="https://api.github.com/repos/f4exb/sdrangel/releases/latest"
+    local release_json deb_url deb_file="/tmp/sdrangel-install.deb"
+
+    info "Fetching SDRangel latest release info from GitHub..."
+    release_json="$(curl -fsSL "$api_url" 2>/dev/null)" || {
+        warn "Could not reach GitHub API — skipping sdrangelsrv install."
+        SKIP_SDRANGEL=true
+        return
+    }
+
+    # Find the arm64 .deb asset URL
+    deb_url="$(printf '%s' "$release_json" | \
+        grep -o '"browser_download_url":"[^"]*arm64[^"]*\.deb"' | \
+        grep -o 'https://[^"]*' | head -1)"
+
+    if [[ -z "$deb_url" ]]; then
+        # Fallback: some releases use aarch64 in the filename
+        deb_url="$(printf '%s' "$release_json" | \
+            grep -o '"browser_download_url":"[^"]*aarch64[^"]*\.deb"' | \
+            grep -o 'https://[^"]*' | head -1)"
+    fi
+
+    if [[ -z "$deb_url" ]]; then
+        warn "No arm64 .deb found in the latest SDRangel release — skipping sdrangelsrv install."
+        warn "Check https://github.com/f4exb/sdrangel/releases for manual install options."
+        SKIP_SDRANGEL=true
+        return
+    fi
+
+    info "Downloading ${deb_url##*/} ..."
+    curl -fsSL -o "$deb_file" "$deb_url" || {
+        warn "Download failed — skipping sdrangelsrv install."
+        SKIP_SDRANGEL=true
+        return
+    }
+
+    info "Installing sdrangelsrv package + dependencies (may take a moment)..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "$deb_file" || {
+        warn "Package install failed. Try manually: apt-get install -y /tmp/sdrangel-install.deb"
+        rm -f "$deb_file"
+        SKIP_SDRANGEL=true
+        return
+    }
+    rm -f "$deb_file"
+
+    if command -v sdrangelsrv &>/dev/null; then
+        info "sdrangelsrv installed: $(sdrangelsrv --version 2>/dev/null | head -1 || echo 'ok')"
+    else
+        warn "sdrangelsrv binary not found after install — check the package contents."
+        SKIP_SDRANGEL=true
+    fi
+}
+
 # ── System packages ────────────────────────────────────────────────────────
 
 step "Installing system packages"
@@ -102,12 +158,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     rtl-sdr ffmpeg usbutils
 
 if [[ "$SKIP_SDRANGEL" == false ]]; then
-    if DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends sdrangel 2>&1; then
-        info "sdrangel (sdrangelsrv) installed."
-    else
-        warn "sdrangel not available in apt — skipping. Install manually and re-enable the service."
-        SKIP_SDRANGEL=true
-    fi
+    install_sdrangel_from_github
 fi
 info "System packages done."
 
