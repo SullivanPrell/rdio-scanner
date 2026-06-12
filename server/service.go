@@ -69,9 +69,13 @@ func NewSDRangelServiceManager() *SDRangelServiceManager {
 	return &SDRangelServiceManager{}
 }
 
-// Mode returns "docker" if /var/run/docker.sock is accessible, else "native".
+// Mode returns "docker" if /var/run/docker.sock is connectable, else "native".
+// Using Stat is insufficient: the socket file can exist while the process
+// lacks permission to connect (e.g. rdio service user not in docker group).
 func (m *SDRangelServiceManager) mode() string {
-	if _, err := os.Stat("/var/run/docker.sock"); err == nil {
+	conn, err := net.Dial("unix", "/var/run/docker.sock")
+	if err == nil {
+		conn.Close()
 		return "docker"
 	}
 	return "native"
