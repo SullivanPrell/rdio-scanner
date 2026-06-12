@@ -101,7 +101,7 @@ build_sdrangel_from_source() {
     local version src_dir="/tmp/sdrangel-src"
 
     version="$(curl -fsSL 'https://api.github.com/repos/f4exb/sdrangel/releases/latest' 2>/dev/null | \
-        grep -o '"tag_name":"[^"]*"' | grep -o 'v[0-9.]*' | head -1)"
+        grep -o '"tag_name":"[^"]*"' | grep -o 'v[0-9.]*' | head -1)" || true
     [[ -z "$version" ]] && version="v7.26.1"
 
     echo ""
@@ -185,10 +185,10 @@ install_sdrangel() {
 
     deb_url="$(printf '%s' "$release_json" | \
         grep -o '"browser_download_url":"[^"]*arm64[^"]*\.deb"' | \
-        grep -o 'https://[^"]*' | head -1)"
+        grep -o 'https://[^"]*' | head -1)" || true
     [[ -z "$deb_url" ]] && deb_url="$(printf '%s' "$release_json" | \
         grep -o '"browser_download_url":"[^"]*aarch64[^"]*\.deb"' | \
-        grep -o 'https://[^"]*' | head -1)"
+        grep -o 'https://[^"]*' | head -1)" || true
 
     if [[ -n "$deb_url" ]]; then
         info "Downloading ${deb_url##*/} ..."
