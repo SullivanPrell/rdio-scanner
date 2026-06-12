@@ -199,15 +199,20 @@ func (c *sdrangelClient) getStatus() (*SDRangelStatus, error) {
 // provision configures SDRangel device sets and channels to match the bridge config.
 // For each bridge channel it creates:
 //
-//	NFMDemod (or DSDDemod/NXDNDemod) → named virtual audio pipe "RSRV_RS_{dsIdx}_{chIdx}"
+//	NFMDemod (or DSDDemod/NXDNDemod) → named virtual audio pipe "RSRV_RS_{dsIdx}_{demodIdx}"
 //	AudioNetSink → reads from that audio pipe, sends L16 PCM over UDP to the bridge port
-func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []BridgeChannelConfig) *SDRangelProvisionResult {
+//
+// It returns the SDRangelProvisionResult and a copy of channels with ChannelIndex updated
+// to the actual SDRangel-assigned demod index, which callers must persist to the bridge config.
+func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []BridgeChannelConfig) (*SDRangelProvisionResult, []BridgeChannelConfig) {
 	result := &SDRangelProvisionResult{Messages: []string{}}
+	updated := make([]BridgeChannelConfig, len(channels))
+	copy(updated, channels)
 
 	var devResp sdrangelDeviceSetsResponse
 	if err := c.getJSON("/devicesets", &devResp); err != nil {
 		result.Messages = append(result.Messages, fmt.Sprintf("cannot reach SDRangel: %v", err))
-		return result
+		return result, updated
 	}
 
 	// Build center-freq lookup: device set index → center frequency
@@ -224,7 +229,7 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 			}
 			if err := c.postJSON("/deviceset?tx=0", nil, &created); err != nil {
 				result.Messages = append(result.Messages, fmt.Sprintf("failed to create device set: %v", err))
-				return result
+				return result, updated
 			}
 			devResp.DevicesetCount++
 			result.Messages = append(result.Messages, fmt.Sprintf("created device set %d", created.DevicesetIndex))
@@ -260,10 +265,10 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 		result.Messages = append(result.Messages, fmt.Sprintf("device set %d: %s seq=%d center=%d Hz SR=%d", dsCfg.Index, dsCfg.HwType, dsCfg.Sequence, dsCfg.CenterFrequencyHz, sr))
 	}
 
-	// Create NFMDemod + AudioNetSink pair for each bridge channel
-	for _, ch := range channels {
-		audioPipe := fmt.Sprintf("RSRV_RS_%d_%d", ch.DeviceSetIndex, ch.ChannelIndex)
-
+	// Create NFMDemod + AudioNetSink pair for each bridge channel.
+	// The audio pipe name is derived from the SDRangel-assigned demod index (not the stored
+	// ChannelIndex which may be 0 for all channels before first provisioning).
+	for i, ch := range channels {
 		cf := centerFreq[ch.DeviceSetIndex]
 		var freqOffset int64
 		if cf > 0 {
@@ -283,6 +288,9 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 			result.Messages = append(result.Messages, fmt.Sprintf("failed to add %s for %s: %v", channelType, ch.Label, err))
 			continue
 		}
+
+		// Pipe name uses the real SDRangel-assigned demod index so each channel gets a unique pipe.
+		audioPipe := fmt.Sprintf("RSRV_RS_%d_%d", ch.DeviceSetIndex, addedDemod.Index)
 
 		demodSettingsKey := channelType + "Settings"
 		if err := c.patchJSON(fmt.Sprintf("/deviceset/%d/channel/%d/settings", ch.DeviceSetIndex, addedDemod.Index), map[string]interface{}{
@@ -333,8 +341,11 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 			result.Messages = append(result.Messages, fmt.Sprintf("warning: failed to configure AudioNetSink for %s: %v", ch.Label, err))
 		}
 
+		// Persist the actual demod channel index so the bridge polls the right channel.
+		updated[i].ChannelIndex = addedDemod.Index
+
 		result.Messages = append(result.Messages, fmt.Sprintf(
-			"channel %q: %s idx=%d → audio pipe %q → UDP %d (offset %+d Hz)",
+			"channel %q: %s idx=%d → pipe %q → UDP %d (offset %+d Hz)",
 			ch.Label, channelType, addedDemod.Index, audioPipe, ch.UdpPort, freqOffset,
 		))
 	}
@@ -349,7 +360,7 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 	}
 
 	result.Success = true
-	return result
+	return result, updated
 }
 
 func channelTypeForProtocol(proto string) string {
@@ -397,7 +408,19 @@ func (admin *Admin) SDRangelProvisionHandler(w http.ResponseWriter, r *http.Requ
 	}
 	opts := admin.Controller.Options
 	client := newSDRangelClient(opts.BridgeHost, opts.BridgePort)
-	result := client.provision(req.DeviceSets, opts.BridgeChannels)
+	result, updatedChannels := client.provision(req.DeviceSets, opts.BridgeChannels)
+
+	// Write the SDRangel-assigned channel indices back to the bridge config so the
+	// bridge polls the correct per-channel squelch endpoint (not all at index 0).
+	if result.Success {
+		admin.Controller.Options.BridgeChannels = updatedChannels
+		if err := admin.Controller.Options.Write(admin.Controller.Database); err != nil {
+			result.Messages = append(result.Messages, fmt.Sprintf("warning: failed to persist updated channel indices: %v", err))
+		} else {
+			admin.Controller.Bridge.Restart()
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
 }
