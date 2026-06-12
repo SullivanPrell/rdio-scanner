@@ -59,6 +59,6 @@ Containerfile  Podman/Docker image
 |------|-----|
 | Add a server endpoint | Register in `main.go`, implement handler on `Admin` or `Api` struct |
 | Add a DB-backed feature | Add model file + SQL in the appropriate `*sql.go` file |
-| Change admin password | `./rdio-scanner --new-admin-password <pass>` |
+| Change admin password | `./rdio-scanner -admin_password <pass>` |
 | Update version | `make sed ver=X.Y.Z date=YYYY/MM/DD` |
 | Build container image | `make container` (requires Podman) |
