@@ -1,0 +1,102 @@
+##############################################################################
+# SDRangel headless server (sdrangelsrv)
+#
+# Builds the server-only binary from the SDRangel source tree.
+# This Dockerfile is referenced from docker-compose.yml:
+#   build:
+#     context: ~/developer/sdrangel
+#     dockerfile: ${PWD}/Dockerfile.sdrangel
+#
+# Build once (takes ~15-30 min on Pi 5):
+#   docker compose build sdrangelsrv
+#
+# Supports: linux/amd64, linux/arm64 (Raspberry Pi 5)
+# Base: Ubuntu 22.04 (Jammy) — good ARM64 package availability
+##############################################################################
+
+FROM ubuntu:22.04 AS builder
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# ── Install build dependencies (Qt5 stack + SDR libraries) ────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Build tools
+    cmake ninja-build build-essential pkg-config git ca-certificates \
+    bison flex xxd python3-mako python3-numpy \
+    # Qt5 (server mode still needs Qt for networking/WebSocket)
+    qtbase5-dev qttools5-dev qttools5-dev-tools \
+    libqt5websockets5-dev libqt5multimedia5-dev qtmultimedia5-dev \
+    qtbase5-private-dev \
+    # Core signal processing
+    libfftw3-dev libusb-1.0-0-dev libhidapi-dev \
+    zlib1g-dev libssl-dev libxml2-dev \
+    # RTL-SDR hardware support
+    librtlsdr-dev \
+    # SoapySDR (device abstraction — includes RTL-SDR plugin)
+    libsoapysdr-dev soapysdr-module-rtlsdr \
+    # Audio codecs (needed for demodulator plugins)
+    libopus-dev libflac-dev libfaad-dev libcodec2-dev \
+    # AV / media
+    libavcodec-dev libavformat-dev libavutil-dev libpostproc-dev \
+    # Misc
+    libboost-dev libunwind-dev libavahi-client-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Build sdrangelsrv ─────────────────────────────────────────────────────
+WORKDIR /src
+COPY . .
+
+RUN cmake \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr/local \
+    -DBUILD_GUI=OFF \
+    -DBUILD_SERVER=ON \
+    -DBUILD_BENCH=OFF \
+    -DENABLE_QT6=OFF \
+    -DENABLE_PROFILER=OFF \
+    -DENABLE_LIBUNWIND=OFF \
+    -DARCH_OPT="" \
+    -GNinja \
+    -Bbuild -S. \
+    && cmake --build build -j$(nproc) \
+    && cmake --install build
+
+# ── Runtime stage ─────────────────────────────────────────────────────────
+FROM ubuntu:22.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Qt5 runtime
+    libqt5core5a libqt5network5 libqt5websockets5 libqt5multimedia5 \
+    # RTL-SDR runtime
+    librtlsdr0 \
+    # SoapySDR runtime + RTL-SDR plugin
+    libsoapysdr0.8 soapysdr-module-rtlsdr \
+    # Audio codecs runtime
+    libopus0 libflac8 libfaad2 libcodec2-1.0 \
+    # AV runtime
+    libavcodec58 libavformat58 libavutil56 \
+    # Misc runtime
+    libfftw3-bin libusb-1.0-0 libhidapi-libusb0 \
+    libunwind8 libavahi-client3 \
+    # USB device access tools
+    usbutils curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy installed binaries, libraries, and plugins from builder
+COPY --from=builder /usr/local/ /usr/local/
+
+# Ensure shared library cache is up to date
+RUN ldconfig
+
+# Create config directory
+RUN mkdir -p /config
+
+EXPOSE 8091
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s \
+    CMD curl -sf http://localhost:8091/sdrangel || exit 1
+
+ENTRYPOINT ["sdrangelsrv", "-p", "8091"]
+CMD ["-f", "/config/sdrangel.json"]

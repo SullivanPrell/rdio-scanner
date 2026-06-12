@@ -62,7 +62,7 @@ export class RdioScannerAdminDirWatchComponent implements OnChanges {
     }
 
     add(): void {
-        const dirWatch = this.adminService.newDirWatchForm({
+        const dirWatch = this.adminService.newDirwatchForm({
             delay: 2000,
             deleteAfter: true,
         });

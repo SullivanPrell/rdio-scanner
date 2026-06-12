@@ -60,6 +60,16 @@
       </mat-expansion-panel-header>
       <rdio-scanner-admin-options [form]="options"></rdio-scanner-admin-options>
     </mat-expansion-panel>
+    <mat-expansion-panel>
+      <mat-expansion-panel-header>
+        <mat-panel-title>
+          <mat-icon>settings_input_antenna</mat-icon>
+          SDRangel Bridge
+          <mat-icon *ngIf="f.get('options')?.get('bridgeChannels')?.invalid" color="warn">error</mat-icon>
+        </mat-panel-title>
+      </mat-expansion-panel-header>
+      <rdio-scanner-admin-bridge [form]="options"></rdio-scanner-admin-bridge>
+    </mat-expansion-panel>
     <mat-expansion-panel (afterCollapse)="systemsComponent.closeAll()">
       <mat-expansion-panel-header>
         <mat-panel-title>

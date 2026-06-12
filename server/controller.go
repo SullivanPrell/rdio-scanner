@@ -32,28 +32,30 @@ import (
 )
 
 type Controller struct {
-	Accesses    *Accesses
-	Admin       *Admin
-	Api         *Api
-	Apikeys     *Apikeys
-	Calls       *Calls
-	Clients     *Clients
-	Config      *Config
-	Database    *Database
-	Delayer     *Delayer
-	Dirwatches  *Dirwatches
-	Downstreams *Downstreams
-	FFMpeg      *FFMpeg
-	Groups      *Groups
-	Logs        *Logs
-	Options     *Options
-	Scheduler   *Scheduler
-	Systems     *Systems
-	Tags        *Tags
-	Register    chan *Client
-	Unregister  chan *Client
-	Ingest      chan *Call
-	running     bool
+	Accesses       *Accesses
+	Admin          *Admin
+	Api            *Api
+	Apikeys        *Apikeys
+	Bridge         *Bridge
+	Calls          *Calls
+	Clients        *Clients
+	Config         *Config
+	Database       *Database
+	Delayer        *Delayer
+	Dirwatches     *Dirwatches
+	Downstreams    *Downstreams
+	FFMpeg         *FFMpeg
+	Groups         *Groups
+	Logs           *Logs
+	Options        *Options
+	Scheduler      *Scheduler
+	ServiceManager *SDRangelServiceManager
+	Systems        *Systems
+	Tags           *Tags
+	Register       chan *Client
+	Unregister     chan *Client
+	Ingest         chan *Call
+	running        bool
 }
 
 func NewController(config *Config) *Controller {
@@ -76,11 +78,13 @@ func NewController(config *Config) *Controller {
 
 	controller.Admin = NewAdmin(controller)
 	controller.Api = NewApi(controller)
+	controller.Bridge = NewBridge(controller)
 	controller.Calls = NewCalls(controller)
 	controller.Database = NewDatabase(config)
 	controller.Delayer = NewDelayer(controller)
 	controller.Downstreams = NewDownstreams(controller)
 	controller.Scheduler = NewScheduler(controller)
+	controller.ServiceManager = NewSDRangelServiceManager()
 
 	controller.Logs.setDaemon(config.daemon)
 	controller.Logs.setDatabase(controller.Database)
@@ -553,6 +557,10 @@ func (controller *Controller) Start() error {
 	}
 	if err = controller.Scheduler.Start(); err != nil {
 		return err
+	}
+
+	if controller.Options.BridgeEnabled {
+		controller.Bridge.Start()
 	}
 
 	go func() {

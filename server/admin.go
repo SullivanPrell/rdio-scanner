@@ -272,6 +272,7 @@ func (admin *Admin) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					logError(err)
 				}
+				admin.Controller.Bridge.Restart()
 			}
 
 			switch v := m["systems"].(type) {

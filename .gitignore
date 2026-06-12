@@ -3,3 +3,12 @@
 *.token
 /build
 /dist
+# start.sh generated files
+.env
+docker-compose.override.yml
+/data
+# Claude internal session data
+.claude/
+# Compiled Pi binaries (build with sdr-linux/compile-rdio.sh)
+sdr-linux/bin/rdio-scanner-arm64
+sdr-linux/bin/rdio-scanner-armhf

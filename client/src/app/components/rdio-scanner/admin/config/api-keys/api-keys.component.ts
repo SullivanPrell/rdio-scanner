@@ -42,7 +42,7 @@ export class RdioScannerAdminApiKeysComponent {
     constructor(private adminService: RdioScannerAdminService, private matDialog: MatDialog) { }
 
     add(): void {
-        const apiKey = this.adminService.newApiKeyForm({
+        const apiKey = this.adminService.newApikeyForm({
             key: this.uuid(),
             systems: '*',
         });

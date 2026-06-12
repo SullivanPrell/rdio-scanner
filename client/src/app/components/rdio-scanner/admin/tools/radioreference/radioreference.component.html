@@ -1,0 +1,314 @@
+<!-- ── Tab bar ──────────────────────────────────────────────────────────────── -->
+<div style="display:flex;gap:4px;margin-bottom:12px">
+  <button mat-button [color]="activeTab === 'live' ? 'primary' : undefined"
+          [style.font-weight]="activeTab === 'live' ? '600' : 'normal'"
+          (click)="switchTab('live')">
+    <mat-icon>wifi</mat-icon> Live Import
+  </button>
+  <button mat-button [color]="activeTab === 'snapshots' ? 'primary' : undefined"
+          [style.font-weight]="activeTab === 'snapshots' ? '600' : 'normal'"
+          (click)="switchTab('snapshots')">
+    <mat-icon>storage</mat-icon>
+    Offline Snapshots
+    @if (snapshots.length) {
+      <span style="margin-left:4px;font-size:0.8em;opacity:0.7">({{ snapshots.length }})</span>
+    }
+  </button>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<!-- LIVE IMPORT TAB                                                           -->
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+@if (activeTab === 'live') {
+  <p class="mat-caption" style="margin-bottom:12px">
+    Requires a <strong>RadioReference.com</strong> subscriber account and an API App Key.
+    Obtain your App Key at <em>My Account → Manage API Keys</em> on radioreference.com.
+  </p>
+
+  <!-- Credentials (shared with offline tab) -->
+  <div class="row">
+    <p><span class="mat-body">Username</span></p>
+    <mat-form-field floatLabel="auto">
+      <input matInput [(ngModel)]="username" placeholder="RR username">
+    </mat-form-field>
+  </div>
+
+  <div class="row">
+    <p><span class="mat-body">Password</span></p>
+    <mat-form-field>
+      <input matInput type="password" [(ngModel)]="password" placeholder="RR password">
+    </mat-form-field>
+  </div>
+
+  <div class="row">
+    <p>
+      <span class="mat-body">App Key</span><br>
+      <span class="mat-caption">From RR account — required for API access.</span>
+    </p>
+    <mat-form-field>
+      <input matInput [(ngModel)]="appKey" placeholder="App Key">
+    </mat-form-field>
+  </div>
+
+  <div class="row">
+    <p>
+      <span class="mat-body">UDP Port Base</span><br>
+      <span class="mat-caption">Starting UDP port for suggested bridge channels.</span>
+    </p>
+    <mat-form-field>
+      <input type="number" min="1024" max="65000" step="1" matInput [(ngModel)]="portBase">
+    </mat-form-field>
+  </div>
+
+  <div class="row bottom">
+    <button mat-raised-button color="accent" (click)="loadStates()" [disabled]="loading || !username || !password">
+      <mat-icon>language</mat-icon>
+      Load States
+    </button>
+  </div>
+
+  <!-- State picker -->
+  @if (states.length) {
+    <div class="row" style="margin-top:8px">
+      <p><span class="mat-body">State</span></p>
+      <mat-form-field>
+        <mat-select placeholder="Select state" [(ngModel)]="selectedStateId" (ngModelChange)="loadCounties($event)">
+          @for (s of states; track s.id) {
+            <mat-option [value]="s.id">{{ s.name }} ({{ s.abbr }})</mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+    </div>
+  }
+
+  <!-- County picker -->
+  @if (counties.length) {
+    <div class="row">
+      <p><span class="mat-body">County / Agency</span></p>
+      <mat-form-field>
+        <mat-select placeholder="Select county" [(ngModel)]="selectedCountyId" (ngModelChange)="loadCounty($event)">
+          @for (c of counties; track c.id) {
+            <mat-option [value]="c.id">{{ c.name }}</mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+    </div>
+
+    <!-- Download state button (appears after counties load) -->
+    <div style="background:rgba(0,0,0,.03);border-radius:4px;padding:10px;margin-bottom:12px">
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <div style="flex:1">
+          <p class="mat-body-2" style="margin:0 0 2px">Save offline snapshot</p>
+          <p class="mat-caption" style="margin:0;color:gray">
+            Downloads all {{ counties.length }} counties for <strong>{{ selectedState?.name }}</strong>
+            and stores them locally so you can import without an internet connection.
+          </p>
+        </div>
+        <button mat-stroked-button color="primary"
+                (click)="downloadState()"
+                [disabled]="!canDownloadState || !!downloadJobId">
+          <mat-icon>cloud_download</mat-icon>
+          Download State
+        </button>
+      </div>
+
+      <!-- Download progress -->
+      @if (downloadJob && !downloadJob.done) {
+        <div style="margin-top:8px">
+          <mat-progress-bar mode="determinate" [value]="downloadJob.progress"></mat-progress-bar>
+          <p class="mat-caption" style="margin:4px 0 0;color:gray">
+            Downloading {{ downloadJob.countyDone }} / {{ downloadJob.countyTotal }} counties…
+          </p>
+        </div>
+      }
+      @if (downloadJob?.done && downloadJob?.error) {
+        <p class="mat-caption" style="margin:6px 0 0;color:var(--mdc-theme-error)">
+          {{ downloadJob!.error }}
+        </p>
+      }
+    </div>
+  }
+
+  @if (loading) {
+    <p class="mat-caption text-center" style="margin:8px 0">Loading…</p>
+  }
+
+  <!-- Talkgroup preview + import -->
+  @if (result?.systems?.length) {
+    <mat-divider style="margin:12px 0"></mat-divider>
+    <p class="mat-body" style="margin-bottom:4px">
+      Select talkgroups to import ({{ result!.systems!.length }} system(s) found)
+    </p>
+
+    @for (sys of result!.systems!; track sys.systemRef; let si = $index) {
+      <div style="margin-bottom:12px">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <p class="mat-body-2" style="margin:0">{{ sys.label }}</p>
+          <div>
+            <button mat-button (click)="selectAll(si)">All</button>
+            <button mat-button (click)="selectNone(si)">None</button>
+          </div>
+        </div>
+        <div style="max-height:200px;overflow-y:auto;border:1px solid rgba(0,0,0,.12);border-radius:4px;padding:4px">
+          @for (tg of sys.talkgroups; track tg.talkgroupRef) {
+            <div style="display:flex;align-items:center;gap:8px;padding:2px 4px">
+              <mat-checkbox
+                [checked]="isSelected(si, tg.talkgroupRef ?? 0)"
+                (change)="toggleTalkgroup(si, tg.talkgroupRef ?? 0)">
+              </mat-checkbox>
+              <span class="mat-caption">
+                <strong>{{ tg.label }}</strong>
+                @if (tg.name && tg.name !== tg.label) { — {{ tg.name }} }
+                @if (tg.frequency) { &nbsp;{{ tg.frequency | number:'1.4-4' }} MHz }
+              </span>
+            </div>
+          }
+        </div>
+      </div>
+    }
+
+    <div class="row bottom">
+      <button mat-raised-button color="primary" (click)="import()" [disabled]="loading">
+        <mat-icon>download</mat-icon>
+        Import Selected
+      </button>
+    </div>
+    <p class="mat-caption" style="margin-top:4px">
+      Imports to the Config panel for review. Click Save in Config to persist.
+    </p>
+  }
+}
+
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<!-- OFFLINE SNAPSHOTS TAB                                                     -->
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+@if (activeTab === 'snapshots') {
+
+  <div class="row" style="margin-bottom:8px">
+    <p>
+      <span class="mat-body">Offline Snapshots</span><br>
+      <span class="mat-caption">
+        Full state datasets downloaded from RadioReference. Import any county without an internet connection.
+      </span>
+    </p>
+    <button mat-icon-button (click)="refreshSnapshots()" [disabled]="snapshotsLoading" matTooltip="Refresh list">
+      <mat-icon>refresh</mat-icon>
+    </button>
+  </div>
+
+  @if (snapshotsLoading) {
+    <p class="mat-caption text-center">Loading…</p>
+  } @else if (!snapshots.length) {
+    <div style="text-align:center;padding:24px 0;color:gray">
+      <mat-icon style="font-size:36px;height:36px;width:36px">storage</mat-icon>
+      <p class="mat-body-2" style="margin:8px 0 4px">No snapshots yet</p>
+      <p class="mat-caption">
+        Switch to <strong>Live Import</strong>, select a state and load its counties,
+        then click <em>Download State</em> to save an offline copy.
+      </p>
+    </div>
+  } @else {
+    <!-- Snapshot list -->
+    <div style="border:1px solid rgba(0,0,0,.12);border-radius:4px;overflow:hidden;margin-bottom:16px">
+      @for (snap of snapshots; track snap.stateId) {
+        <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid rgba(0,0,0,.06)"
+             [style.background]="offlineSelectedStateId === snap.stateId ? 'rgba(var(--mat-sys-primary-rgb),.08)' : ''">
+          <div style="flex:1;cursor:pointer" (click)="loadOfflineCounties(snap.stateId)">
+            <span class="mat-body-2">{{ snap.stateName }} ({{ snap.stateAbbr }})</span>
+            <span class="mat-caption" style="margin-left:8px;color:gray">
+              {{ snap.countyCount }} counties
+            </span>
+            <span class="mat-caption" style="margin-left:8px;color:gray">
+              · {{ snap.downloadedAt | date:'MMM d, y' }}
+            </span>
+          </div>
+          <button mat-icon-button color="warn" (click)="deleteSnapshot(snap.stateId)"
+                  matTooltip="Delete snapshot">
+            <mat-icon>delete</mat-icon>
+          </button>
+        </div>
+      }
+    </div>
+
+    <!-- Offline county picker -->
+    @if (offlineSelectedStateId) {
+      <div class="row">
+        <p>
+          <span class="mat-body">County / Agency</span><br>
+          <span class="mat-caption">Select a county to preview and import from the cached snapshot.</span>
+        </p>
+        <mat-form-field>
+          <mat-select placeholder="Select county"
+                      [(ngModel)]="offlineSelectedCountyId"
+                      (ngModelChange)="loadOfflineCounty($event)">
+            @for (c of offlineCounties; track c.id) {
+              <mat-option [value]="c.id">{{ c.name }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+      </div>
+    }
+
+    @if (offlineLoading) {
+      <p class="mat-caption text-center" style="margin:8px 0">Loading…</p>
+    }
+
+    <!-- UDP Port Base (shared) -->
+    @if (offlineSelectedStateId) {
+      <div class="row">
+        <p>
+          <span class="mat-body">UDP Port Base</span><br>
+          <span class="mat-caption">Starting UDP port for suggested bridge channels.</span>
+        </p>
+        <mat-form-field>
+          <input type="number" min="1024" max="65000" step="1" matInput [(ngModel)]="portBase">
+        </mat-form-field>
+      </div>
+    }
+
+    <!-- Offline talkgroup preview + import -->
+    @if (offlineResult?.systems?.length) {
+      <mat-divider style="margin:12px 0"></mat-divider>
+      <p class="mat-body" style="margin-bottom:4px">
+        Select talkgroups to import ({{ offlineResult!.systems!.length }} system(s) found)
+      </p>
+
+      @for (sys of offlineResult!.systems!; track sys.systemRef; let si = $index) {
+        <div style="margin-bottom:12px">
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <p class="mat-body-2" style="margin:0">{{ sys.label }}</p>
+            <div>
+              <button mat-button (click)="selectOfflineAll(si)">All</button>
+              <button mat-button (click)="selectOfflineNone(si)">None</button>
+            </div>
+          </div>
+          <div style="max-height:200px;overflow-y:auto;border:1px solid rgba(0,0,0,.12);border-radius:4px;padding:4px">
+            @for (tg of sys.talkgroups; track tg.talkgroupRef) {
+              <div style="display:flex;align-items:center;gap:8px;padding:2px 4px">
+                <mat-checkbox
+                  [checked]="isOfflineSelected(si, tg.talkgroupRef ?? 0)"
+                  (change)="toggleOfflineTalkgroup(si, tg.talkgroupRef ?? 0)">
+                </mat-checkbox>
+                <span class="mat-caption">
+                  <strong>{{ tg.label }}</strong>
+                  @if (tg.name && tg.name !== tg.label) { — {{ tg.name }} }
+                  @if (tg.frequency) { &nbsp;{{ tg.frequency | number:'1.4-4' }} MHz }
+                </span>
+              </div>
+            }
+          </div>
+        </div>
+      }
+
+      <div class="row bottom">
+        <button mat-raised-button color="primary" (click)="importOffline()" [disabled]="offlineLoading">
+          <mat-icon>download</mat-icon>
+          Import Selected
+        </button>
+      </div>
+      <p class="mat-caption" style="margin-top:4px">
+        Imports to the Config panel for review. Click Save in Config to persist.
+      </p>
+    }
+  }
+}

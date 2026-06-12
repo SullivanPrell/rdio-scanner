@@ -32,20 +32,26 @@ import (
 )
 
 type Options struct {
-	AudioConversion             uint   `json:"audioConversion"`
-	AutoPopulate                bool   `json:"autoPopulate"`
-	Branding                    string `json:"branding"`
-	DimmerDelay                 uint   `json:"dimmerDelay"`
-	DisableDuplicateDetection   bool   `json:"disableDuplicateDetection"`
-	DuplicateDetectionTimeFrame uint   `json:"duplicateDetectionTimeFrame"`
-	Email                       string `json:"email"`
-	KeypadBeeps                 string `json:"keypadBeeps"`
-	MaxClients                  uint   `json:"maxClients"`
-	PlaybackGoesLive            bool   `json:"playbackGoesLive"`
-	PruneDays                   uint   `json:"pruneDays"`
-	ShowListenersCount          bool   `json:"showListenersCount"`
-	SortTalkgroups              bool   `json:"sortTalkgroups"`
-	Time12hFormat               bool   `json:"time12hFormat"`
+	AudioConversion             uint                  `json:"audioConversion"`
+	AutoPopulate                bool                  `json:"autoPopulate"`
+	BridgeChannels              []BridgeChannelConfig `json:"bridgeChannels"`
+	BridgeEnabled               bool                  `json:"bridgeEnabled"`
+	BridgeHost                  string                `json:"bridgeHost"`
+	BridgePort                  uint                  `json:"bridgePort"`
+	Branding                    string                `json:"branding"`
+	DimmerDelay                 uint                  `json:"dimmerDelay"`
+	DisableDuplicateDetection   bool                  `json:"disableDuplicateDetection"`
+	DuplicateDetectionTimeFrame uint                  `json:"duplicateDetectionTimeFrame"`
+	Email                       string                `json:"email"`
+	KeypadBeeps                 string                `json:"keypadBeeps"`
+	MaxClients                  uint                  `json:"maxClients"`
+	PlaybackGoesLive            bool                  `json:"playbackGoesLive"`
+	PruneDays                   uint                  `json:"pruneDays"`
+	SDRangelBinaryPath          string                `json:"sdrangelBinaryPath"`
+	SDRangelContainerName       string                `json:"sdrangelContainerName"`
+	ShowListenersCount          bool                  `json:"showListenersCount"`
+	SortTalkgroups              bool                  `json:"sortTalkgroups"`
+	Time12hFormat               bool                  `json:"time12hFormat"`
 	adminPassword               string
 	adminPasswordNeedChange     bool
 	mutex                       sync.Mutex
@@ -81,6 +87,30 @@ func (options *Options) FromMap(m map[string]any) *Options {
 		options.AutoPopulate = v
 	default:
 		options.AutoPopulate = defaults.options.autoPopulate
+	}
+
+	switch v := m["bridgeEnabled"].(type) {
+	case bool:
+		options.BridgeEnabled = v
+	}
+
+	switch v := m["bridgeHost"].(type) {
+	case string:
+		options.BridgeHost = v
+	}
+
+	switch v := m["bridgePort"].(type) {
+	case float64:
+		options.BridgePort = uint(v)
+	}
+
+	switch v := m["bridgeChannels"].(type) {
+	case []any:
+		if b, err := json.Marshal(v); err == nil {
+			json.Unmarshal(b, &options.BridgeChannels)
+		}
+	default:
+		options.BridgeChannels = []BridgeChannelConfig{}
 	}
 
 	switch v := m["branding"].(type) {
@@ -149,6 +179,16 @@ func (options *Options) FromMap(m map[string]any) *Options {
 		options.PruneDays = defaults.options.pruneDays
 	}
 
+	switch v := m["sdrangelBinaryPath"].(type) {
+	case string:
+		options.SDRangelBinaryPath = v
+	}
+
+	switch v := m["sdrangelContainerName"].(type) {
+	case string:
+		options.SDRangelContainerName = v
+	}
+
 	switch v := m["showListenersCount"].(type) {
 	case bool:
 		options.ShowListenersCount = v
@@ -194,6 +234,10 @@ func (options *Options) Read(db *Database) error {
 	options.adminPasswordNeedChange = defaults.adminPasswordNeedChange
 	options.AudioConversion = defaults.options.audioConversion
 	options.AutoPopulate = defaults.options.autoPopulate
+	options.BridgeChannels = []BridgeChannelConfig{}
+	options.BridgeEnabled = false
+	options.BridgeHost = ""
+	options.BridgePort = 0
 	options.DimmerDelay = defaults.options.dimmerDelay
 	options.DisableDuplicateDetection = defaults.options.disableDuplicateDetection
 	options.DuplicateDetectionTimeFrame = defaults.options.duplicateDetectionTimeFrame
@@ -259,6 +303,29 @@ func (options *Options) Read(db *Database) error {
 					options.AutoPopulate = v
 				}
 			}
+		case "bridgeEnabled":
+			if err = json.Unmarshal([]byte(value.String), &f); err == nil {
+				switch v := f.(type) {
+				case bool:
+					options.BridgeEnabled = v
+				}
+			}
+		case "bridgeHost":
+			if err = json.Unmarshal([]byte(value.String), &f); err == nil {
+				switch v := f.(type) {
+				case string:
+					options.BridgeHost = v
+				}
+			}
+		case "bridgePort":
+			if err = json.Unmarshal([]byte(value.String), &f); err == nil {
+				switch v := f.(type) {
+				case float64:
+					options.BridgePort = uint(v)
+				}
+			}
+		case "bridgeChannels":
+			json.Unmarshal([]byte(value.String), &options.BridgeChannels)
 		case "branding":
 			if err = json.Unmarshal([]byte(value.String), &f); err == nil {
 				switch v := f.(type) {
@@ -336,6 +403,20 @@ func (options *Options) Read(db *Database) error {
 					options.secret = newSecret(n)
 				}
 			}
+		case "sdrangelBinaryPath":
+			if err = json.Unmarshal([]byte(value.String), &f); err == nil {
+				switch v := f.(type) {
+				case string:
+					options.SDRangelBinaryPath = v
+				}
+			}
+		case "sdrangelContainerName":
+			if err = json.Unmarshal([]byte(value.String), &f); err == nil {
+				switch v := f.(type) {
+				case string:
+					options.SDRangelContainerName = v
+				}
+			}
 		case "showListenersCount":
 			if err = json.Unmarshal([]byte(value.String), &f); err == nil {
 				switch v := f.(type) {
@@ -400,6 +481,10 @@ func (options *Options) Write(db *Database) error {
 	set("adminPassword", options.adminPassword)
 	set("adminPasswordNeedChange", options.adminPasswordNeedChange)
 	set("autoPopulate", options.AutoPopulate)
+	set("bridgeEnabled", options.BridgeEnabled)
+	set("bridgeHost", options.BridgeHost)
+	set("bridgePort", options.BridgePort)
+	set("bridgeChannels", options.BridgeChannels)
 	set("branding", options.Branding)
 	set("dimmerDelay", options.DimmerDelay)
 	set("disableDuplicateDetection", options.DisableDuplicateDetection)
@@ -410,6 +495,8 @@ func (options *Options) Write(db *Database) error {
 	set("playbackGoesLive", options.PlaybackGoesLive)
 	set("pruneDays", options.PruneDays)
 	set("secret", options.secret)
+	set("sdrangelBinaryPath", options.SDRangelBinaryPath)
+	set("sdrangelContainerName", options.SDRangelContainerName)
 	set("showListenersCount", options.ShowListenersCount)
 	set("sortTalkgroups", options.SortTalkgroups)
 	set("time12hFormat", options.Time12hFormat)

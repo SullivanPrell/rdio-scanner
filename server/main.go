@@ -128,6 +128,36 @@ func main() {
 
 	http.HandleFunc("/api/admin/user-remove", controller.Admin.UserRemoveHandler)
 
+	http.HandleFunc("/api/admin/sdrangel/status", controller.Admin.SDRangelStatusHandler)
+
+	http.HandleFunc("/api/admin/sdrangel/provision", controller.Admin.SDRangelProvisionHandler)
+
+	http.HandleFunc("/api/admin/sdrangel/service", controller.Admin.SDRangelServiceStatusHandler)
+
+	http.HandleFunc("/api/admin/sdrangel/service/action", controller.Admin.SDRangelServiceActionHandler)
+
+	http.HandleFunc("/api/admin/sdrangel/service/logs", controller.Admin.SDRangelServiceLogsHandler)
+
+	http.HandleFunc("/api/admin/import/frs", controller.Admin.ImportFRSHandler)
+
+	http.HandleFunc("/api/admin/import/gmrs", controller.Admin.ImportGMRSHandler)
+
+	http.HandleFunc("/api/admin/import/chirp", controller.Admin.ImportChirpHandler)
+
+	http.HandleFunc("/api/admin/import/rr-states", controller.Admin.ImportRRStatesHandler)
+
+	http.HandleFunc("/api/admin/import/rr-counties", controller.Admin.ImportRRCountiesHandler)
+
+	http.HandleFunc("/api/admin/import/rr-county", controller.Admin.ImportRRCountyHandler)
+
+	http.HandleFunc("/api/admin/import/rr-state-download", controller.Admin.RRStateDownloadHandler)
+
+	http.HandleFunc("/api/admin/import/rr-snapshots", controller.Admin.RRSnapshotsHandler)
+
+	http.HandleFunc("/api/admin/import/rr-snapshot-counties", controller.Admin.RRSnapshotCountiesHandler)
+
+	http.HandleFunc("/api/admin/import/rr-snapshot-county", controller.Admin.RRSnapshotCountyImportHandler)
+
 	http.HandleFunc("/api/call-upload", controller.Api.CallUploadHandler)
 
 	http.HandleFunc("/api/trunk-recorder-call-upload", controller.Api.TrunkRecorderCallUploadHandler)

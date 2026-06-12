@@ -6,6 +6,30 @@
 
 You can listen to [Rdio Scanner](https://github.com/chuot/rdio-scanner) on any modern browsers using the integrated web app.
 
+## Fork additions
+
+This fork of rdio-scanner extends the upstream project with several integrated features aimed at making deployment and configuration more self-contained.
+
+### RadioReference integration
+
+The admin tools panel includes a live RadioReference importer that pulls county-level talkgroup and frequency data directly from RadioReference.com using your subscriber credentials. Data arrives pre-configured with system references and suggested bridge channel assignments.
+
+An **offline snapshot** system allows entire US state datasets to be downloaded and cached locally on the server. Cached states appear in a separate tab where any county can be browsed and imported at any time without an internet connection, making it practical to reconfigure in the field or on an air-gapped network.
+
+### SDRangel bridge
+
+rdio-scanner can now drive [SDRangel](https://github.com/f4exb/sdrangel)'s headless server (`sdrangelsrv`) directly, eliminating the need for a separate recorder. The bridge manages demodulator channel configuration via the sdrangelsrv REST API and feeds decoded audio into rdio-scanner's ingest pipeline. Both native installs and Docker-managed containers are supported, with a dedicated admin panel for provisioning channels, monitoring service health, and viewing live logs.
+
+### Bundled Docker stack
+
+A `docker-compose.yml` and `start.sh` launcher provide a one-command deployment of the full rdio-scanner + sdrangelsrv stack. `start.sh` handles first-run configuration, optional source builds of SDRangel, prebuilt image fallback, and full lifecycle management (start, stop, restart, logs, status).
+
+### Raspberry Pi deployment
+
+`setup.sh` at the repo root handles end-to-end setup on a Raspberry Pi 5 directly from a fresh clone: installs system packages, builds the server binary natively, configures RTL-SDR udev rules and kernel driver blacklisting, creates the service account, and enables auto-start via systemd.
+
+`sdr-linux/` contains scripts for building customised Raspberry Pi OS Lite images (arm64 for Pi 5, armhf for Pi 2B) with all of the above pre-installed, suitable for flashing directly to an SD card.
+
 ## Recorders compatibility
 
 [Rdio Scanner](https://github.com/chuot/rdio-scanner) works with any radio recorder, as long as they can create audio files separated by conversations or transmissions.

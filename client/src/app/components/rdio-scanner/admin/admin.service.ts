@@ -144,9 +144,109 @@ export interface LogsQueryOptions {
     sort: number;
 }
 
+export interface BridgeChannelConfig {
+    channelIndex?: number;
+    deviceSetIndex?: number;
+    frequencyHz?: number;
+    label?: string;
+    protocol?: 'nfm' | 'dsd' | 'nxdn';
+    sampleRate?: number;
+    systemRef?: number;
+    talkgroupRef?: number;
+    udpPort?: number;
+}
+
+export interface SDRangelChannel {
+    index?: number;
+    idText?: string;
+    title?: string;
+    direction?: number;
+}
+
+export interface SDRangelDeviceSet {
+    samplingDeviceIndex?: number;
+    samplingDeviceHwType?: string;
+    channels?: SDRangelChannel[];
+}
+
+export interface SDRangelStatus {
+    connected: boolean;
+    version?: string;
+    os?: string;
+    deviceSets?: SDRangelDeviceSet[];
+}
+
+export interface SDRangelDeviceSetConfig {
+    index: number;
+    hwType: string;
+    sequence: number;
+    centerFrequencyHz: number;
+    sampleRateHz: number;
+}
+
+export interface SDRangelProvisionResult {
+    success: boolean;
+    messages: string[];
+}
+
+export interface SDRangelServiceStatus {
+    running: boolean;
+    mode: 'docker' | 'native' | 'unavailable';
+    message?: string;
+    containerId?: string;
+    containerName?: string;
+    pid?: number;
+    startedAt?: string;
+    uptimeSeconds?: number;
+}
+
+export interface SDRangelServiceResult {
+    success: boolean;
+    message: string;
+}
+
+export interface ImportResult {
+    systems?: System[];
+    groups?: Group[];
+    tags?: Tag[];
+    channels?: BridgeChannelConfig[];
+}
+
+export interface RRSnapshotInfo {
+    stateId: number;
+    stateName: string;
+    stateAbbr: string;
+    downloadedAt: string;
+    countyCount: number;
+}
+
+export interface RRDownloadJobStatus {
+    done: boolean;
+    error?: string;
+    progress: number;
+    countyTotal: number;
+    countyDone: number;
+    stateId: number;
+}
+
+export interface RRState {
+    id: number;
+    name: string;
+    abbr: string;
+}
+
+export interface RRCounty {
+    id: number;
+    name: string;
+}
+
 export interface Options {
     audioConversion?: 0 | 1 | 2 | 3;
     autoPopulate?: boolean;
+    bridgeChannels?: BridgeChannelConfig[];
+    bridgeEnabled?: boolean;
+    bridgeHost?: string;
+    bridgePort?: number;
     branding?: string;
     dimmerDelay?: number;
     disableDuplicateDetection?: boolean;
@@ -156,6 +256,8 @@ export interface Options {
     maxClients?: number;
     playbackGoesLive?: boolean;
     pruneDays?: number;
+    sdrangelBinaryPath?: string;
+    sdrangelContainerName?: string;
     showListenersCount?: boolean;
     sortTalkgroups?: boolean;
     time12hFormat?: boolean;
@@ -223,6 +325,21 @@ enum url {
     logout = 'logout',
     logs = 'logs',
     password = 'password',
+    sdrangelStatus = 'sdrangel/status',
+    sdrangelProvision = 'sdrangel/provision',
+    sdrangelService = 'sdrangel/service',
+    sdrangelServiceAction = 'sdrangel/service/action',
+    sdrangelServiceLogs = 'sdrangel/service/logs',
+    importFRS = 'import/frs',
+    importGMRS = 'import/gmrs',
+    importChirp = 'import/chirp',
+    importRRStates = 'import/rr-states',
+    importRRCounties = 'import/rr-counties',
+    importRRCounty = 'import/rr-county',
+    rrStateDownload = 'import/rr-state-download',
+    rrSnapshots = 'import/rr-snapshots',
+    rrSnapshotCounties = 'import/rr-snapshot-counties',
+    rrSnapshotCounty = 'import/rr-snapshot-county',
 }
 
 const SESSION_STORAGE_KEY = 'rdio-scanner-admin-token';
@@ -480,6 +597,225 @@ export class RdioScannerAdminService implements OnDestroy {
         }
     }
 
+    async getSDRangelStatus(): Promise<SDRangelStatus> {
+        try {
+            return await firstValueFrom(this.ngHttpClient.get<SDRangelStatus>(
+                this.getUrl(url.sdrangelStatus),
+                { headers: this.getHeaders(), responseType: 'json' },
+            ));
+        } catch (error) {
+            this.errorHandler(error);
+            return { connected: false };
+        }
+    }
+
+    async provisionSDRangel(deviceSets: SDRangelDeviceSetConfig[]): Promise<SDRangelProvisionResult> {
+        try {
+            return await firstValueFrom(this.ngHttpClient.post<SDRangelProvisionResult>(
+                this.getUrl(url.sdrangelProvision),
+                { deviceSets },
+                { headers: this.getHeaders(), responseType: 'json' },
+            ));
+        } catch (error) {
+            this.errorHandler(error);
+            return { success: false, messages: [String(error)] };
+        }
+    }
+
+    async getSDRangelServiceStatus(): Promise<SDRangelServiceStatus> {
+        try {
+            return await firstValueFrom(this.ngHttpClient.get<SDRangelServiceStatus>(
+                this.getUrl(url.sdrangelService),
+                { headers: this.getHeaders(), responseType: 'json' },
+            ));
+        } catch (error) {
+            this.errorHandler(error);
+            return { running: false, mode: 'unavailable', message: String(error) };
+        }
+    }
+
+    async controlSDRangelService(action: 'start' | 'stop' | 'restart', binaryPath?: string, args?: string): Promise<SDRangelServiceResult> {
+        try {
+            return await firstValueFrom(this.ngHttpClient.post<SDRangelServiceResult>(
+                this.getUrl(url.sdrangelServiceAction),
+                { action, binaryPath: binaryPath ?? '', args: args ?? '' },
+                { headers: this.getHeaders(), responseType: 'json' },
+            ));
+        } catch (error) {
+            this.errorHandler(error);
+            return { success: false, message: String(error) };
+        }
+    }
+
+    async getSDRangelServiceLogs(): Promise<string[]> {
+        try {
+            return await firstValueFrom(this.ngHttpClient.get<string[]>(
+                this.getUrl(url.sdrangelServiceLogs),
+                { headers: this.getHeaders(), responseType: 'json' },
+            ));
+        } catch (error) {
+            this.errorHandler(error);
+            return [];
+        }
+    }
+
+    async importFRS(systemRef: number, portBase: number): Promise<ImportResult> {
+        try {
+            return await firstValueFrom(this.ngHttpClient.post<ImportResult>(
+                this.getUrl(url.importFRS),
+                { systemRef, portBase },
+                { headers: this.getHeaders(), responseType: 'json' },
+            ));
+        } catch (error) {
+            this.errorHandler(error);
+            return {};
+        }
+    }
+
+    async importGMRS(systemRef: number, portBase: number): Promise<ImportResult> {
+        try {
+            return await firstValueFrom(this.ngHttpClient.post<ImportResult>(
+                this.getUrl(url.importGMRS),
+                { systemRef, portBase },
+                { headers: this.getHeaders(), responseType: 'json' },
+            ));
+        } catch (error) {
+            this.errorHandler(error);
+            return {};
+        }
+    }
+
+    async importChirp(file: File, systemLabel: string, systemRef: number, portBase: number): Promise<ImportResult> {
+        try {
+            const form = new FormData();
+            form.append('file', file);
+            form.append('systemLabel', systemLabel);
+            form.append('systemRef', String(systemRef));
+            form.append('portBase', String(portBase));
+            return await firstValueFrom(this.ngHttpClient.post<ImportResult>(
+                this.getUrl(url.importChirp),
+                form,
+                { headers: this.getHeaders(), responseType: 'json' },
+            ));
+        } catch (error) {
+            this.errorHandler(error);
+            return {};
+        }
+    }
+
+    async importRRStates(username: string, password: string, appKey: string): Promise<RRState[]> {
+        try {
+            return await firstValueFrom(this.ngHttpClient.post<RRState[]>(
+                this.getUrl(url.importRRStates),
+                { username, password, appKey },
+                { headers: this.getHeaders(), responseType: 'json' },
+            ));
+        } catch (error) {
+            this.errorHandler(error);
+            return [];
+        }
+    }
+
+    async importRRCounties(username: string, password: string, appKey: string, stateId: number): Promise<RRCounty[]> {
+        try {
+            return await firstValueFrom(this.ngHttpClient.post<RRCounty[]>(
+                this.getUrl(url.importRRCounties),
+                { username, password, appKey, stateId },
+                { headers: this.getHeaders(), responseType: 'json' },
+            ));
+        } catch (error) {
+            this.errorHandler(error);
+            return [];
+        }
+    }
+
+    async importRRCounty(username: string, password: string, appKey: string, countyId: number, systemRef: number, portBase: number): Promise<ImportResult> {
+        try {
+            return await firstValueFrom(this.ngHttpClient.post<ImportResult>(
+                this.getUrl(url.importRRCounty),
+                { username, password, appKey, countyId, systemRef, portBase },
+                { headers: this.getHeaders(), responseType: 'json' },
+            ));
+        } catch (error) {
+            this.errorHandler(error);
+            return {};
+        }
+    }
+
+    async startRRStateDownload(username: string, password: string, appKey: string, stateId: number, stateName: string, stateAbbr: string): Promise<string> {
+        try {
+            const res = await firstValueFrom(this.ngHttpClient.post<{ jobId: string }>(
+                this.getUrl(url.rrStateDownload),
+                { username, password, appKey, stateId, stateName, stateAbbr },
+                { headers: this.getHeaders(), responseType: 'json' },
+            ));
+            return res.jobId;
+        } catch (error) {
+            this.errorHandler(error);
+            return '';
+        }
+    }
+
+    async getRRDownloadJobStatus(jobId: string): Promise<RRDownloadJobStatus> {
+        try {
+            return await firstValueFrom(this.ngHttpClient.get<RRDownloadJobStatus>(
+                this.getUrl(url.rrStateDownload) + `?jobId=${jobId}`,
+                { headers: this.getHeaders(), responseType: 'json' },
+            ));
+        } catch (error) {
+            this.errorHandler(error);
+            return { done: true, error: String(error), progress: 0, countyTotal: 0, countyDone: 0, stateId: 0 };
+        }
+    }
+
+    async listRRSnapshots(): Promise<RRSnapshotInfo[]> {
+        try {
+            return await firstValueFrom(this.ngHttpClient.get<RRSnapshotInfo[]>(
+                this.getUrl(url.rrSnapshots),
+                { headers: this.getHeaders(), responseType: 'json' },
+            ));
+        } catch (error) {
+            this.errorHandler(error);
+            return [];
+        }
+    }
+
+    async getRRSnapshotCounties(stateId: number): Promise<RRCounty[]> {
+        try {
+            return await firstValueFrom(this.ngHttpClient.get<RRCounty[]>(
+                this.getUrl(url.rrSnapshotCounties) + `?stateId=${stateId}`,
+                { headers: this.getHeaders(), responseType: 'json' },
+            ));
+        } catch (error) {
+            this.errorHandler(error);
+            return [];
+        }
+    }
+
+    async importRRSnapshotCounty(stateId: number, countyId: number, systemRef: number, portBase: number): Promise<ImportResult> {
+        try {
+            return await firstValueFrom(this.ngHttpClient.post<ImportResult>(
+                this.getUrl(url.rrSnapshotCounty),
+                { stateId, countyId, systemRef, portBase },
+                { headers: this.getHeaders(), responseType: 'json' },
+            ));
+        } catch (error) {
+            this.errorHandler(error);
+            return {};
+        }
+    }
+
+    async deleteRRSnapshot(stateId: number): Promise<void> {
+        try {
+            await firstValueFrom(this.ngHttpClient.delete(
+                this.getUrl(url.rrSnapshots),
+                { headers: this.getHeaders(), body: { stateId } },
+            ));
+        } catch (error) {
+            this.errorHandler(error);
+        }
+    }
+
     newAccessForm(access?: Access): FormGroup {
         return this.ngFormBuilder.group({
             id: this.ngFormBuilder.nonNullable.control(access?.id),
@@ -556,10 +892,28 @@ export class RdioScannerAdminService implements OnDestroy {
         });
     }
 
+    newBridgeChannelConfigForm(cfg?: BridgeChannelConfig): FormGroup {
+        return this.ngFormBuilder.group({
+            channelIndex: this.ngFormBuilder.control(cfg?.channelIndex ?? 0, [Validators.required, Validators.min(0)]),
+            deviceSetIndex: this.ngFormBuilder.control(cfg?.deviceSetIndex ?? 0, [Validators.required, Validators.min(0)]),
+            frequencyHz: this.ngFormBuilder.control(cfg?.frequencyHz ?? 0, Validators.min(0)),
+            label: this.ngFormBuilder.control(cfg?.label ?? '', Validators.required),
+            protocol: this.ngFormBuilder.control(cfg?.protocol ?? 'nfm'),
+            sampleRate: this.ngFormBuilder.control(cfg?.sampleRate ?? 8000, [Validators.required, Validators.min(1)]),
+            systemRef: this.ngFormBuilder.control(cfg?.systemRef ?? 1, [Validators.required, Validators.min(1)]),
+            talkgroupRef: this.ngFormBuilder.control(cfg?.talkgroupRef ?? 1, [Validators.required, Validators.min(1)]),
+            udpPort: this.ngFormBuilder.control(cfg?.udpPort ?? 9000, [Validators.required, Validators.min(1), Validators.max(65535)]),
+        });
+    }
+
     newOptionsForm(options?: Options): FormGroup {
         return this.ngFormBuilder.group({
             audioConversion: this.ngFormBuilder.control(options?.audioConversion),
             autoPopulate: this.ngFormBuilder.control(options?.autoPopulate),
+            bridgeChannels: this.ngFormBuilder.array(options?.bridgeChannels?.map((cfg) => this.newBridgeChannelConfigForm(cfg)) ?? []),
+            bridgeEnabled: this.ngFormBuilder.control(options?.bridgeEnabled ?? false),
+            bridgeHost: this.ngFormBuilder.control(options?.bridgeHost ?? '127.0.0.1'),
+            bridgePort: this.ngFormBuilder.control(options?.bridgePort ?? 8091, [Validators.required, Validators.min(1), Validators.max(65535)]),
             branding: this.ngFormBuilder.control(options?.branding),
             dimmerDelay: this.ngFormBuilder.control(options?.dimmerDelay, [Validators.required, Validators.min(0)]),
             disableDuplicateDetection: this.ngFormBuilder.control(options?.disableDuplicateDetection),
@@ -569,6 +923,8 @@ export class RdioScannerAdminService implements OnDestroy {
             maxClients: this.ngFormBuilder.control(options?.maxClients, [Validators.required, Validators.min(1)]),
             playbackGoesLive: this.ngFormBuilder.control(options?.playbackGoesLive),
             pruneDays: this.ngFormBuilder.control(options?.pruneDays, [Validators.required, Validators.min(0)]),
+            sdrangelBinaryPath: this.ngFormBuilder.control(options?.sdrangelBinaryPath ?? ''),
+            sdrangelContainerName: this.ngFormBuilder.control(options?.sdrangelContainerName ?? ''),
             showListenersCount: this.ngFormBuilder.control(options?.showListenersCount),
             sortTalkgroups: this.ngFormBuilder.control(options?.sortTalkgroups),
             time12hFormat: this.ngFormBuilder.control(options?.time12hFormat),

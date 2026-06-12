@@ -2,6 +2,33 @@
     <mat-expansion-panel>
         <mat-expansion-panel-header>
             <mat-panel-title>
+                <mat-icon>settings_input_antenna</mat-icon>
+                SDRangel Setup
+            </mat-panel-title>
+        </mat-expansion-panel-header>
+        <rdio-scanner-admin-sdrangel-setup></rdio-scanner-admin-sdrangel-setup>
+    </mat-expansion-panel>
+    <mat-expansion-panel>
+        <mat-expansion-panel-header>
+            <mat-panel-title>
+                <mat-icon>add_circle</mat-icon>
+                Quick-Add Channels
+            </mat-panel-title>
+        </mat-expansion-panel-header>
+        <rdio-scanner-admin-quick-add (config)="config.emit($event)"></rdio-scanner-admin-quick-add>
+    </mat-expansion-panel>
+    <mat-expansion-panel>
+        <mat-expansion-panel-header>
+            <mat-panel-title>
+                <mat-icon>cloud_download</mat-icon>
+                RadioReference Import
+            </mat-panel-title>
+        </mat-expansion-panel-header>
+        <rdio-scanner-admin-radioreference (config)="config.emit($event)"></rdio-scanner-admin-radioreference>
+    </mat-expansion-panel>
+    <mat-expansion-panel>
+        <mat-expansion-panel-header>
+            <mat-panel-title>
                 <mat-icon>description</mat-icon>
                 Import Talkgroups
             </mat-panel-title>

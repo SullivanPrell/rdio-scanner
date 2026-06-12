@@ -1,0 +1,87 @@
+##############################################################################
+# Rdio Scanner + SDRangel — full stack compose
+#
+# Quick start (Pi 5):
+#   docker compose up -d
+#
+# First-time SDRangel image build (~15-30 min on Pi 5):
+#   docker compose build sdrangelsrv
+#   docker compose up -d
+#
+# Admin UI: http://<pi-ip>:3000/admin
+#   Default password: password  (change immediately!)
+#
+# The rdio-scanner admin "Tools → SDRangel Setup" panel lets you:
+#   - Start / stop / restart sdrangelsrv from the browser
+#   - Provision SDRangel channels to match your Bridge Config
+#   - Import IndyCar / FRS / GMRS / CHIRP CSV channel lists
+##############################################################################
+
+services:
+
+  # ── rdio-scanner ──────────────────────────────────────────────────────────
+  rdio-scanner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rdio-scanner
+    ports:
+      - "3000:3000"
+    volumes:
+      - rdio-data:/app/data
+      # Docker socket lets rdio-scanner start/stop sdrangelsrv from the UI
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      # Bridge talks to sdrangelsrv by service name on the compose network
+      RDIO_BRIDGE_HOST: "sdrangelsrv"
+      RDIO_BRIDGE_PORT: "8091"
+    depends_on:
+      sdrangelsrv:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - rdioscanner
+
+  # ── SDRangel headless server ──────────────────────────────────────────────
+  sdrangelsrv:
+    build:
+      context: ${SDRANGEL_SOURCE:-~/developer/sdrangel}
+      dockerfile: ${PWD}/Dockerfile.sdrangel
+    # Alternatively, if a pre-built ARM64 image exists:
+    # image: f4exb/sdrangelsrv:latest
+    container_name: sdrangelsrv
+    ports:
+      - "8091:8091"
+      # UDP range for bridge audio streams (one port per monitored channel)
+      - "9000-9063:9000-9063/udp"
+    # RTL-SDR USB device access
+    # Option A: pass through entire USB bus (works for most Pi setups)
+    privileged: true
+    # Option B: specific device (more secure, but device path changes on replug)
+    # devices:
+    #   - /dev/bus/usb:/dev/bus/usb
+    #   - /dev/rtl_sdr0:/dev/rtl_sdr0
+    volumes:
+      - sdrangel-config:/config
+    command:
+      - "-f"
+      - "/config/sdrangel.json"
+      - "-p"
+      - "8091"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8091/sdrangel || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - rdioscanner
+
+volumes:
+  rdio-data:
+  sdrangel-config:
+
+networks:
+  rdioscanner:
+    driver: bridge

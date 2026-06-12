@@ -28,7 +28,11 @@ import { RdioScannerAdminApikeysComponent } from './config/apikeys/apikeys.compo
 import { RdioScannerAdminDirwatchComponent } from './config/dirwatch/dirwatch.component';
 import { RdioScannerAdminDownstreamsComponent } from './config/downstreams/downstreams.component';
 import { RdioScannerAdminGroupsComponent } from './config/groups/groups.component';
+import { RdioScannerAdminBridgeComponent } from './config/bridge/bridge.component';
 import { RdioScannerAdminOptionsComponent } from './config/options/options.component';
+import { RdioScannerAdminSDRangelSetupComponent } from './tools/sdrangel-setup/sdrangel-setup.component';
+import { RdioScannerAdminQuickAddComponent } from './tools/quick-add/quick-add.component';
+import { RdioScannerAdminRadioReferenceComponent } from './tools/radioreference/radioreference.component';
 import { RdioScannerAdminSiteComponent } from './config/systems/site/site.component';
 import { RdioScannerAdminSystemsSelectComponent } from './config/systems/select/select.component';
 import { RdioScannerAdminSystemComponent } from './config/systems/system/system.component';
@@ -47,6 +51,10 @@ import { RdioScannerAdminPasswordComponent } from './tools/password/password.com
 
 @NgModule({ declarations: [
         RdioScannerAdminComponent,
+        RdioScannerAdminBridgeComponent,
+        RdioScannerAdminSDRangelSetupComponent,
+        RdioScannerAdminQuickAddComponent,
+        RdioScannerAdminRadioReferenceComponent,
         RdioScannerAdminConfigComponent,
         RdioScannerAdminAccessComponent,
         RdioScannerAdminApikeysComponent,

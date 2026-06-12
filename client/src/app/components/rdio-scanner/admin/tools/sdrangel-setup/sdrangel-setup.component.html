@@ -1,0 +1,299 @@
+<!-- ── Setup steps overview ───────────────────────────────────────────────── -->
+<div style="background:rgba(0,0,0,.03);border-radius:4px;padding:12px;margin-bottom:16px">
+  <p class="mat-body-2" style="margin:0 0 6px">Getting started</p>
+  <ol style="margin:0;padding-left:20px;line-height:1.8" class="mat-body-2">
+    <li>
+      Enable the <strong>SDRangel Bridge</strong> in <em>Config → Bridge</em> and add your channels.
+      Set <em>Binary Path</em> (native) or <em>Container Name</em> (Docker) there too.
+    </li>
+    <li>Use the <strong>Service</strong> controls below to start <code>sdrangelsrv</code>.</li>
+    <li>Click <strong>Provision SDRangel</strong> once it's running to push your channel config.</li>
+  </ol>
+</div>
+
+<!-- ── Service Lifecycle Control ───────────────────────────────────────────── -->
+<div style="border:1px solid rgba(0,0,0,.12);border-radius:4px;padding:12px;margin-bottom:16px">
+  <p class="mat-body" style="margin:0 0 8px;font-weight:500">sdrangelsrv Service</p>
+
+  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+    <!-- Status dot + label -->
+    <span style="display:inline-flex;align-items:center;gap:6px">
+      <span style="width:10px;height:10px;border-radius:50%;display:inline-block"
+            [style.background]="serviceStatusColor"></span>
+      <span class="mat-body-2">{{ serviceStatusLabel }}</span>
+      @if (serviceStatus?.uptimeSeconds) {
+        <span class="mat-caption" style="color:gray">up {{ formatUptime(serviceStatus!.uptimeSeconds) }}</span>
+      }
+    </span>
+
+    @if (serviceStatus?.containerId) {
+      <span class="mat-caption" style="color:gray;font-family:monospace">{{ serviceStatus!.containerId }}</span>
+    }
+    @if (serviceStatus?.pid) {
+      <span class="mat-caption" style="color:gray">pid {{ serviceStatus!.pid }}</span>
+    }
+
+    <span style="flex:1"></span>
+
+    <!-- Action buttons -->
+    <button mat-stroked-button color="primary"
+            (click)="startService()"
+            [disabled]="serviceLoading || serviceStatus?.running"
+            matTooltip="Start sdrangelsrv">
+      <mat-icon>play_arrow</mat-icon> Start
+    </button>
+
+    <button mat-stroked-button color="warn"
+            (click)="stopService()"
+            [disabled]="serviceLoading || !serviceStatus?.running"
+            matTooltip="Stop sdrangelsrv">
+      <mat-icon>stop</mat-icon> Stop
+    </button>
+
+    <button mat-stroked-button
+            (click)="restartService()"
+            [disabled]="serviceLoading"
+            matTooltip="Restart sdrangelsrv">
+      <mat-icon>restart_alt</mat-icon> Restart
+    </button>
+
+    <button mat-icon-button (click)="loadLogs()" [disabled]="serviceLoading"
+            matTooltip="View recent logs">
+      <mat-icon>article</mat-icon>
+    </button>
+  </div>
+
+  @if (serviceStatus?.message && serviceStatus?.mode !== 'docker') {
+    <p class="mat-caption" style="margin:6px 0 0;color:gray">{{ serviceStatus!.message }}</p>
+  }
+</div>
+
+<!-- ── Install guide (native, binary not found) ────────────────────────────── -->
+@if (needsInstall) {
+  <div style="border:1px solid #ff9800;border-radius:4px;padding:12px;margin-bottom:16px;background:rgba(255,152,0,.06)">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <mat-icon style="color:#ff9800">install_desktop</mat-icon>
+      <span class="mat-body-2" style="color:#ff9800">sdrangelsrv not found — install it first</span>
+      <span style="flex:1"></span>
+      <button mat-icon-button (click)="showInstallGuide = !showInstallGuide"
+              [matTooltip]="showInstallGuide ? 'Hide instructions' : 'Show install instructions'">
+        <mat-icon>{{ showInstallGuide ? 'expand_less' : 'expand_more' }}</mat-icon>
+      </button>
+    </div>
+
+    @if (showInstallGuide) {
+      <p class="mat-caption" style="margin:0 0 8px;color:gray">
+        Choose the method that matches your system. After installing, click
+        <strong>Start</strong> — or set the <em>Binary Path</em> in
+        <em>Config → Bridge</em> if the binary is not on your system <code>PATH</code>.
+      </p>
+
+      <!-- Docker (recommended) -->
+      <div style="margin-bottom:10px">
+        <p class="mat-body-2" style="margin:0 0 4px">
+          <mat-icon style="vertical-align:middle;font-size:16px">smart_toy</mat-icon>
+          Docker / Docker Compose (recommended)
+        </p>
+        <p class="mat-caption" style="margin:0 0 4px;color:gray">
+          Use the <code>Dockerfile.sdrangel</code> and <code>docker-compose.yml</code> included in
+          the rdio-scanner repo. Build once, then the UI controls start/stop it automatically.
+        </p>
+        <div style="background:#111;color:#0f0;font-family:monospace;font-size:0.75em;padding:8px;border-radius:4px;white-space:pre-wrap">docker compose build sdrangelsrv
+docker compose up -d</div>
+      </div>
+
+      <!-- apt (Debian/Ubuntu/Pi) -->
+      <div style="margin-bottom:10px">
+        <p class="mat-body-2" style="margin:0 0 4px">
+          <mat-icon style="vertical-align:middle;font-size:16px">terminal</mat-icon>
+          Debian / Ubuntu / Raspberry Pi OS (apt)
+        </p>
+        <div style="background:#111;color:#0f0;font-family:monospace;font-size:0.75em;padding:8px;border-radius:4px;white-space:pre-wrap">sudo apt-get update
+sudo apt-get install -y sdrangel</div>
+        <p class="mat-caption" style="margin:4px 0 0;color:gray">
+          Installs <code>sdrangelsrv</code> to <code>/usr/bin/sdrangelsrv</code>. The packaged
+          version may be older — build from source for the latest.
+        </p>
+      </div>
+
+      <!-- macOS -->
+      <div style="margin-bottom:10px">
+        <p class="mat-body-2" style="margin:0 0 4px">
+          <mat-icon style="vertical-align:middle;font-size:16px">laptop_mac</mat-icon>
+          macOS (Homebrew)
+        </p>
+        <div style="background:#111;color:#0f0;font-family:monospace;font-size:0.75em;padding:8px;border-radius:4px;white-space:pre-wrap">brew install sdrangel</div>
+      </div>
+
+      <!-- Build from source -->
+      <div>
+        <p class="mat-body-2" style="margin:0 0 4px">
+          <mat-icon style="vertical-align:middle;font-size:16px">build</mat-icon>
+          Build from source
+        </p>
+        <div style="background:#111;color:#0f0;font-family:monospace;font-size:0.75em;padding:8px;border-radius:4px;white-space:pre-wrap">git clone https://github.com/f4exb/sdrangel.git
+cd sdrangel
+cmake -DBUILD_GUI=OFF -DBUILD_SERVER=ON -Bbuild -S.
+cmake --build build -j$(nproc)
+sudo cmake --install build</div>
+      </div>
+    }
+  </div>
+}
+
+<!-- ── Docker mode: container not found ────────────────────────────────────── -->
+@if (isDockerMode && !serviceStatus?.running && serviceStatus?.message && !serviceStatus?.containerId) {
+  <div style="border:1px solid #ff9800;border-radius:4px;padding:12px;margin-bottom:16px;background:rgba(255,152,0,.06)">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+      <mat-icon style="color:#ff9800">warning</mat-icon>
+      <span class="mat-body-2" style="color:#ff9800">Container not found</span>
+    </div>
+    <p class="mat-caption" style="margin:0 0 6px;color:gray">{{ serviceStatus!.message }}</p>
+    <p class="mat-caption" style="margin:0">
+      Make sure the <code>sdrangelsrv</code> service is defined in <code>docker-compose.yml</code>
+      and the stack is up (<code>docker compose up -d</code>). Set the correct container name in
+      <em>Config → Bridge → SDRangel Container Name</em>.
+    </p>
+  </div>
+}
+
+<!-- ── Log viewer ──────────────────────────────────────────────────────────── -->
+@if (showLogs) {
+  <div style="background:#111;color:#0f0;font-family:monospace;font-size:0.78em;
+              padding:10px;border-radius:4px;max-height:240px;overflow-y:auto;margin-bottom:16px">
+    @if (serviceLoading) {
+      <p style="color:#888">Loading logs…</p>
+    } @else if (serviceLogs.length === 0) {
+      <p style="color:#888">No log output available.</p>
+    } @else {
+      @for (line of serviceLogs; track $index) {
+        <div style="white-space:pre-wrap;word-break:break-all;line-height:1.4">{{ line }}</div>
+      }
+    }
+  </div>
+}
+
+<!-- ── SDRangel API Connection Status ─────────────────────────────────────── -->
+<div class="row">
+  <p>
+    <span class="mat-body">SDRangel API Connection</span><br>
+    <span class="mat-caption">Reads the SDRangel host/port from your Bridge Config settings.</span>
+  </p>
+  <div style="display:flex;align-items:center;gap:8px">
+    @if (status?.connected) {
+      <mat-icon color="primary">check_circle</mat-icon>
+      <span class="mat-body-2">Connected — SDRangel {{ status?.version }}</span>
+    } @else if (status !== null) {
+      <mat-icon color="warn">cancel</mat-icon>
+      <span class="mat-body-2">Not reachable</span>
+    }
+    <button mat-icon-button (click)="refresh()" [disabled]="loading" matTooltip="Refresh status">
+      <mat-icon>refresh</mat-icon>
+    </button>
+  </div>
+</div>
+
+<!-- ── Current SDRangel device sets ───────────────────────────────────────── -->
+@if (status?.connected && status?.deviceSets?.length) {
+  <p class="mat-caption" style="margin:8px 0 4px">Current device sets in SDRangel:</p>
+  <table style="width:100%;font-size:0.85em;border-collapse:collapse;margin-bottom:12px">
+    <thead>
+      <tr>
+        <th style="text-align:left;padding:2px 8px">Set</th>
+        <th style="text-align:left;padding:2px 8px">HW Type</th>
+        <th style="text-align:left;padding:2px 8px">Channels</th>
+      </tr>
+    </thead>
+    <tbody>
+      @for (ds of status?.deviceSets; track ds.samplingDeviceIndex) {
+        <tr>
+          <td style="padding:2px 8px">{{ ds.samplingDeviceIndex }}</td>
+          <td style="padding:2px 8px">{{ ds.samplingDeviceHwType || '—' }}</td>
+          <td style="padding:2px 8px">{{ ds.channels?.length ?? 0 }}</td>
+        </tr>
+      }
+    </tbody>
+  </table>
+}
+
+<!-- ── Device set provisioning config ─────────────────────────────────────── -->
+@if (deviceSetConfigs.length > 0) {
+  <p class="mat-body" style="margin-top:12px">Device set configuration</p>
+  <p class="mat-caption">
+    Derived from your Bridge Config channels. Adjust center frequencies as needed, then click Provision.
+    SDRangel must be running and reachable.
+  </p>
+
+  @for (ds of deviceSetConfigs; track ds.index; let i = $index) {
+    <div style="border:1px solid rgba(0,0,0,.12);border-radius:4px;padding:12px;margin-bottom:8px">
+      <p class="mat-body-2" style="margin:0 0 8px">Device Set {{ ds.index }}</p>
+      <div class="row">
+        <p><span class="mat-body">HW Type</span></p>
+        <mat-form-field>
+          <mat-select [(value)]="ds.hwType">
+            <mat-option value="RTLSDR">RTL-SDR</mat-option>
+            <mat-option value="HackRF">HackRF</mat-option>
+            <mat-option value="SDRplay">SDRplay</mat-option>
+            <mat-option value="PlutoSDR">PlutoSDR</mat-option>
+          </mat-select>
+        </mat-form-field>
+      </div>
+      <div class="row">
+        <p>
+          <span class="mat-body">Device Sequence</span><br>
+          <span class="mat-caption">0 = first physical dongle, 1 = second, etc.</span>
+        </p>
+        <mat-form-field>
+          <input type="number" min="0" step="1" matInput [(ngModel)]="ds.sequence">
+        </mat-form-field>
+      </div>
+      <div class="row">
+        <p>
+          <span class="mat-body">Center Frequency (Hz)</span><br>
+          <span class="mat-caption">Auto-calculated as midpoint of assigned channels.</span>
+        </p>
+        <mat-form-field>
+          <input type="number" min="1" step="1" matInput [(ngModel)]="ds.centerFrequencyHz">
+        </mat-form-field>
+      </div>
+      <div class="row">
+        <p><span class="mat-body">Sample Rate (Hz)</span></p>
+        <mat-form-field>
+          <input type="number" min="1" step="1" matInput [(ngModel)]="ds.sampleRateHz">
+        </mat-form-field>
+      </div>
+      <p class="mat-caption">
+        Channels: {{ channelsForDeviceSet(ds.index).length }}
+        @for (ch of channelsForDeviceSet(ds.index); track ch.label) {
+          &nbsp;· {{ ch.label }}
+        }
+      </p>
+    </div>
+  }
+
+  <div class="row bottom" style="margin-top:8px">
+    <button mat-raised-button color="primary"
+            (click)="provision()"
+            [disabled]="loading || !status?.connected">
+      <mat-icon>settings_input_antenna</mat-icon>
+      Provision SDRangel
+    </button>
+  </div>
+} @else if (!loading) {
+  <p class="mat-small text-center" style="margin-top:8px">
+    No bridge channels configured — add channels in the Bridge Config panel first.
+  </p>
+}
+
+<!-- ── Provision result ────────────────────────────────────────────────────── -->
+@if (provisionResult) {
+  <div style="margin-top:12px;padding:8px;border-radius:4px;background:rgba(0,0,0,.04)">
+    <p class="mat-body"
+       [style.color]="provisionResult.success ? 'var(--mdc-theme-primary)' : 'var(--mdc-theme-error)'">
+      {{ provisionResult.success ? 'Provision successful' : 'Provision failed' }}
+    </p>
+    @for (msg of provisionResult.messages; track msg) {
+      <p class="mat-caption" style="margin:2px 0">{{ msg }}</p>
+    }
+  </div>
+}
