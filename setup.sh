@@ -118,10 +118,10 @@ build_sdrangel_from_source() {
 
     # Qt5 core modules — try with multimedia extras first, fall back to bare minimum
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        qtbase5-dev libqt5websockets5-dev qtmultimedia5-dev \
+        qtbase5-dev qtbase5-private-dev libqt5websockets5-dev qtmultimedia5-dev \
         libqt5svg5-dev libqt5serialport5-dev qtdeclarative5-dev 2>/dev/null || \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        qtbase5-dev libqt5websockets5-dev || fatal "Could not install Qt5 development packages"
+        qtbase5-dev qtbase5-private-dev libqt5websockets5-dev || fatal "Could not install Qt5 development packages"
 
     # Qt5 extras — try current repos first
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
