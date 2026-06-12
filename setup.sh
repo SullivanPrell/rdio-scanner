@@ -114,7 +114,7 @@ build_sdrangel_from_source() {
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
         cmake g++ pkg-config \
         libfftw3-dev libboost-dev libssl-dev libusb-1.0-0-dev \
-        libopus-dev || fatal "Could not install core build dependencies"
+        libopus-dev libflac-dev || fatal "Could not install core build dependencies"
 
     # Qt5 core modules — try with multimedia extras first, fall back to bare minimum
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
@@ -133,11 +133,21 @@ build_sdrangel_from_source() {
     # minimal cmake stub (empty INTERFACE IMPORTED target) so configure doesn't fail.
     # The server binary never includes these GUI headers so no actual library is needed.
     _stub_qt5() {
-        local mod="$1" pkg="$2" d="${qt5_stubs_dir}/$1"
+        local mod="$1" pkg="$2" d="${qt5_stubs_dir}/$1" short="${1#Qt5}"
         if ! dpkg -s "$pkg" &>/dev/null 2>&1; then
             mkdir -p "$d"
-            printf 'set(%s_FOUND TRUE)\nset(%s_VERSION_STRING "5.15.0")\nif(NOT TARGET Qt5::%s)\n  add_library(Qt5::%s INTERFACE IMPORTED GLOBAL)\nendif()\n' \
-                "$mod" "$mod" "${mod#Qt5}" "${mod#Qt5}" > "${d}/${mod}Config.cmake"
+            # Create both Qt5::Module and Qt::Module targets; the real Qt5 cmake config
+            # produces both, and SDRangel's sdrbase links via the versionless Qt:: alias.
+            cat > "${d}/${mod}Config.cmake" <<QTSTUB
+set(${mod}_FOUND TRUE)
+set(${mod}_VERSION_STRING "5.15.0")
+if(NOT TARGET Qt5::${short})
+  add_library(Qt5::${short} INTERFACE IMPORTED GLOBAL)
+endif()
+if(NOT TARGET Qt::${short})
+  add_library(Qt::${short} INTERFACE IMPORTED GLOBAL)
+endif()
+QTSTUB
             extra_cmake_flags+=" -D${mod}_DIR=${d}"
             info "Qt5 stub: ${mod} (${pkg} not in Pi OS repos)"
         fi
