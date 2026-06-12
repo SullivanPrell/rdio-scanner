@@ -205,7 +205,7 @@ sudo cmake --install build</div>
       </tr>
     </thead>
     <tbody>
-      @for (ds of status?.deviceSets; track ds.samplingDeviceIndex) {
+      @for (ds of status!.deviceSets!; track ds.samplingDeviceIndex) {
         <tr>
           <td style="padding:2px 8px">{{ ds.samplingDeviceIndex }}</td>
           <td style="padding:2px 8px">{{ ds.samplingDeviceHwType || '—' }}</td>
