@@ -98,7 +98,7 @@ fi
 # Build sdrangelsrv from source (used when no arm64 pre-built package exists).
 # Expect 20-40 minutes on a Pi 5.
 build_sdrangel_from_source() {
-    local version src_dir="/tmp/sdrangel-src"
+    local version src_dir="/tmp/sdrangel-src" qt5pos_stub="/tmp/qt5pos-stub" cmake_pos_flag=""
 
     version="$(curl -fsSL 'https://api.github.com/repos/f4exb/sdrangel/releases/latest' 2>/dev/null | \
         grep -o '"tag_name":"[^"]*"' | grep -o 'v[0-9.]*' | head -1)" || true
@@ -117,11 +117,27 @@ build_sdrangel_from_source() {
         libopus-dev || fatal "Could not install core build dependencies"
 
     # Qt5 — required; try with multimedia first, fall back without it
-    # libqt5positioning5-dev is required by SDRangel's CMakeLists even in server-only mode
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        qtbase5-dev libqt5websockets5-dev libqt5positioning5-dev qtmultimedia5-dev 2>/dev/null || \
+        qtbase5-dev libqt5websockets5-dev qtmultimedia5-dev 2>/dev/null || \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        qtbase5-dev libqt5websockets5-dev libqt5positioning5-dev || fatal "Could not install Qt5 development packages"
+        qtbase5-dev libqt5websockets5-dev || fatal "Could not install Qt5 development packages"
+
+    # SDRangel's CMakeLists calls find_package(Qt5Positioning) even with BUILD_GUI=OFF,
+    # but libqt5positioning5-dev is absent from Pi OS repos.  Create a stub cmake config
+    # that satisfies the find_package call — the server binary never includes positioning
+    # headers, so an empty INTERFACE target is sufficient.
+    if ! dpkg -s libqt5positioning5-dev &>/dev/null 2>&1; then
+        mkdir -p "$qt5pos_stub"
+        cat > "${qt5pos_stub}/Qt5PositioningConfig.cmake" <<'QT5STUB'
+set(Qt5Positioning_FOUND TRUE)
+set(Qt5Positioning_VERSION_STRING "5.15.0")
+if(NOT TARGET Qt5::Positioning)
+  add_library(Qt5::Positioning INTERFACE IMPORTED GLOBAL)
+endif()
+QT5STUB
+        cmake_pos_flag="-DQt5Positioning_DIR=${qt5pos_stub}"
+        info "Qt5Positioning stub created (libqt5positioning5-dev not in Pi OS repos)."
+    fi
 
     # SDR hardware — optional; cmake will skip unavailable hardware
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
@@ -143,7 +159,8 @@ build_sdrangel_from_source() {
         cmake .. \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_GUI=OFF \
-            -DBUILD_SERVER=ON
+            -DBUILD_SERVER=ON \
+            ${cmake_pos_flag}
     ) || {
         warn "CMake configure failed — skipping sdrangelsrv install."
         SKIP_SDRANGEL=true
