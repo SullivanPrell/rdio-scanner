@@ -93,60 +93,108 @@ if [[ "$YES" == false ]]; then
     [[ "$reply" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
 fi
 
-# ── SDRangel install helper ──────────────────────────────────────────────────
+# ── SDRangel install helpers ─────────────────────────────────────────────────
 
-install_sdrangel_from_github() {
+# Build sdrangelsrv from source (used when no arm64 pre-built package exists).
+# Expect 20-40 minutes on a Pi 5.
+build_sdrangel_from_source() {
+    local version src_dir="/tmp/sdrangel-src"
+
+    version="$(curl -fsSL 'https://api.github.com/repos/f4exb/sdrangel/releases/latest' 2>/dev/null | \
+        grep -o '"tag_name":"[^"]*"' | grep -o 'v[0-9.]*' | head -1)"
+    [[ -z "$version" ]] && version="v7.26.1"
+
+    echo ""
+    warn "No arm64 pre-built package available — building sdrangelsrv ${version} from source."
+    warn "This will take 20-40 minutes on a Pi 5."
+    echo ""
+
+    step "Installing sdrangelsrv build dependencies"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        cmake g++ pkg-config \
+        libfftw3-dev libboost-dev libssl-dev libusb-1.0-0-dev \
+        qtbase5-dev libqt5websockets5-dev qtmultimedia5-dev \
+        libopus-dev librtlsdr-dev libsoapysdr-dev
+
+    step "Cloning SDRangel ${version}"
+    rm -rf "$src_dir"
+    git clone --depth=1 --branch "$version" \
+        https://github.com/f4exb/sdrangel.git "$src_dir" || {
+        warn "Clone failed — skipping sdrangelsrv install."
+        SKIP_SDRANGEL=true
+        return
+    }
+
+    step "Configuring CMake (server-only, no GUI)"
+    mkdir -p "${src_dir}/build"
+    (
+        cd "${src_dir}/build"
+        cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_GUI=OFF \
+            -DBUILD_SERVER=ON
+    ) || {
+        warn "CMake configure failed — skipping sdrangelsrv install."
+        SKIP_SDRANGEL=true
+        rm -rf "$src_dir"
+        return
+    }
+
+    step "Compiling sdrangelsrv (this takes a while...)"
+    (cd "${src_dir}/build" && make -j"$(nproc)") || {
+        warn "Compile failed — skipping sdrangelsrv install."
+        SKIP_SDRANGEL=true
+        rm -rf "$src_dir"
+        return
+    }
+
+    (cd "${src_dir}/build" && make install) || {
+        warn "Install step failed."
+        SKIP_SDRANGEL=true
+        rm -rf "$src_dir"
+        return
+    }
+
+    rm -rf "$src_dir"
+
+    if command -v sdrangelsrv &>/dev/null; then
+        info "sdrangelsrv built and installed successfully."
+    else
+        warn "sdrangelsrv binary not found after build — check /usr/local/bin."
+        SKIP_SDRANGEL=true
+    fi
+}
+
+# Try a pre-built arm64 .deb from GitHub releases; fall back to source build.
+install_sdrangel() {
     local api_url="https://api.github.com/repos/f4exb/sdrangel/releases/latest"
     local release_json deb_url deb_file="/tmp/sdrangel-install.deb"
 
-    info "Fetching SDRangel latest release info from GitHub..."
-    release_json="$(curl -fsSL "$api_url" 2>/dev/null)" || {
-        warn "Could not reach GitHub API — skipping sdrangelsrv install."
-        SKIP_SDRANGEL=true
-        return
-    }
+    info "Checking for SDRangel arm64 pre-built package..."
+    release_json="$(curl -fsSL "$api_url" 2>/dev/null)" || true
 
-    # Find the arm64 .deb asset URL
     deb_url="$(printf '%s' "$release_json" | \
         grep -o '"browser_download_url":"[^"]*arm64[^"]*\.deb"' | \
         grep -o 'https://[^"]*' | head -1)"
+    [[ -z "$deb_url" ]] && deb_url="$(printf '%s' "$release_json" | \
+        grep -o '"browser_download_url":"[^"]*aarch64[^"]*\.deb"' | \
+        grep -o 'https://[^"]*' | head -1)"
 
-    if [[ -z "$deb_url" ]]; then
-        # Fallback: some releases use aarch64 in the filename
-        deb_url="$(printf '%s' "$release_json" | \
-            grep -o '"browser_download_url":"[^"]*aarch64[^"]*\.deb"' | \
-            grep -o 'https://[^"]*' | head -1)"
-    fi
-
-    if [[ -z "$deb_url" ]]; then
-        warn "No arm64 .deb found in the latest SDRangel release — skipping sdrangelsrv install."
-        warn "Check https://github.com/f4exb/sdrangel/releases for manual install options."
-        SKIP_SDRANGEL=true
-        return
-    fi
-
-    info "Downloading ${deb_url##*/} ..."
-    curl -fsSL -o "$deb_file" "$deb_url" || {
-        warn "Download failed — skipping sdrangelsrv install."
-        SKIP_SDRANGEL=true
-        return
-    }
-
-    info "Installing sdrangelsrv package + dependencies (may take a moment)..."
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "$deb_file" || {
-        warn "Package install failed. Try manually: apt-get install -y /tmp/sdrangel-install.deb"
+    if [[ -n "$deb_url" ]]; then
+        info "Downloading ${deb_url##*/} ..."
+        if curl -fsSL -o "$deb_file" "$deb_url" && \
+           DEBIAN_FRONTEND=noninteractive apt-get install -y "$deb_file" 2>/dev/null; then
+            rm -f "$deb_file"
+            if command -v sdrangelsrv &>/dev/null; then
+                info "sdrangelsrv installed from release package."
+                return
+            fi
+        fi
         rm -f "$deb_file"
-        SKIP_SDRANGEL=true
-        return
-    }
-    rm -f "$deb_file"
-
-    if command -v sdrangelsrv &>/dev/null; then
-        info "sdrangelsrv installed: $(sdrangelsrv --version 2>/dev/null | head -1 || echo 'ok')"
-    else
-        warn "sdrangelsrv binary not found after install — check the package contents."
-        SKIP_SDRANGEL=true
+        warn "Release package install failed — falling back to source build."
     fi
+
+    build_sdrangel_from_source
 }
 
 # ── System packages ────────────────────────────────────────────────────────
@@ -158,7 +206,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     rtl-sdr ffmpeg usbutils
 
 if [[ "$SKIP_SDRANGEL" == false ]]; then
-    install_sdrangel_from_github
+    install_sdrangel
 fi
 info "System packages done."
 
