@@ -123,21 +123,38 @@ build_sdrangel_from_source() {
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
         qtbase5-dev libqt5websockets5-dev || fatal "Could not install Qt5 development packages"
 
-    # Qt5 extras — install what's available; missing ones get cmake stubs below
+    # Qt5 extras — try current repos first
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
         libqt5charts5-dev libqt5positioning5-dev \
         libqt5gamepad5-dev libqt5texttospeech5-dev 2>/dev/null || true
 
-    # SDRangel's CMakeLists calls find_package() for all Qt5 modules unconditionally
-    # even with BUILD_GUI=OFF.  For each module absent from Pi OS repos, create a
-    # minimal cmake stub (empty INTERFACE IMPORTED target) so configure doesn't fail.
-    # The server binary never includes these GUI headers so no actual library is needed.
+    # Qt5Positioning: maincore.h physically includes <QGeoPositionInfo> and
+    # <QGeoPositionInfoSource>, so a cmake stub is not enough — real headers are
+    # required.  The package exists in Debian bookworm main but is absent from Pi
+    # OS's Raspbian mirror; add that source temporarily if still not installed.
+    if ! dpkg -s libqt5positioning5-dev &>/dev/null 2>&1; then
+        info "libqt5positioning5-dev not found — fetching from Debian bookworm main..."
+        echo "deb http://deb.debian.org/debian bookworm main" \
+            > /etc/apt/sources.list.d/debian-qt5-tmp.list
+        apt-get update -qq
+        DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            libqt5positioning5-dev libqt5charts5-dev 2>/dev/null || true
+        rm -f /etc/apt/sources.list.d/debian-qt5-tmp.list
+        apt-get update -qq 2>/dev/null || true
+        dpkg -s libqt5positioning5-dev &>/dev/null 2>&1 || \
+            warn "libqt5positioning5-dev still unavailable — build will fail at QGeoPositionInfo"
+    fi
+
+    # For Qt5 modules cmake requires unconditionally (even with BUILD_GUI=OFF) but
+    # whose headers are NOT included in any server-compiled path, create a cmake stub
+    # so find_package() succeeds without the dev package installed.
+    # Qt5Positioning is intentionally absent here — it needs real headers (see above).
     _stub_qt5() {
         local mod="$1" pkg="$2" d="${qt5_stubs_dir}/$1" short="${1#Qt5}"
         if ! dpkg -s "$pkg" &>/dev/null 2>&1; then
             mkdir -p "$d"
-            # Create both Qt5::Module and Qt::Module targets; the real Qt5 cmake config
-            # produces both, and SDRangel's sdrbase links via the versionless Qt:: alias.
+            # Emit both Qt5:: and Qt:: targets; the real Qt5 cmake config produces both
+            # and SDRangel's sdrbase links via the versionless Qt:: alias.
             cat > "${d}/${mod}Config.cmake" <<QTSTUB
 set(${mod}_FOUND TRUE)
 set(${mod}_VERSION_STRING "5.15.0")
@@ -149,10 +166,9 @@ if(NOT TARGET Qt::${short})
 endif()
 QTSTUB
             extra_cmake_flags+=" -D${mod}_DIR=${d}"
-            info "Qt5 stub: ${mod} (${pkg} not in Pi OS repos)"
+            info "Qt5 stub: ${mod} (${pkg} not installed; headers not needed in server build)"
         fi
     }
-    _stub_qt5 Qt5Positioning  libqt5positioning5-dev
     _stub_qt5 Qt5Charts       libqt5charts5-dev
     _stub_qt5 Qt5Gamepad      libqt5gamepad5-dev
     _stub_qt5 Qt5TextToSpeech libqt5texttospeech5-dev
