@@ -105,6 +105,19 @@ build_sdrangel_from_source() {
     [[ -z "$version" ]] && version="v7.26.1"
 
     echo ""
+    # If a previous build completed (compiled binary present in build tree), skip
+    # directly to make install so we don't spend 20-40 minutes recompiling.
+    if [[ -x "${src_dir}/build/sdrangelsrv" ]]; then
+        info "Existing build found at ${src_dir}/build — skipping recompile, running make install."
+        (cd "${src_dir}/build" && make install) || {
+            warn "Re-install from existing build failed — will do a clean build."
+        }
+        if [[ -x /usr/bin/sdrangelsrv ]]; then
+            info "sdrangelsrv re-installed from existing build."
+            return
+        fi
+    fi
+
     warn "No arm64 pre-built package available — building sdrangelsrv ${version} from source."
     warn "This will take 20-40 minutes on a Pi 5."
     echo ""
@@ -315,6 +328,7 @@ PYEOF
         cd "${src_dir}/build"
         cmake .. \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr \
             -DBUILD_GUI=OFF \
             -DBUILD_SERVER=ON \
             ${extra_cmake_flags}
@@ -345,13 +359,19 @@ PYEOF
     if command -v sdrangelsrv &>/dev/null; then
         info "sdrangelsrv built and installed successfully."
     else
-        warn "sdrangelsrv binary not found after build — check /usr/local/bin."
+        warn "sdrangelsrv binary not found after build — check /usr/bin."
         SKIP_SDRANGEL=true
     fi
 }
 
 # Try a pre-built arm64 .deb from GitHub releases; fall back to source build.
 install_sdrangel() {
+    # Skip entirely if a working binary is already in place.
+    if [[ -x /usr/bin/sdrangelsrv ]]; then
+        info "sdrangelsrv already installed at /usr/bin/sdrangelsrv — skipping build."
+        return
+    fi
+
     local api_url="https://api.github.com/repos/f4exb/sdrangel/releases/latest"
     local release_json deb_url deb_file="/tmp/sdrangel-install.deb"
 
