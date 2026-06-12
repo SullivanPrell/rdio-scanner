@@ -28,6 +28,24 @@ A `docker-compose.yml` and `start.sh` launcher provide a one-command deployment 
 
 `setup.sh` at the repo root handles end-to-end setup on a Raspberry Pi 5 directly from a fresh clone: installs system packages, builds the server binary natively, configures RTL-SDR udev rules and kernel driver blacklisting, creates the service account, and enables auto-start via systemd.
 
+```bash
+# First-time install
+sudo bash setup.sh
+
+# Skip sdrangelsrv (rdio-scanner only)
+sudo bash setup.sh --skip-sdrangel
+```
+
+`upgrade.sh` upgrades an existing installation in-place — pulls the latest repo code, rebuilds the Angular client and Go binary, and restarts the service. Pass `--sdr-up` to also pull the latest SDRangel release tag and rebuild `sdrangelsrv` from source (~20-40 min).
+
+```bash
+# Upgrade rdio-scanner only
+sudo bash upgrade.sh
+
+# Upgrade rdio-scanner + sdrangelsrv
+sudo bash upgrade.sh --sdr-up
+```
+
 `sdr-linux/` contains scripts for building customised Raspberry Pi OS Lite images (arm64 for Pi 5, armhf for Pi 2B) with all of the above pre-installed, suitable for flashing directly to an SD card.
 
 ## Recorders compatibility
