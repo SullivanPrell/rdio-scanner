@@ -128,12 +128,11 @@ build_sdrangel_from_source() {
         libqt5charts5-dev libqt5positioning5-dev \
         libqt5gamepad5-dev libqt5texttospeech5-dev 2>/dev/null || true
 
-    # Qt5Positioning: maincore.h physically includes <QGeoPositionInfo> and
-    # <QGeoPositionInfoSource>, so a cmake stub is not enough — real headers are
-    # required.  The package exists in Debian bookworm main but is absent from Pi
-    # OS's Raspbian mirror; add that source temporarily if still not installed.
+    # Qt5Positioning: try Debian bookworm main as a fallback (absent from Pi OS
+    # Raspbian mirror).  If it installs, GPS support is enabled in the server.
+    # If not, the source patch below makes it optional — build succeeds either way.
     if ! dpkg -s libqt5positioning5-dev &>/dev/null 2>&1; then
-        info "libqt5positioning5-dev not found — fetching from Debian bookworm main..."
+        info "libqt5positioning5-dev not found — trying Debian bookworm main..."
         local _deb_src="/etc/apt/sources.list.d/debian-qt5-tmp.list"
         # Guarantee cleanup even if this function returns early.
         # shellcheck disable=SC2064
@@ -150,13 +149,12 @@ build_sdrangel_from_source() {
         trap - RETURN
         apt-get update -qq 2>/dev/null || true
         dpkg -s libqt5positioning5-dev &>/dev/null 2>&1 || \
-            warn "libqt5positioning5-dev still unavailable — build will fail at QGeoPositionInfo"
+            info "libqt5positioning5-dev unavailable — GPS support disabled (source patch handles this)"
     fi
 
     # For Qt5 modules cmake requires unconditionally (even with BUILD_GUI=OFF) but
     # whose headers are NOT included in any server-compiled path, create a cmake stub
     # so find_package() succeeds without the dev package installed.
-    # Qt5Positioning is intentionally absent here — it needs real headers (see above).
     _stub_qt5() {
         local mod="$1" pkg="$2" d="${qt5_stubs_dir}/$1" short="${1#Qt5}"
         if ! dpkg -s "$pkg" &>/dev/null 2>&1; then
@@ -193,6 +191,123 @@ QTSTUB
         SKIP_SDRANGEL=true
         return
     }
+
+    step "Patching SDRangel source — Qt5Positioning optional on Pi OS"
+    python3 - "$src_dir" <<'PYEOF' || warn "Source patch failed — cmake may still error on Qt5Positioning."
+import sys, re
+
+src = sys.argv[1]
+
+# ── 1. top-level CMakeLists.txt: remove Positioning from Qt5 REQUIRED ────────
+path = f"{src}/CMakeLists.txt"
+with open(path) as f:
+    txt = f.read()
+
+# Remove the Positioning entry from the Qt5 REQUIRED COMPONENTS list
+txt = txt.replace(
+    '                     Positioning\n                     Charts\n                     SerialPort)',
+    '                     Charts\n                     SerialPort)')
+
+# Add an optional find_package(Qt5Positioning) right after the if/else/endif block
+txt = txt.replace(
+    '                     SerialPort)\nendif()\n\n# for the server',
+    '                     SerialPort)\nendif()\nfind_package(Qt5Positioning)  # optional: GPS in server if available\n\n# for the server')
+
+with open(path, 'w') as f:
+    f.write(txt)
+print("  Patched CMakeLists.txt — Qt5Positioning is now optional")
+
+# ── 2. sdrbase/CMakeLists.txt: conditional Qt::Positioning linkage ────────────
+path = f"{src}/sdrbase/CMakeLists.txt"
+with open(path) as f:
+    txt = f.read()
+
+# Remove Qt::Positioning from the unconditional target_link_libraries block
+txt = txt.replace('    Qt::Positioning\n    httpserver\n', '    httpserver\n')
+
+# Add conditional link after the closing ) of the main target_link_libraries call
+txt = txt.replace(
+    '    swagger\n)\nif (LIBSIGMF_FOUND)',
+    '    swagger\n)\nif(Qt5Positioning_FOUND)\n    target_link_libraries(sdrbase Qt::Positioning)\nendif()\nif (LIBSIGMF_FOUND)')
+
+with open(path, 'w') as f:
+    f.write(txt)
+print("  Patched sdrbase/CMakeLists.txt — Qt::Positioning linked conditionally")
+
+# ── 3. sdrbase/maincore.h: guard all QGeoPosition* declarations ──────────────
+path = f"{src}/sdrbase/maincore.h"
+with open(path) as f:
+    txt = f.read()
+
+# Guard the two QGeo includes together
+txt = re.sub(
+    r'(#include <QGeoPositionInfo>\n#include <QGeoPositionInfoSource>\n)',
+    r'#ifdef QT_POSITIONING_FOUND\n\1#endif\n', txt)
+
+# Guard the QGeoPositionInfoSource forward declaration
+txt = re.sub(
+    r'(class QGeoPositionInfoSource;\n)',
+    r'#ifdef QT_POSITIONING_FOUND\n\1#endif\n', txt)
+
+# Guard getPosition() public method declaration
+txt = re.sub(
+    r'([ \t]+const QGeoPositionInfo& getPosition\(\) const;[^\n]*\n)',
+    r'#ifdef QT_POSITIONING_FOUND\n\1#endif\n', txt)
+
+# Guard the three positioning slots
+txt = re.sub(
+    r'([ \t]+void positionUpdated\(const QGeoPositionInfo &info\);\n'
+    r'[ \t]+void positionUpdateTimeout\(\);\n'
+    r'[ \t]+void positionError\(QGeoPositionInfoSource::Error positioningError\);\n)',
+    r'#ifdef QT_POSITIONING_FOUND\n\1#endif\n', txt)
+
+# Guard the two positioning member variables
+txt = re.sub(
+    r'([ \t]+QGeoPositionInfoSource \*m_positionSource;\n[ \t]+QGeoPositionInfo m_position;\n)',
+    r'#ifdef QT_POSITIONING_FOUND\n\1#endif\n', txt)
+
+# Guard the initPosition() private method declaration
+txt = re.sub(
+    r'([ \t]+void initPosition\(\);\n)',
+    r'#ifdef QT_POSITIONING_FOUND\n\1#endif\n', txt)
+
+with open(path, 'w') as f:
+    f.write(txt)
+print("  Patched sdrbase/maincore.h — QGeoPosition* guarded with QT_POSITIONING_FOUND")
+
+# ── 4. sdrbase/maincore.cpp: guard all positioning implementations ────────────
+path = f"{src}/sdrbase/maincore.cpp"
+with open(path) as f:
+    txt = f.read()
+
+# Guard the QGeoPositionInfoSource include
+txt = txt.replace(
+    '#include <QGeoPositionInfoSource>\n',
+    '#ifdef QT_POSITIONING_FOUND\n#include <QGeoPositionInfoSource>\n#endif\n', 1)
+
+# Guard the initPosition() call in the constructor
+txt = txt.replace('    initPosition();\n',
+    '#ifdef QT_POSITIONING_FOUND\n    initPosition();\n#endif\n', 1)
+
+# Wrap each function body in #ifdef / #endif.
+# Pattern: function signature \n{ ... \n} where closing } is at column 0 (unindented).
+def guard(pattern, s):
+    return re.sub(pattern,
+        lambda m: '#ifdef QT_POSITIONING_FOUND\n' + m.group(0) + '\n#endif',
+        s, count=1, flags=re.DOTALL)
+
+txt = guard(r'void MainCore::initPosition\(\)\n\{.*?\n\}', txt)
+txt = guard(r'const QGeoPositionInfo& MainCore::getPosition\(\) const\n\{.*?\n\}', txt)
+txt = guard(r'void MainCore::positionUpdated\(const QGeoPositionInfo &info\)\n\{.*?\n\}', txt)
+txt = guard(r'void MainCore::positionUpdateTimeout\(\)\n\{.*?\n\}', txt)
+txt = guard(r'void MainCore::positionError\(QGeoPositionInfoSource::Error positioningError\)\n\{.*?\n\}', txt)
+
+with open(path, 'w') as f:
+    f.write(txt)
+print("  Patched sdrbase/maincore.cpp — all positioning implementations guarded")
+
+print("Patch complete: build succeeds with or without libqt5positioning5-dev")
+PYEOF
 
     step "Configuring CMake (server-only, no GUI)"
     mkdir -p "${src_dir}/build"
