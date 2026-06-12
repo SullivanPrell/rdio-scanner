@@ -117,10 +117,11 @@ build_sdrangel_from_source() {
         libopus-dev || fatal "Could not install core build dependencies"
 
     # Qt5 — required; try with multimedia first, fall back without it
+    # libqt5positioning5-dev is required by SDRangel's CMakeLists even in server-only mode
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        qtbase5-dev libqt5websockets5-dev qtmultimedia5-dev 2>/dev/null || \
+        qtbase5-dev libqt5websockets5-dev libqt5positioning5-dev qtmultimedia5-dev 2>/dev/null || \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        qtbase5-dev libqt5websockets5-dev || fatal "Could not install Qt5 development packages"
+        qtbase5-dev libqt5websockets5-dev libqt5positioning5-dev || fatal "Could not install Qt5 development packages"
 
     # SDR hardware — optional; cmake will skip unavailable hardware
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
