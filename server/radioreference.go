@@ -244,6 +244,202 @@ func truncate8(s string) string {
 	return string(runes[:8])
 }
 
+// ── RadioReference CSV import ──────────────────────────────────────────────
+
+// ParseRRCSV parses a RadioReference frequency database export CSV.
+// Expected columns (0-based):
+//
+//	0  Frequency Output (MHz)
+//	3  Agency/Category  → Group
+//	5  Description      → talkgroup Name
+//	6  Alpha Tag        → talkgroup Label (≤8 chars)
+//	9  Mode             → protocol
+//	11 Tag              → Tag label
+func ParseRRCSV(data []byte, systemLabel string, systemRef uint, portBase int) (*ImportResult, error) {
+	r := csv.NewReader(strings.NewReader(string(data)))
+	r.TrimLeadingSpace = true
+	r.LazyQuotes = true
+
+	records, err := r.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("csv parse: %w", err)
+	}
+
+	sys := NewSystem()
+	sys.Label = systemLabel
+	sys.SystemRef = systemRef
+
+	groupMap := map[string]uint64{}
+	tagMap := map[string]uint64{}
+	var groups []*Group
+	var tags []*Tag
+
+	ensureGroup := func(label string) uint64 {
+		label = strings.TrimSpace(label)
+		if label == "" {
+			label = "General"
+		}
+		if id, ok := groupMap[label]; ok {
+			return id
+		}
+		id := uint64(len(groupMap) + 1)
+		groupMap[label] = id
+		groups = append(groups, &Group{Id: id, Label: label})
+		return id
+	}
+
+	ensureTag := func(label string) uint64 {
+		label = strings.TrimSpace(label)
+		if label == "" {
+			label = "Other"
+		}
+		if id, ok := tagMap[label]; ok {
+			return id
+		}
+		id := uint64(len(tagMap) + 1)
+		tagMap[label] = id
+		tags = append(tags, &Tag{Id: id, Label: label})
+		return id
+	}
+
+	var channels []BridgeChannelConfig
+	tgRef := uint(0)
+
+	for _, rec := range records {
+		if len(rec) < 7 {
+			continue
+		}
+		if strings.TrimSpace(rec[0]) == "Frequency Output" {
+			continue
+		}
+		freqMHz, err := strconv.ParseFloat(strings.TrimSpace(rec[0]), 64)
+		if err != nil || freqMHz <= 0 {
+			continue
+		}
+		freqHz := uint(math.Round(freqMHz * 1e6))
+
+		agency := strings.TrimSpace(rec[3])
+		description := ""
+		alphaTag := ""
+		mode := ""
+		tagLabel := ""
+		if len(rec) > 5 {
+			description = strings.TrimSpace(rec[5])
+		}
+		if len(rec) > 6 {
+			alphaTag = strings.TrimSpace(rec[6])
+		}
+		if len(rec) > 9 {
+			mode = strings.ToUpper(strings.TrimSpace(rec[9]))
+		}
+		if len(rec) > 11 {
+			tagLabel = strings.TrimSpace(rec[11])
+		}
+
+		if alphaTag == "" && description == "" {
+			continue
+		}
+		label := alphaTag
+		if label == "" {
+			label = truncate8(description)
+		}
+		name := description
+		if name == "" {
+			name = alphaTag
+		}
+
+		tgRef++
+		groupId := ensureGroup(agency)
+		tagId := ensureTag(tagLabel)
+
+		sys.Talkgroups.List = append(sys.Talkgroups.List, &Talkgroup{
+			TalkgroupRef: tgRef,
+			Label:        truncate8(label),
+			Name:         name,
+			Frequency:    freqHz,
+			GroupIds:     []uint64{groupId},
+			TagId:        tagId,
+		})
+
+		proto := "nfm"
+		switch mode {
+		case "AM":
+			proto = "am"
+		case "DMR", "NXDN", "DSD":
+			proto = "dsd"
+		case "P25":
+			proto = "p25"
+		}
+
+		channels = append(channels, BridgeChannelConfig{
+			Label:        label,
+			FrequencyHz:  freqHz,
+			SystemRef:    systemRef,
+			TalkgroupRef: tgRef,
+			UdpPort:      portBase + int(tgRef) - 1,
+			SampleRate:   8000,
+			Protocol:     proto,
+		})
+	}
+
+	if len(sys.Talkgroups.List) == 0 {
+		return nil, fmt.Errorf("no valid rows found in CSV")
+	}
+
+	return &ImportResult{
+		Systems:  []*System{sys},
+		Groups:   groups,
+		Tags:     tags,
+		Channels: channels,
+	}, nil
+}
+
+func (admin *Admin) ImportRRCSVHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !admin.ValidateToken(admin.GetAuthorization(r)) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(file)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	sysLabel := r.FormValue("systemLabel")
+	if sysLabel == "" {
+		sysLabel = "RadioReference"
+	}
+	sysRef, _ := strconv.Atoi(r.FormValue("systemRef"))
+	if sysRef <= 0 {
+		sysRef = 1
+	}
+	portBase, _ := strconv.Atoi(r.FormValue("portBase"))
+	if portBase <= 0 {
+		portBase = 9000
+	}
+	result, err := ParseRRCSV(data, sysLabel, uint(sysRef), portBase)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(err.Error()))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
 // ── RadioReference SOAP client ─────────────────────────────────────────────
 
 const rrSOAPEndpoint = "https://api.radioreference.com/soap2/"

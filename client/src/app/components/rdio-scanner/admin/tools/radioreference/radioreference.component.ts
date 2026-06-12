@@ -31,7 +31,7 @@ import {
     Talkgroup,
 } from '../../admin.service';
 
-type Tab = 'live' | 'snapshots';
+type Tab = 'live' | 'snapshots' | 'csv';
 
 @Component({
     selector: 'rdio-scanner-admin-radioreference',
@@ -64,6 +64,14 @@ export class RdioScannerAdminRadioReferenceComponent implements OnInit {
     downloadJob: RRDownloadJobStatus | null = null;
     downloadingStateId: number | null = null;
     private pollTimer: ReturnType<typeof setTimeout> | null = null;
+
+    // ── CSV import tab ────────────────────────────────────────────────────
+    csvFile: File | null = null;
+    csvSystemLabel = 'RadioReference';
+    csvPortBase = 9000;
+    csvResult: ImportResult | null = null;
+    csvSelected: Map<number, Set<number>> = new Map();
+    csvLoading = false;
 
     // ── Offline snapshots tab ─────────────────────────────────────────────
     snapshots: RRSnapshotInfo[] = [];
@@ -272,6 +280,52 @@ export class RdioScannerAdminRadioReferenceComponent implements OnInit {
 
     snapshotLabel(snap: RRSnapshotInfo): string {
         return `${snap.stateName} (${snap.stateAbbr})`;
+    }
+
+    // ── CSV import ────────────────────────────────────────────────────────
+
+    onCsvFileChange(event: Event): void {
+        const input = event.target as HTMLInputElement;
+        this.csvFile = input.files?.[0] ?? null;
+        this.csvResult = null;
+    }
+
+    async importCSV(): Promise<void> {
+        if (!this.csvFile) return;
+        this.csvLoading = true;
+        this.csvResult = null;
+        const base = await this.adminService.getConfig();
+        const systemRef = this.nextSystemRef(base.systems ?? []);
+        this.csvResult = await this.adminService.importRRCSV(
+            this.csvFile, this.csvSystemLabel, systemRef, this.csvPortBase,
+        );
+        this.initSelected(this.csvSelected, this.csvResult);
+        this.csvLoading = false;
+        if (!this.csvResult?.systems?.length) {
+            this.matSnackBar.open('No valid rows found in CSV.', '', { duration: 4000 });
+        }
+    }
+
+    toggleCsvTalkgroup(sysIdx: number, tgRef: number): void {
+        this.toggleInMap(this.csvSelected, sysIdx, tgRef);
+    }
+
+    isCsvSelected(sysIdx: number, tgRef: number): boolean {
+        return this.csvSelected.get(sysIdx)?.has(tgRef) ?? false;
+    }
+
+    selectCsvAll(sysIdx: number): void {
+        const sys = this.csvResult?.systems?.[sysIdx];
+        this.csvSelected.set(sysIdx, new Set(sys?.talkgroups?.map(tg => tg.talkgroupRef ?? 0) ?? []));
+    }
+
+    selectCsvNone(sysIdx: number): void {
+        this.csvSelected.set(sysIdx, new Set());
+    }
+
+    async importCsvSelected(): Promise<void> {
+        if (!this.csvResult?.systems?.length) return;
+        this.emitImport(this.csvResult, this.csvSelected);
     }
 
     // ── Shared helpers ────────────────────────────────────────────────────

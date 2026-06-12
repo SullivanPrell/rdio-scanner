@@ -14,6 +14,11 @@
       <span style="margin-left:4px;font-size:0.8em;opacity:0.7">({{ snapshots.length }})</span>
     }
   </button>
+  <button mat-button [color]="activeTab === 'csv' ? 'primary' : undefined"
+          [style.font-weight]="activeTab === 'csv' ? '600' : 'normal'"
+          (click)="switchTab('csv')">
+    <mat-icon>upload_file</mat-icon> CSV Import
+  </button>
 </div>
 
 <!-- ══════════════════════════════════════════════════════════════════════════ -->
@@ -310,5 +315,97 @@
         Imports to the Config panel for review. Click Save in Config to persist.
       </p>
     }
+  }
+}
+
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<!-- CSV IMPORT TAB                                                             -->
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+@if (activeTab === 'csv') {
+  <p class="mat-caption" style="margin-bottom:12px">
+    Import a <strong>RadioReference frequency database export CSV</strong>.
+    From RadioReference.com, open a county/system page → <em>Download → Frequency List (CSV)</em>.
+  </p>
+
+  <div class="row">
+    <p><span class="mat-body">System Label</span></p>
+    <mat-form-field>
+      <input matInput [(ngModel)]="csvSystemLabel" placeholder="e.g. Dane County">
+    </mat-form-field>
+  </div>
+
+  <div class="row">
+    <p>
+      <span class="mat-body">UDP Port Base</span><br>
+      <span class="mat-caption">Starting UDP port for suggested bridge channels.</span>
+    </p>
+    <mat-form-field>
+      <input type="number" min="1024" max="65000" step="1" matInput [(ngModel)]="csvPortBase">
+    </mat-form-field>
+  </div>
+
+  <div class="row bottom" style="gap:12px">
+    <label style="cursor:pointer">
+      <input type="file" accept=".csv" style="display:none" (change)="onCsvFileChange($event)">
+      <button mat-stroked-button color="accent" type="button"
+              onclick="this.closest('label').querySelector('input').click()">
+        <mat-icon>attach_file</mat-icon>
+        {{ csvFile ? csvFile.name : 'Choose CSV file' }}
+      </button>
+    </label>
+    <button mat-raised-button color="primary"
+            (click)="importCSV()"
+            [disabled]="!csvFile || csvLoading">
+      <mat-icon>upload</mat-icon>
+      Parse &amp; Preview
+    </button>
+  </div>
+
+  @if (csvLoading) {
+    <p class="mat-caption text-center" style="margin:8px 0">Parsing…</p>
+  }
+
+  @if (csvResult?.systems?.length) {
+    <mat-divider style="margin:12px 0"></mat-divider>
+    <p class="mat-body" style="margin-bottom:4px">
+      Select frequencies to import ({{ csvResult!.systems![0].talkgroups?.length ?? 0 }} found)
+    </p>
+
+    @for (sys of csvResult!.systems!; track sys.systemRef; let si = $index) {
+      <div style="margin-bottom:12px">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <p class="mat-body-2" style="margin:0">{{ sys.label }}</p>
+          <div>
+            <button mat-button (click)="selectCsvAll(si)">All</button>
+            <button mat-button (click)="selectCsvNone(si)">None</button>
+          </div>
+        </div>
+        <div style="max-height:240px;overflow-y:auto;border:1px solid rgba(0,0,0,.12);border-radius:4px;padding:4px">
+          @for (tg of sys.talkgroups; track tg.talkgroupRef) {
+            <div style="display:flex;align-items:center;gap:8px;padding:2px 4px">
+              <mat-checkbox
+                [checked]="isCsvSelected(si, tg.talkgroupRef ?? 0)"
+                (change)="toggleCsvTalkgroup(si, tg.talkgroupRef ?? 0)">
+              </mat-checkbox>
+              <span class="mat-caption">
+                <strong>{{ tg.label }}</strong>
+                @if (tg.name && tg.name !== tg.label) { — {{ tg.name }} }
+                @if (tg.frequency) { &nbsp;{{ (tg.frequency / 1000000) | number:'1.4-4' }} MHz }
+              </span>
+            </div>
+          }
+        </div>
+      </div>
+    }
+
+    <div class="row bottom">
+      <button mat-raised-button color="primary" (click)="importCsvSelected()" [disabled]="csvLoading">
+        <mat-icon>download</mat-icon>
+        Import Selected
+      </button>
+    </div>
+    <p class="mat-caption" style="margin-top:4px">
+      Imports to the Config panel for review. Click Save in Config to persist.
+    </p>
   }
 }
