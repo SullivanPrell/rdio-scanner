@@ -1056,9 +1056,17 @@ export class RdioScannerAdminService implements OnDestroy {
             this.configWebSocket?.send(this.token);
 
             if (this.configWebSocket instanceof WebSocket) {
-                this.configWebSocket.onmessage = (ev: MessageEvent<string>) => {
-                    this.event.emit({ config: JSON.parse(ev.data) });
-                }
+                this.configWebSocket.onmessage = async (ev: MessageEvent<string>) => {
+                    try {
+                        const msg = JSON.parse(ev.data);
+                        if (msg?.event === 'config_changed') {
+                            const config = await this.getConfig();
+                            this.event.emit({ config });
+                        }
+                    } catch {
+                        // ignore malformed messages
+                    }
+                };
             }
         }
     }

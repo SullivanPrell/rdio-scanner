@@ -93,10 +93,9 @@ func (admin *Admin) AlertsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (admin *Admin) BroadcastConfig() {
-	if b, err := json.Marshal(admin.GetConfig()); err == nil {
-		for conn := range admin.Conns {
-			conn.WriteMessage(websocket.TextMessage, b)
-		}
+	b, _ := json.Marshal(map[string]string{"event": "config_changed"})
+	for conn := range admin.Conns {
+		conn.WriteMessage(websocket.TextMessage, b)
 	}
 }
 

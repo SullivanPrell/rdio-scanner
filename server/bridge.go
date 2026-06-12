@@ -110,29 +110,29 @@ func (b *Bridge) Restart() {
 	}
 }
 
-func (b *Bridge) squelchOpen(host string, port uint, deviceSetIndex, channelIndex int) bool {
+func (b *Bridge) squelchOpen(host string, port uint, deviceSetIndex, channelIndex int) (bool, error) {
 	url := fmt.Sprintf("http://%s:%d/sdrangel/deviceset/%d/channel/%d/report",
 		host, port, deviceSetIndex, channelIndex)
 
 	resp, err := bridgeHTTPClient.Get(url)
 	if err != nil {
-		return false
+		return false, err
 	}
 	defer resp.Body.Close()
 
 	var report sdrangelChannelReport
 	if err := json.NewDecoder(resp.Body).Decode(&report); err != nil {
-		return false
+		return false, fmt.Errorf("decode report: %w", err)
 	}
 
 	if report.NFMDemodReport != nil {
-		return report.NFMDemodReport.Squelch == 1
+		return report.NFMDemodReport.Squelch == 1, nil
 	}
 	if report.DSDDemodReport != nil {
-		return report.DSDDemodReport.Squelch == 1
+		return report.DSDDemodReport.Squelch == 1, nil
 	}
 
-	return false
+	return false, fmt.Errorf("no NFMDemodReport or DSDDemodReport in response (deviceset %d channel %d)", deviceSetIndex, channelIndex)
 }
 
 // bridgeBuildWAV wraps raw L16 mono PCM bytes in a RIFF/WAV header.
@@ -200,10 +200,12 @@ func (b *Bridge) monitorChannel(ctx context.Context, cfg BridgeChannelConfig) {
 	}()
 
 	var (
-		recording bool
-		pcmBuf    []byte
-		startTime time.Time
-		wasOpen   bool
+		recording       bool
+		pcmBuf          []byte
+		startTime       time.Time
+		wasOpen         bool
+		consecutiveErrs int
+		lastErrLog      time.Time
 	)
 
 	audioCh := make(chan []byte, 256)
@@ -252,13 +254,29 @@ func (b *Bridge) monitorChannel(ctx context.Context, cfg BridgeChannelConfig) {
 			}
 
 		case <-ticker.C:
-			isOpen := b.squelchOpen(host, port, cfg.DeviceSetIndex, cfg.ChannelIndex)
+			isOpen, pollErr := b.squelchOpen(host, port, cfg.DeviceSetIndex, cfg.ChannelIndex)
+
+			if pollErr != nil {
+				consecutiveErrs++
+				if consecutiveErrs == 1 || time.Since(lastErrLog) >= 60*time.Second {
+					b.Controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("bridge: %s: squelch poll failed (%d consecutive): %v", cfg.Label, consecutiveErrs, pollErr))
+					lastErrLog = time.Now()
+				}
+				wasOpen = false
+				continue
+			}
+
+			if consecutiveErrs > 0 {
+				b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: squelch poll restored after %d failure(s)", cfg.Label, consecutiveErrs))
+				consecutiveErrs = 0
+			}
 
 			switch {
 			case isOpen && !wasOpen:
 				recording = true
 				pcmBuf = nil
 				startTime = time.Now()
+				b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: recording started (sys=%d tg=%d)", cfg.Label, cfg.SystemRef, cfg.TalkgroupRef))
 
 			case !isOpen && wasOpen && recording:
 				recording = false
@@ -277,6 +295,7 @@ func (b *Bridge) monitorChannel(ctx context.Context, cfg BridgeChannelConfig) {
 					}
 
 					b.Controller.Ingest <- call
+					b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: call submitted (duration=%dms pcm=%d bytes)", cfg.Label, time.Since(startTime).Milliseconds(), len(pcmBuf)))
 				}
 
 				pcmBuf = nil
