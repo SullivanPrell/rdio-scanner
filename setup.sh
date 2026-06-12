@@ -134,9 +134,13 @@ build_sdrangel_from_source() {
     # OS's Raspbian mirror; add that source temporarily if still not installed.
     if ! dpkg -s libqt5positioning5-dev &>/dev/null 2>&1; then
         info "libqt5positioning5-dev not found — fetching from Debian bookworm main..."
-        echo "deb http://deb.debian.org/debian bookworm main" \
+        # Pi OS's Raspbian mirror lacks Debian's GPG key; install the keyring package
+        # first (it lives in Raspbian's own trusted repos), then use [signed-by=] so
+        # apt can verify deb.debian.org without treating the source as untrusted.
+        DEBIAN_FRONTEND=noninteractive apt-get install -y debian-archive-keyring 2>/dev/null || true
+        echo "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://deb.debian.org/debian bookworm main" \
             > /etc/apt/sources.list.d/debian-qt5-tmp.list
-        apt-get update -qq
+        apt-get update -qq 2>/dev/null || true
         DEBIAN_FRONTEND=noninteractive apt-get install -y \
             libqt5positioning5-dev libqt5charts5-dev 2>/dev/null || true
         rm -f /etc/apt/sources.list.d/debian-qt5-tmp.list
