@@ -110,11 +110,21 @@ build_sdrangel_from_source() {
     echo ""
 
     step "Installing sdrangelsrv build dependencies"
+    # Core deps — required; fail loudly if these can't be found
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
         cmake g++ pkg-config \
         libfftw3-dev libboost-dev libssl-dev libusb-1.0-0-dev \
-        qtbase5-dev libqt5websockets5-dev qtmultimedia5-dev \
-        libopus-dev librtlsdr-dev libsoapysdr-dev
+        libopus-dev || fatal "Could not install core build dependencies"
+
+    # Qt5 — required; try with multimedia first, fall back without it
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        qtbase5-dev libqt5websockets5-dev qtmultimedia5-dev 2>/dev/null || \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        qtbase5-dev libqt5websockets5-dev || fatal "Could not install Qt5 development packages"
+
+    # SDR hardware — optional; cmake will skip unavailable hardware
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        librtlsdr-dev libsoapysdr-dev 2>/dev/null || true
 
     step "Cloning SDRangel ${version}"
     rm -rf "$src_dir"
