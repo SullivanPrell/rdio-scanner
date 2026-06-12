@@ -134,16 +134,21 @@ build_sdrangel_from_source() {
     # OS's Raspbian mirror; add that source temporarily if still not installed.
     if ! dpkg -s libqt5positioning5-dev &>/dev/null 2>&1; then
         info "libqt5positioning5-dev not found — fetching from Debian bookworm main..."
+        local _deb_src="/etc/apt/sources.list.d/debian-qt5-tmp.list"
+        # Guarantee cleanup even if this function returns early.
+        # shellcheck disable=SC2064
+        trap "rm -f '${_deb_src}'; apt-get update -qq 2>/dev/null || true" RETURN
         # Pi OS's Raspbian mirror lacks Debian's GPG key; install the keyring package
         # first (it lives in Raspbian's own trusted repos), then use [signed-by=] so
         # apt can verify deb.debian.org without treating the source as untrusted.
         DEBIAN_FRONTEND=noninteractive apt-get install -y debian-archive-keyring 2>/dev/null || true
         echo "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://deb.debian.org/debian bookworm main" \
-            > /etc/apt/sources.list.d/debian-qt5-tmp.list
+            > "${_deb_src}"
         apt-get update -qq 2>/dev/null || true
         DEBIAN_FRONTEND=noninteractive apt-get install -y \
             libqt5positioning5-dev libqt5charts5-dev 2>/dev/null || true
-        rm -f /etc/apt/sources.list.d/debian-qt5-tmp.list
+        rm -f "${_deb_src}"
+        trap - RETURN
         apt-get update -qq 2>/dev/null || true
         dpkg -s libqt5positioning5-dev &>/dev/null 2>&1 || \
             warn "libqt5positioning5-dev still unavailable — build will fail at QGeoPositionInfo"
@@ -266,6 +271,8 @@ install_sdrangel() {
 # ── System packages ────────────────────────────────────────────────────────
 
 step "Installing system packages"
+# Remove any stale Debian source left by a previous failed run before updating.
+rm -f /etc/apt/sources.list.d/debian-qt5-tmp.list
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     curl ca-certificates xz-utils git \
