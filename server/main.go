@@ -162,6 +162,10 @@ func main() {
 
 	http.HandleFunc("/api/admin/import/rr-snapshot-county", controller.Admin.RRSnapshotCountyImportHandler)
 
+	http.HandleFunc("/api/admin/trunk-recorder/config", controller.Admin.TrunkRecorderConfigHandler)
+
+	http.HandleFunc("/api/admin/dongles", controller.Admin.DonglesHandler)
+
 	http.HandleFunc("/api/call-upload", controller.Api.CallUploadHandler)
 
 	http.HandleFunc("/api/trunk-recorder-call-upload", controller.Api.TrunkRecorderCallUploadHandler)
