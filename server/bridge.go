@@ -41,7 +41,14 @@ type BridgeChannelConfig struct {
 	UdpPort        int    `json:"udpPort"`
 }
 
-var bridgeHTTPClient = &http.Client{Timeout: 80 * time.Millisecond}
+var bridgeHTTPClient = &http.Client{
+	Timeout: 200 * time.Millisecond,
+	Transport: &http.Transport{
+		MaxConnsPerHost:     4,
+		MaxIdleConnsPerHost: 4,
+		IdleConnTimeout:     30 * time.Second,
+	},
+}
 
 // sdrangelChannelReport is the subset of the SDRangel channel report we care about.
 // NFMDemodReport, DSDDemodReport, and NXDNDemodReport all expose a Squelch field.
@@ -242,8 +249,8 @@ func (b *Bridge) monitorChannel(ctx context.Context, cfg BridgeChannelConfig) {
 		}
 	}()
 
-	// Poll squelch state every 100ms, buffer audio while open.
-	ticker := time.NewTicker(100 * time.Millisecond)
+	// Poll squelch state every 250ms, buffer audio while open.
+	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
