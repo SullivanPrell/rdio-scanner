@@ -465,6 +465,11 @@ install_trunk_recorder() {
         return
     }
 
+    # stat_socket uses bundled websocketpp which is incompatible with Boost.Asio 1.74+
+    # (io_service removed). Remove it before cmake — not needed for rdio-scanner uploads.
+    rm -rf "${tr_src}/plugins/stat_socket"
+    find "${tr_src}" -name 'CMakeLists.txt' -exec sed -i '/stat_socket/d' {} \; 2>/dev/null || true
+
     step "Building trunk-recorder (this takes a while...)"
     mkdir -p "${tr_src}/build"
     (
