@@ -311,7 +311,8 @@ build_trunk_recorder() {
         cmake build-essential pkg-config \
         libboost-all-dev libusb-1.0-0-dev \
         librtlsdr-dev libliquid-dev \
-        libcurl4-openssl-dev libssl-dev sox 2>/dev/null || true
+        libcurl4-openssl-dev libssl-dev \
+        libsndfile1-dev libgps-dev sox 2>/dev/null || true
     DEBIAN_FRONTEND=noninteractive apt-get install -y gnuradio-dev 2>/dev/null || \
     DEBIAN_FRONTEND=noninteractive apt-get install -y gnuradio 2>/dev/null || true
     DEBIAN_FRONTEND=noninteractive apt-get install -y gr-osmosdr 2>/dev/null || \
@@ -335,6 +336,7 @@ build_trunk_recorder() {
         make -j"$(nproc)"
     ) || {
         warn "trunk-recorder build failed."
+        warn "  apt-get install gnuradio-dev gr-osmosdr libboost-all-dev libliquid-dev libsndfile1-dev libgps-dev"
         rm -rf "$tr_src"
         return 1
     }

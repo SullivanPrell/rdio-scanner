@@ -435,7 +435,8 @@ install_trunk_recorder() {
         cmake build-essential pkg-config \
         libboost-all-dev libusb-1.0-0-dev \
         librtlsdr-dev libliquid-dev \
-        libcurl4-openssl-dev libssl-dev sox || true
+        libcurl4-openssl-dev libssl-dev \
+        libsndfile1-dev libgps-dev sox || true
 
     # GNURadio (required for digital signal processing)
     DEBIAN_FRONTEND=noninteractive apt-get install -y gnuradio-dev 2>/dev/null || \
@@ -471,7 +472,7 @@ install_trunk_recorder() {
         make -j"$(nproc)"
     ) || {
         warn "trunk-recorder build failed — install build deps manually and retry."
-        warn "  apt-get install gnuradio-dev gr-osmosdr libboost-all-dev libliquid-dev"
+        warn "  apt-get install gnuradio-dev gr-osmosdr libboost-all-dev libliquid-dev libsndfile1-dev libgps-dev"
         rm -rf "$tr_src"
         return
     }
