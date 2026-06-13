@@ -470,10 +470,11 @@ install_trunk_recorder() {
     (
         cd "${tr_src}/build"
         cmake .. -DCMAKE_BUILD_TYPE=Release
-        make -j"$(nproc)"
+        # Retry single-threaded on parallel failure so errors appear in sequence
+        make -j"$(nproc)" || make -j1
     ) || {
         warn "trunk-recorder build failed — install build deps manually and retry."
-        warn "  apt-get install gnuradio-dev gr-osmosdr libboost-all-dev libliquid-dev libsndfile1-dev libgps-dev"
+        warn "  apt-get install gnuradio-dev gr-osmosdr libboost-all-dev libliquid-dev libsndfile1-dev libgps-dev libuhd-dev"
         rm -rf "$tr_src"
         return
     }
