@@ -470,20 +470,22 @@ install_trunk_recorder() {
     (
         cd "${tr_src}/build"
         cmake .. -DCMAKE_BUILD_TYPE=Release
-        # Retry single-threaded on parallel failure so errors appear in sequence
-        make -j"$(nproc)" || make -j1
     ) || {
-        warn "trunk-recorder build failed — install build deps manually and retry."
-        warn "  apt-get install gnuradio-dev gr-osmosdr libboost-all-dev libliquid-dev libsndfile1-dev libgps-dev libuhd-dev"
+        warn "trunk-recorder cmake configuration failed."
         rm -rf "$tr_src"
         return
     }
+    # The stat_socket plugin fails on Debian bookworm (websocketpp vs Boost.Asio 1.81+
+    # incompatibility — io_service removed). The main binary and upload plugins build fine.
+    # Treat make failure as non-fatal; check for the binary below.
+    (cd "${tr_src}/build" && (make -j"$(nproc)" || make -j1 || true))
 
     # Binary may land in build/ or build/src/ depending on version
     local tr_built
     tr_built="$(find "${tr_src}/build" -maxdepth 2 -name 'trunk-recorder' -type f 2>/dev/null | head -1)"
     if [[ -z "$tr_built" ]]; then
-        warn "trunk-recorder binary not found after build — check ${tr_src}/build"
+        warn "trunk-recorder build failed — main binary not produced."
+        warn "  apt-get install gnuradio-dev gr-osmosdr libboost-all-dev libliquid-dev libsndfile1-dev libgps-dev libuhd-dev"
         rm -rf "$tr_src"
         return
     fi
