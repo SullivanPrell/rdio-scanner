@@ -69,6 +69,7 @@ export class RdioScannerAdminRadioReferenceComponent implements OnInit {
     csvFile: File | null = null;
     csvSystemLabel = 'RadioReference';
     csvPortBase = 9000;
+    csvType: 'conventional' | 'trs' = 'conventional';
     csvResult: ImportResult | null = null;
     csvSelected: Map<number, Set<number>> = new Map();
     csvLoading = false;
@@ -296,9 +297,15 @@ export class RdioScannerAdminRadioReferenceComponent implements OnInit {
         this.csvResult = null;
         const base = await this.adminService.getConfig();
         const systemRef = this.nextSystemRef(base.systems ?? []);
-        this.csvResult = await this.adminService.importRRCSV(
-            this.csvFile, this.csvSystemLabel, systemRef, this.csvPortBase,
-        );
+        if (this.csvType === 'trs') {
+            this.csvResult = await this.adminService.importTRSCSV(
+                this.csvFile, this.csvSystemLabel, systemRef,
+            );
+        } else {
+            this.csvResult = await this.adminService.importRRCSV(
+                this.csvFile, this.csvSystemLabel, systemRef, this.csvPortBase,
+            );
+        }
         this.initSelected(this.csvSelected, this.csvResult);
         this.csvLoading = false;
         if (!this.csvResult?.systems?.length) {

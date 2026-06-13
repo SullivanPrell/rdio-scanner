@@ -334,6 +334,7 @@ enum url {
     importGMRS = 'import/gmrs',
     importChirp = 'import/chirp',
     importRRCSV = 'import/rr-csv',
+    importTRSCSV = 'import/trs-csv',
     importRRStates = 'import/rr-states',
     importRRCounties = 'import/rr-counties',
     importRRCounty = 'import/rr-county',
@@ -695,6 +696,23 @@ export class RdioScannerAdminService implements OnDestroy {
             form.append('portBase', String(portBase));
             return await firstValueFrom(this.ngHttpClient.post<ImportResult>(
                 this.getUrl(url.importChirp),
+                form,
+                { headers: this.getHeaders(), responseType: 'json' },
+            ));
+        } catch (error) {
+            this.errorHandler(error);
+            return {};
+        }
+    }
+
+    async importTRSCSV(file: File, systemLabel: string, systemRef: number): Promise<ImportResult> {
+        try {
+            const form = new FormData();
+            form.append('file', file);
+            form.append('systemLabel', systemLabel);
+            form.append('systemRef', String(systemRef));
+            return await firstValueFrom(this.ngHttpClient.post<ImportResult>(
+                this.getUrl(url.importTRSCSV),
                 form,
                 { headers: this.getHeaders(), responseType: 'json' },
             ));

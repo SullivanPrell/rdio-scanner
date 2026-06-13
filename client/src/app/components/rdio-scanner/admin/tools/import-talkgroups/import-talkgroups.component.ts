@@ -72,12 +72,21 @@ export class RdioScannerAdminImportTalkgroupsComponent implements OnInit {
             const groupId = this.baseConfig.groups?.find((g) => g.label === csv[6])?.id;
             const tagId = this.baseConfig.tags?.find((t) => t.label === csv[5])?.id;
 
+            const modeRaw = (csv[3] || '').toUpperCase().trim();
+            let type: string | undefined;
+            if (modeRaw === 'D' || modeRaw === 'DE') {
+                type = 'p25';
+            } else if (modeRaw === 'T') {
+                type = 'nfm';
+            }
+
             this.system?.talkgroups?.unshift({
                 talkgroupRef: +csv[0],
                 label: csv[2],
                 name: csv[4],
                 groupIds: groupId ? [groupId] : [],
                 tagId,
+                type,
             });
         });
 

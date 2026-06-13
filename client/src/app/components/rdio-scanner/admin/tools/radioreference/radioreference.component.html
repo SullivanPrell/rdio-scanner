@@ -322,10 +322,28 @@
 <!-- CSV IMPORT TAB                                                             -->
 <!-- ══════════════════════════════════════════════════════════════════════════ -->
 @if (activeTab === 'csv') {
-  <p class="mat-caption" style="margin-bottom:12px">
-    Import a <strong>RadioReference frequency database export CSV</strong>.
-    From RadioReference.com, open a county/system page → <em>Download → Frequency List (CSV)</em>.
-  </p>
+  <div class="row" style="margin-bottom:8px">
+    <p><span class="mat-body">CSV Type</span></p>
+    <mat-button-toggle-group [(ngModel)]="csvType" (ngModelChange)="csvResult = null; csvFile = null">
+      <mat-button-toggle value="conventional">Conventional (frequency list)</mat-button-toggle>
+      <mat-button-toggle value="trs">Trunked / P25 (talkgroup list)</mat-button-toggle>
+    </mat-button-toggle-group>
+  </div>
+
+  @if (csvType === 'conventional') {
+    <p class="mat-caption" style="margin-bottom:12px">
+      Import a <strong>RadioReference frequency database export CSV</strong>.
+      From RadioReference.com, open a county/system page → <em>Download → Frequency List (CSV)</em>.
+      Bridge channel suggestions are generated for each frequency.
+    </p>
+  } @else {
+    <p class="mat-caption" style="margin-bottom:12px">
+      Import a <strong>RadioReference trunked system (TRS) talkgroup export CSV</strong>.
+      From RadioReference.com, open a trunked system page → <em>Download → Talkgroup List (CSV)</em>.
+      Columns: <em>Decimal, Hex, Alpha Tag, Mode, Description, Tag, Category</em>.
+      No bridge channels are created — P25 trunked audio requires a P25 recorder, not per-talkgroup SDRangel channels.
+    </p>
+  }
 
   <div class="row">
     <p><span class="mat-body">System Label</span></p>
@@ -334,15 +352,17 @@
     </mat-form-field>
   </div>
 
-  <div class="row">
-    <p>
-      <span class="mat-body">UDP Port Base</span><br>
-      <span class="mat-caption">Starting UDP port for suggested bridge channels.</span>
-    </p>
-    <mat-form-field>
-      <input type="number" min="1024" max="65000" step="1" matInput [(ngModel)]="csvPortBase">
-    </mat-form-field>
-  </div>
+  @if (csvType === 'conventional') {
+    <div class="row">
+      <p>
+        <span class="mat-body">UDP Port Base</span><br>
+        <span class="mat-caption">Starting UDP port for suggested bridge channels.</span>
+      </p>
+      <mat-form-field>
+        <input type="number" min="1024" max="65000" step="1" matInput [(ngModel)]="csvPortBase">
+      </mat-form-field>
+    </div>
+  }
 
   <div class="row bottom" style="gap:12px">
     <label style="cursor:pointer">
@@ -368,7 +388,7 @@
   @if (csvResult?.systems?.length) {
     <mat-divider style="margin:12px 0"></mat-divider>
     <p class="mat-body" style="margin-bottom:4px">
-      Select frequencies to import ({{ csvResult!.systems![0].talkgroups?.length ?? 0 }} found)
+      Select talkgroups to import ({{ csvResult!.systems![0].talkgroups?.length ?? 0 }} found)
     </p>
 
     @for (sys of csvResult!.systems!; track sys.systemRef; let si = $index) {
@@ -391,6 +411,8 @@
                 <strong>{{ tg.label }}</strong>
                 @if (tg.name && tg.name !== tg.label) { — {{ tg.name }} }
                 @if (tg.frequency) { &nbsp;{{ (tg.frequency / 1000000) | number:'1.4-4' }} MHz }
+                @if (!tg.frequency && tg.talkgroupRef) { &nbsp;#{{ tg.talkgroupRef }} }
+                @if (tg.type) { &nbsp;<span style="opacity:.6">[{{ tg.type | uppercase }}]</span> }
               </span>
             </div>
           }

@@ -146,6 +146,8 @@ func main() {
 
 	http.HandleFunc("/api/admin/import/rr-csv", controller.Admin.ImportRRCSVHandler)
 
+	http.HandleFunc("/api/admin/import/trs-csv", controller.Admin.ImportTRSCSVHandler)
+
 	http.HandleFunc("/api/admin/import/rr-states", controller.Admin.ImportRRStatesHandler)
 
 	http.HandleFunc("/api/admin/import/rr-counties", controller.Admin.ImportRRCountiesHandler)

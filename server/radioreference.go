@@ -394,6 +394,184 @@ func ParseRRCSV(data []byte, systemLabel string, systemRef uint, portBase int) (
 	}, nil
 }
 
+// ParseTRSTalkgroupCSV parses a RadioReference trunked system (TRS) talkgroup export CSV.
+// Column format (standard RR trunked export):
+//
+//	0  Decimal    → TalkgroupRef
+//	1  Hex        → (ignored)
+//	2  Alpha Tag  → Label (≤8 chars)
+//	3  Mode       → talkgroup Kind: D/DE → "p25", T → "nfm"
+//	4  Description → Name
+//	5  Tag        → Tag label
+//	6  Category   → Group label
+//
+// No bridge channels are produced: P25 trunked systems cannot be demodulated
+// per-talkgroup with SDRangel's NFMDemod — they require a P25 trunk controller.
+func ParseTRSTalkgroupCSV(data []byte, systemLabel string, systemRef uint) (*ImportResult, error) {
+	r := csv.NewReader(strings.NewReader(string(data)))
+	r.TrimLeadingSpace = true
+	r.LazyQuotes = true
+
+	records, err := r.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("csv parse: %w", err)
+	}
+
+	sys := NewSystem()
+	sys.Label = systemLabel
+	sys.SystemRef = systemRef
+	sys.Kind = "p25"
+
+	groupMap := map[string]uint64{}
+	tagMap := map[string]uint64{}
+	var groups []*Group
+	var tags []*Tag
+
+	ensureGroup := func(label string) uint64 {
+		label = strings.TrimSpace(label)
+		if label == "" {
+			label = "General"
+		}
+		if id, ok := groupMap[label]; ok {
+			return id
+		}
+		id := uint64(len(groupMap) + 1)
+		groupMap[label] = id
+		groups = append(groups, &Group{Id: id, Label: label})
+		return id
+	}
+
+	ensureTag := func(label string) uint64 {
+		label = strings.TrimSpace(label)
+		if label == "" {
+			label = "Other"
+		}
+		if id, ok := tagMap[label]; ok {
+			return id
+		}
+		id := uint64(len(tagMap) + 1)
+		tagMap[label] = id
+		tags = append(tags, &Tag{Id: id, Label: label})
+		return id
+	}
+
+	for _, rec := range records {
+		if len(rec) < 3 {
+			continue
+		}
+		if strings.TrimSpace(rec[0]) == "Decimal" {
+			continue
+		}
+		dec, err := strconv.ParseUint(strings.TrimSpace(rec[0]), 10, 32)
+		if err != nil {
+			continue
+		}
+
+		alphaTag := strings.TrimSpace(rec[2])
+		mode := ""
+		description := ""
+		tagLabel := ""
+		category := ""
+		if len(rec) > 3 {
+			mode = strings.ToUpper(strings.TrimSpace(rec[3]))
+		}
+		if len(rec) > 4 {
+			description = strings.TrimSpace(rec[4])
+		}
+		if len(rec) > 5 {
+			tagLabel = strings.TrimSpace(rec[5])
+		}
+		if len(rec) > 6 {
+			category = strings.TrimSpace(rec[6])
+		}
+
+		label := alphaTag
+		if label == "" {
+			label = truncate8(description)
+		}
+		name := description
+		if name == "" {
+			name = alphaTag
+		}
+		if label == "" && name == "" {
+			continue
+		}
+
+		kind := ""
+		switch mode {
+		case "D", "DE":
+			kind = "p25"
+		case "T":
+			kind = "nfm"
+		}
+
+		groupId := ensureGroup(category)
+		tagId := ensureTag(tagLabel)
+
+		sys.Talkgroups.List = append(sys.Talkgroups.List, &Talkgroup{
+			TalkgroupRef: uint(dec),
+			Label:        truncate8(label),
+			Name:         name,
+			Kind:         kind,
+			GroupIds:     []uint64{groupId},
+			TagId:        tagId,
+		})
+	}
+
+	if len(sys.Talkgroups.List) == 0 {
+		return nil, fmt.Errorf("no valid rows found in CSV")
+	}
+
+	return &ImportResult{
+		Systems:  []*System{sys},
+		Groups:   groups,
+		Tags:     tags,
+		Channels: []BridgeChannelConfig{},
+	}, nil
+}
+
+func (admin *Admin) ImportTRSCSVHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !admin.ValidateToken(admin.GetAuthorization(r)) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(file)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	sysLabel := r.FormValue("systemLabel")
+	if sysLabel == "" {
+		sysLabel = "Trunked System"
+	}
+	sysRef, _ := strconv.Atoi(r.FormValue("systemRef"))
+	if sysRef <= 0 {
+		sysRef = 1
+	}
+	result, err := ParseTRSTalkgroupCSV(data, sysLabel, uint(sysRef))
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(err.Error()))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
 func (admin *Admin) ImportRRCSVHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
