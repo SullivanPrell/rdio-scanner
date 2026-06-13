@@ -354,20 +354,20 @@ build_trunk_recorder() {
 
 tr_latest_version() {
     curl -fsSL 'https://api.github.com/repos/robotastic/trunk-recorder/releases/latest' 2>/dev/null | \
-        grep -o '"tag_name":"[^"]*"' | grep -o 'v[0-9.]*' | head -1
+        grep -o '"tag_name":"[^"]*"' | grep -o 'v[0-9.]*' | head -1 || true
 }
 
 if [[ "$TR_UP" == true ]]; then
     step "Upgrading trunk-recorder"
     systemctl stop trunk-recorder 2>/dev/null || true
-    tr_ver="$(tr_latest_version)"
+    tr_ver="$(tr_latest_version)" || true
     [[ -z "$tr_ver" ]] && tr_ver="v5.0.0"
     info "Target: trunk-recorder ${tr_ver}"
     build_trunk_recorder "$tr_ver" || warn "trunk-recorder upgrade failed — existing binary kept."
 
 elif [[ ! -x "$TR_BIN" ]]; then
     step "Installing trunk-recorder (missing)"
-    tr_ver="$(tr_latest_version)"
+    tr_ver="$(tr_latest_version)" || true
     [[ -z "$tr_ver" ]] && tr_ver="v5.0.0"
 
     # Ensure config dir and data dir exist

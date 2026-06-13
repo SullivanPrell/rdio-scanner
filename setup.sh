@@ -435,7 +435,7 @@ install_trunk_recorder() {
         cmake build-essential pkg-config \
         libboost-all-dev libusb-1.0-0-dev \
         librtlsdr-dev libliquid-dev \
-        libcurl4-openssl-dev libssl-dev sox
+        libcurl4-openssl-dev libssl-dev sox || true
 
     # GNURadio (required for digital signal processing)
     DEBIAN_FRONTEND=noninteractive apt-get install -y gnuradio-dev 2>/dev/null || \
