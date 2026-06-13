@@ -1,15 +1,16 @@
 #!/bin/bash
-# setup.sh — post-clone setup for rdio-scanner + sdrangelsrv on a Raspberry Pi 5.
+# setup.sh — post-clone setup for rdio-scanner + sdrangelsrv + trunk-recorder on a Raspberry Pi 5.
 #
 # Run once from the repo root after cloning:
 #   sudo bash setup.sh [OPTIONS]
 #
 # OPTIONS:
-#   --port PORT        HTTP port for the rdio-scanner UI (default: 3000)
-#   --sdrangel-port P  sdrangelsrv API port (default: 8091)
-#   --skip-sdrangel    Install rdio-scanner only, skip sdrangelsrv
-#   --skip-build       Skip Go/Node build (binary must be present in bin/)
-#   --yes              Non-interactive
+#   --port PORT           HTTP port for the rdio-scanner UI (default: 3000)
+#   --sdrangel-port P     sdrangelsrv API port (default: 8091)
+#   --skip-sdrangel       Install rdio-scanner only, skip sdrangelsrv
+#   --skip-trunk-recorder Skip trunk-recorder build
+#   --skip-build          Skip Go/Node build (binary must be present in bin/)
+#   --yes                 Non-interactive
 
 set -euo pipefail
 
@@ -18,6 +19,7 @@ set -euo pipefail
 RDIO_PORT=3000
 SDRANGEL_API_PORT=8091
 SKIP_SDRANGEL=false
+SKIP_TRUNK_RECORDER=false
 SKIP_BUILD=false
 YES=false
 
@@ -25,6 +27,10 @@ RDIO_USER="rdio"
 RDIO_DATA_DIR="/var/lib/rdio-scanner"
 RDIO_CONF_DIR="/etc/rdio-scanner"
 RDIO_BIN="/usr/local/bin/rdio-scanner"
+
+TR_BIN="/usr/local/bin/trunk-recorder"
+TR_CONF_DIR="/etc/trunk-recorder"
+TR_DATA_DIR="/var/lib/trunk-recorder"
 
 GO_MIN_MINOR=23            # minimum Go 1.x we'll accept from apt before downloading
 GO_DOWNLOAD_VERSION="1.24" # version to download if apt's Go is too old
@@ -50,8 +56,9 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --port)           RDIO_PORT="$2";          shift 2 ;;
         --sdrangel-port)  SDRANGEL_API_PORT="$2";  shift 2 ;;
-        --skip-sdrangel)  SKIP_SDRANGEL=true;      shift ;;
-        --skip-build)     SKIP_BUILD=true;         shift ;;
+        --skip-sdrangel)        SKIP_SDRANGEL=true;         shift ;;
+        --skip-trunk-recorder)  SKIP_TRUNK_RECORDER=true;   shift ;;
+        --skip-build)           SKIP_BUILD=true;            shift ;;
         --yes)            YES=true;                shift ;;
         -h|--help)
             grep '^#' "$0" | sed 's/^# \?//' | head -12
@@ -81,7 +88,9 @@ if [[ "$YES" == false ]]; then
     echo "  This script will:"
     echo "   • Install build tools (Go, Node.js 22)"
     echo "   • Build the Angular client and Go server binary"
-    echo "   • Install: rtl-sdr, ffmpeg$([ "$SKIP_SDRANGEL" = false ] && echo ", sdrangel (sdrangelsrv)")"
+    echo "   • Install: rtl-sdr, ffmpeg$([ "$SKIP_SDRANGEL" = false ] && echo ", sdrangelsrv")"
+    [ "$SKIP_TRUNK_RECORDER" = false ] && \
+    echo "   • Build trunk-recorder (P25 trunked decoder, ~15 min)"
     echo "   • Create service account '${RDIO_USER}'"
     echo "   • Install systemd services (auto-start on boot)"
     echo "   • Configure RTL-SDR udev rules and kernel driver blacklist"
@@ -402,6 +411,119 @@ install_sdrangel() {
     build_sdrangel_from_source
 }
 
+# ── trunk-recorder install ────────────────────────────────────────────────
+
+# Build trunk-recorder from source if the binary is not already present.
+# Skipped automatically when $TR_BIN already exists or $SKIP_TRUNK_RECORDER=true.
+# Expected build time: ~15 minutes on a Pi 5.
+install_trunk_recorder() {
+    if [[ -x "$TR_BIN" ]]; then
+        info "trunk-recorder already installed at ${TR_BIN} — skipping build."
+        return
+    fi
+
+    local tr_src="/tmp/trunk-recorder-src" tr_version
+
+    tr_version="$(curl -fsSL 'https://api.github.com/repos/robotastic/trunk-recorder/releases/latest' 2>/dev/null | \
+        grep -o '"tag_name":"[^"]*"' | grep -o 'v[0-9.]*' | head -1)" || true
+    [[ -z "$tr_version" ]] && tr_version="v5.0.0"
+
+    warn "Building trunk-recorder ${tr_version} from source — ~15 min on Pi 5."
+
+    step "Installing trunk-recorder build dependencies"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        cmake build-essential pkg-config \
+        libboost-all-dev libusb-1.0-0-dev \
+        librtlsdr-dev libliquid-dev \
+        libcurl4-openssl-dev libssl-dev sox
+
+    # GNURadio (required for digital signal processing)
+    DEBIAN_FRONTEND=noninteractive apt-get install -y gnuradio-dev 2>/dev/null || \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y gnuradio 2>/dev/null || \
+        warn "gnuradio-dev not found — trunk-recorder build may fail."
+
+    # gr-osmosdr provides the GNURadio osmocom source block (RTL-SDR support)
+    DEBIAN_FRONTEND=noninteractive apt-get install -y gr-osmosdr 2>/dev/null || \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y libgnuradio-osmosdr0.2.0 2>/dev/null || true
+
+    # SoapySDR — alternative SDR interface trunk-recorder can use
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        libsoapysdr-dev soapysdr-tools soapysdr-module-rtlsdr 2>/dev/null || true
+
+    # fdkaac — AAC encoder for recorded audio (optional but recommended)
+    DEBIAN_FRONTEND=noninteractive apt-get install -y fdkaac 2>/dev/null || true
+
+    step "Cloning trunk-recorder ${tr_version}"
+    rm -rf "$tr_src"
+    git clone --depth=1 --branch "$tr_version" \
+        https://github.com/robotastic/trunk-recorder.git "$tr_src" 2>/dev/null || \
+    git clone --depth=1 \
+        https://github.com/robotastic/trunk-recorder.git "$tr_src" || {
+        warn "Failed to clone trunk-recorder — skipping."
+        return
+    }
+
+    step "Building trunk-recorder (this takes a while...)"
+    mkdir -p "${tr_src}/build"
+    (
+        cd "${tr_src}/build"
+        cmake .. -DCMAKE_BUILD_TYPE=Release
+        make -j"$(nproc)"
+    ) || {
+        warn "trunk-recorder build failed — install build deps manually and retry."
+        warn "  apt-get install gnuradio-dev gr-osmosdr libboost-all-dev libliquid-dev"
+        rm -rf "$tr_src"
+        return
+    }
+
+    # Binary may land in build/ or build/src/ depending on version
+    local tr_built
+    tr_built="$(find "${tr_src}/build" -maxdepth 2 -name 'trunk-recorder' -type f 2>/dev/null | head -1)"
+    if [[ -z "$tr_built" ]]; then
+        warn "trunk-recorder binary not found after build — check ${tr_src}/build"
+        rm -rf "$tr_src"
+        return
+    fi
+
+    install -m 0755 "$tr_built" "$TR_BIN"
+    rm -rf "$tr_src"
+    info "trunk-recorder ${tr_version} installed to ${TR_BIN}"
+
+    # Config directory and example config
+    install -d -m 0755 "$TR_CONF_DIR"
+
+    if [[ ! -f "${TR_CONF_DIR}/config.json" ]]; then
+        cat > "${TR_CONF_DIR}/config.json.example" <<'TRCFG'
+{
+  "ver": 2,
+  "sources": [
+    {
+      "center": 0,
+      "rate": 2400000,
+      "squelch": -50,
+      "device": "rtl=0",
+      "gain": 30,
+      "digitalRecorders": 8
+    }
+  ],
+  "systems": [
+    {
+      "control_channels": [],
+      "type": "p25",
+      "talkgroupsFile": "/etc/trunk-recorder/talkgroups.csv",
+      "uploadServer": "http://localhost:3000",
+      "apiKey": "REPLACE_WITH_YOUR_RDIO_SCANNER_API_KEY",
+      "shortName": "p25system",
+      "recordUnknown": false
+    }
+  ],
+  "captureDir": "/var/lib/trunk-recorder"
+}
+TRCFG
+        info "Config example written to ${TR_CONF_DIR}/config.json.example"
+    fi
+}
+
 # ── System packages ────────────────────────────────────────────────────────
 
 step "Installing system packages"
@@ -534,6 +656,14 @@ INICFG
     info "Config written to ${RDIO_CONF_DIR}/rdio-scanner.ini"
 fi
 
+# ── trunk-recorder ────────────────────────────────────────────────────────
+
+if [[ "$SKIP_TRUNK_RECORDER" == false ]]; then
+    install_trunk_recorder
+    # Data dir (writable by rdio service user for captured audio)
+    install -d -m 0750 -o "$RDIO_USER" -g "$RDIO_USER" "$TR_DATA_DIR"
+fi
+
 # ── RTL-SDR kernel driver blacklist ───────────────────────────────────────
 
 step "Configuring RTL-SDR"
@@ -619,6 +749,32 @@ SyslogIdentifier=sdrangelsrv
 WantedBy=multi-user.target
 UNIT
 
+if [[ "$SKIP_TRUNK_RECORDER" == false ]] && [[ -x "$TR_BIN" ]]; then
+    cat > /etc/systemd/system/trunk-recorder.service <<UNIT
+[Unit]
+Description=Trunk Recorder (P25 trunked system decoder)
+After=network-online.target rdio-scanner.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${RDIO_USER}
+Group=plugdev
+SupplementaryGroups=plugdev dialout audio
+WorkingDirectory=${TR_DATA_DIR}
+ExecStart=${TR_BIN} --config ${TR_CONF_DIR}/config.json
+Restart=on-failure
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=trunk-recorder
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    info "trunk-recorder.service written (not enabled — configure first)."
+fi
+
 systemctl daemon-reload
 systemctl enable rdio-scanner
 info "rdio-scanner.service enabled (auto-start on boot)."
@@ -694,21 +850,30 @@ echo "  Admin UI      →  http://${PI_IP}:${RDIO_PORT}/admin"
 echo ""
 echo "  Service status:"
 systemctl is-active rdio-scanner >/dev/null 2>&1 \
-    && echo -e "   ${G}●${NC} rdio-scanner  running" \
-    || echo -e "   ${R}●${NC} rdio-scanner  not running  (journalctl -u rdio-scanner)"
+    && echo -e "   ${G}●${NC} rdio-scanner   running" \
+    || echo -e "   ${R}●${NC} rdio-scanner   not running  (journalctl -u rdio-scanner)"
 if [[ "$SKIP_SDRANGEL" == false ]]; then
     systemctl is-active sdrangelsrv >/dev/null 2>&1 \
-        && echo -e "   ${G}●${NC} sdrangelsrv   running" \
-        || echo -e "   ${Y}●${NC} sdrangelsrv   not running  (journalctl -u sdrangelsrv)"
+        && echo -e "   ${G}●${NC} sdrangelsrv    running" \
+        || echo -e "   ${Y}●${NC} sdrangelsrv    not running  (journalctl -u sdrangelsrv)"
+fi
+if [[ "$SKIP_TRUNK_RECORDER" == false ]] && [[ -x "$TR_BIN" ]]; then
+    echo -e "   ${Y}●${NC} trunk-recorder not started — configure first:"
+    echo "       1. Get an API key from Admin → Config → API Keys"
+    echo "       2. Edit ${TR_CONF_DIR}/config.json (copy from .example)"
+    echo "          Set: center freq, control_channels, apiKey"
+    echo "       3. Copy talkgroups CSV to ${TR_CONF_DIR}/talkgroups.csv"
+    echo "       4. systemctl enable --now trunk-recorder"
 fi
 echo ""
 echo "  Plug in any RTL-SDR dongle — it will be available immediately."
 echo "  (No reboot needed for the dongle; a reboot applies config.txt changes.)"
 echo ""
 echo "  Useful commands:"
-echo "    journalctl -fu rdio-scanner   # live logs"
-echo "    lsusb                         # verify RTL-SDR dongle is detected"
-echo "    rtl_test -t                   # quick RTL-SDR hardware test"
+echo "    journalctl -fu rdio-scanner     # live logs"
+echo "    journalctl -fu trunk-recorder   # trunk-recorder logs"
+echo "    lsusb                           # verify RTL-SDR dongle is detected"
+echo "    rtl_test -t                     # quick RTL-SDR hardware test"
 echo ""
 echo -e "  ${Y}Reboot to apply GPU/Bluetooth/USB boot config changes.${NC}"
 echo ""

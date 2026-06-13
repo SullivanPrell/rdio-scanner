@@ -1,11 +1,12 @@
 #!/bin/bash
-# upgrade.sh — upgrade an existing rdio-scanner + sdrangelsrv installation on Raspberry Pi 5.
+# upgrade.sh — upgrade rdio-scanner + sdrangelsrv + trunk-recorder on Raspberry Pi 5.
 #
 # Run from the repo root:
 #   sudo bash upgrade.sh [OPTIONS]
 #
 # OPTIONS:
 #   --sdr-up   Also pull the latest SDRangel tag and rebuild sdrangelsrv (~20-40 min)
+#   --tr-up    Also pull the latest trunk-recorder tag and rebuild (~15 min)
 #   --yes      Non-interactive (skip confirmation prompt)
 #   -h|--help  Show this help
 
@@ -14,12 +15,17 @@ set -euo pipefail
 # ── Defaults ────────────────────────────────────────────────────────────────
 
 SDR_UP=false
+TR_UP=false
 YES=false
 
 RDIO_USER="rdio"
 RDIO_DATA_DIR="/var/lib/rdio-scanner"
 RDIO_CONF_DIR="/etc/rdio-scanner"
 RDIO_BIN="/usr/local/bin/rdio-scanner"
+
+TR_BIN="/usr/local/bin/trunk-recorder"
+TR_CONF_DIR="/etc/trunk-recorder"
+TR_DATA_DIR="/var/lib/trunk-recorder"
 
 # ── Colours ─────────────────────────────────────────────────────────────────
 
@@ -40,6 +46,7 @@ fatal() { echo -e "${R}[✘] $*${NC}" >&2; exit 1; }
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --sdr-up) SDR_UP=true; shift ;;
+        --tr-up)  TR_UP=true;  shift ;;
         --yes)    YES=true;    shift ;;
         -h|--help)
             grep '^#' "$0" | sed 's/^# \?//' | head -10
@@ -88,9 +95,13 @@ if [[ "$YES" == false ]]; then
     echo "  This script will:"
     echo "   • Pull the latest rdio-scanner code (git pull)"
     echo "   • Rebuild the Angular client and Go server binary"
+    echo "   • Install trunk-recorder if missing (~15 min first time)"
     echo "   • Restart the rdio-scanner service"
     if [[ "$SDR_UP" == true ]]; then
         echo "   • Pull the latest SDRangel release tag and rebuild sdrangelsrv (~20-40 min)"
+    fi
+    if [[ "$TR_UP" == true ]]; then
+        echo "   • Pull the latest trunk-recorder release tag and rebuild (~15 min)"
     fi
     echo ""
     echo -e "${BOLD}Continue? [y/N]${NC}"
@@ -289,6 +300,144 @@ PYEOF
 
 fi  # SDR_UP
 
+# ── trunk-recorder: install if missing, or rebuild if --tr-up ────────────────
+
+build_trunk_recorder() {
+    local tr_src="/tmp/trunk-recorder-src" tr_version="$1"
+
+    warn "Building trunk-recorder ${tr_version} from source (~15 min on Pi 5)."
+
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        cmake build-essential pkg-config \
+        libboost-all-dev libusb-1.0-0-dev \
+        librtlsdr-dev libliquid-dev \
+        libcurl4-openssl-dev libssl-dev sox 2>/dev/null || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y gnuradio-dev 2>/dev/null || \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y gnuradio 2>/dev/null || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y gr-osmosdr 2>/dev/null || \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y libgnuradio-osmosdr0.2.0 2>/dev/null || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        libsoapysdr-dev soapysdr-tools soapysdr-module-rtlsdr fdkaac 2>/dev/null || true
+
+    rm -rf "$tr_src"
+    git clone --depth=1 --branch "$tr_version" \
+        https://github.com/robotastic/trunk-recorder.git "$tr_src" 2>/dev/null || \
+    git clone --depth=1 \
+        https://github.com/robotastic/trunk-recorder.git "$tr_src" || {
+        warn "Failed to clone trunk-recorder — skipping."
+        return 1
+    }
+
+    mkdir -p "${tr_src}/build"
+    (
+        cd "${tr_src}/build"
+        cmake .. -DCMAKE_BUILD_TYPE=Release
+        make -j"$(nproc)"
+    ) || {
+        warn "trunk-recorder build failed."
+        rm -rf "$tr_src"
+        return 1
+    }
+
+    local tr_built
+    tr_built="$(find "${tr_src}/build" -maxdepth 2 -name 'trunk-recorder' -type f 2>/dev/null | head -1)"
+    if [[ -z "$tr_built" ]]; then
+        warn "trunk-recorder binary not found after build."
+        rm -rf "$tr_src"
+        return 1
+    fi
+
+    install -m 0755 "$tr_built" "$TR_BIN"
+    rm -rf "$tr_src"
+    info "trunk-recorder ${tr_version} installed to ${TR_BIN}"
+}
+
+tr_latest_version() {
+    curl -fsSL 'https://api.github.com/repos/robotastic/trunk-recorder/releases/latest' 2>/dev/null | \
+        grep -o '"tag_name":"[^"]*"' | grep -o 'v[0-9.]*' | head -1
+}
+
+if [[ "$TR_UP" == true ]]; then
+    step "Upgrading trunk-recorder"
+    systemctl stop trunk-recorder 2>/dev/null || true
+    tr_ver="$(tr_latest_version)"
+    [[ -z "$tr_ver" ]] && tr_ver="v5.0.0"
+    info "Target: trunk-recorder ${tr_ver}"
+    build_trunk_recorder "$tr_ver" || warn "trunk-recorder upgrade failed — existing binary kept."
+
+elif [[ ! -x "$TR_BIN" ]]; then
+    step "Installing trunk-recorder (missing)"
+    tr_ver="$(tr_latest_version)"
+    [[ -z "$tr_ver" ]] && tr_ver="v5.0.0"
+
+    # Ensure config dir and data dir exist
+    install -d -m 0755 "$TR_CONF_DIR"
+    install -d -m 0750 -o "$RDIO_USER" -g "$RDIO_USER" "$TR_DATA_DIR" 2>/dev/null || \
+    install -d -m 0750 "$TR_DATA_DIR"
+
+    build_trunk_recorder "$tr_ver" || warn "trunk-recorder install failed — run setup.sh to retry."
+
+    if [[ -x "$TR_BIN" ]] && [[ ! -f "${TR_CONF_DIR}/config.json" ]]; then
+        cat > "${TR_CONF_DIR}/config.json.example" <<'TRCFG'
+{
+  "ver": 2,
+  "sources": [
+    {
+      "center": 0,
+      "rate": 2400000,
+      "squelch": -50,
+      "device": "rtl=0",
+      "gain": 30,
+      "digitalRecorders": 8
+    }
+  ],
+  "systems": [
+    {
+      "control_channels": [],
+      "type": "p25",
+      "talkgroupsFile": "/etc/trunk-recorder/talkgroups.csv",
+      "uploadServer": "http://localhost:3000",
+      "apiKey": "REPLACE_WITH_YOUR_RDIO_SCANNER_API_KEY",
+      "shortName": "p25system",
+      "recordUnknown": false
+    }
+  ],
+  "captureDir": "/var/lib/trunk-recorder"
+}
+TRCFG
+        info "Config example written to ${TR_CONF_DIR}/config.json.example"
+    fi
+
+    if [[ -x "$TR_BIN" ]] && [[ ! -f /etc/systemd/system/trunk-recorder.service ]]; then
+        cat > /etc/systemd/system/trunk-recorder.service <<UNIT
+[Unit]
+Description=Trunk Recorder (P25 trunked system decoder)
+After=network-online.target rdio-scanner.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${RDIO_USER}
+Group=plugdev
+SupplementaryGroups=plugdev dialout audio
+WorkingDirectory=${TR_DATA_DIR}
+ExecStart=${TR_BIN} --config ${TR_CONF_DIR}/config.json
+Restart=on-failure
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=trunk-recorder
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+        info "trunk-recorder.service written."
+    fi
+
+else
+    info "trunk-recorder already installed at ${TR_BIN} — use --tr-up to upgrade."
+fi
+
 # ── Reload systemd & restart services ────────────────────────────────────────
 
 step "Starting services"
@@ -323,4 +472,16 @@ if [[ "$SDR_UP" == true ]]; then
         && echo -e "   ${G}●${NC} sdrangelsrv   running" \
         || echo -e "   ${Y}●${NC} sdrangelsrv   not running  (journalctl -u sdrangelsrv)"
 fi
+if [[ -x "$TR_BIN" ]]; then
+    systemctl is-active trunk-recorder >/dev/null 2>&1 \
+        && echo -e "   ${G}●${NC} trunk-recorder  running" \
+        || echo -e "   ${Y}●${NC} trunk-recorder  not running  (needs config — see below)"
+fi
 echo ""
+if [[ -x "$TR_BIN" ]] && [[ ! -f "${TR_CONF_DIR}/config.json" ]]; then
+    echo -e "  ${Y}trunk-recorder needs configuration before it can run:${NC}"
+    echo "   1. Copy the example:  cp ${TR_CONF_DIR}/config.json.example ${TR_CONF_DIR}/config.json"
+    echo "   2. Edit center freq, device string, control channels, and your rdio-scanner API key"
+    echo "   3. Enable & start:    systemctl enable --now trunk-recorder"
+    echo ""
+fi
