@@ -310,6 +310,7 @@ build_trunk_recorder() {
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
         cmake build-essential pkg-config \
         libboost-all-dev libusb-1.0-0-dev \
+        libuhd-dev \
         librtlsdr-dev libliquid-dev \
         libcurl4-openssl-dev libssl-dev \
         libsndfile1-dev libgps-dev sox 2>/dev/null || true
