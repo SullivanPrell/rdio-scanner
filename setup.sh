@@ -465,10 +465,12 @@ install_trunk_recorder() {
         return
     }
 
-    # stat_socket uses bundled websocketpp which is incompatible with Boost.Asio 1.74+
-    # (io_service removed). Remove it before cmake — not needed for rdio-scanner uploads.
-    rm -rf "${tr_src}/plugins/stat_socket"
-    find "${tr_src}" -name 'CMakeLists.txt' -exec sed -i '/stat_socket/d' {} \; 2>/dev/null || true
+    # stat_socket and simplestream use deprecated Boost.Asio io_service API removed in 1.74+.
+    # Bookworm ships Boost 1.81. Remove both before cmake — neither is needed for rdio-scanner.
+    for _bad_plugin in stat_socket simplestream; do
+        rm -rf "${tr_src}/plugins/${_bad_plugin}"
+        find "${tr_src}" -name 'CMakeLists.txt' -exec sed -i "/${_bad_plugin}/d" {} \; 2>/dev/null || true
+    done
 
     step "Building trunk-recorder (this takes a while...)"
     mkdir -p "${tr_src}/build"
@@ -480,9 +482,8 @@ install_trunk_recorder() {
         rm -rf "$tr_src"
         return
     }
-    # The stat_socket plugin fails on Debian bookworm (websocketpp vs Boost.Asio 1.81+
-    # incompatibility — io_service removed). The main binary and upload plugins build fine.
-    # Treat make failure as non-fatal; check for the binary below.
+    # Incompatible plugins are removed above; make failure is still treated as non-fatal
+    # in case a future plugin version introduces another incompatibility.
     (cd "${tr_src}/build" && (make -j"$(nproc)" || make -j1 || true))
 
     # Binary may land in build/ or build/src/ depending on version
