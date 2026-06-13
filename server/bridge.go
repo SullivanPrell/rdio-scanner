@@ -44,7 +44,7 @@ type BridgeChannelConfig struct {
 var bridgeHTTPClient = &http.Client{Timeout: 80 * time.Millisecond}
 
 // sdrangelChannelReport is the subset of the SDRangel channel report we care about.
-// Both NFMDemodReport (analog FM) and DSDDemodReport (NXDN/digital) expose a Squelch field.
+// NFMDemodReport, DSDDemodReport, and NXDNDemodReport all expose a Squelch field.
 type sdrangelChannelReport struct {
 	NFMDemodReport *struct {
 		Squelch int `json:"squelch"`
@@ -52,6 +52,9 @@ type sdrangelChannelReport struct {
 	DSDDemodReport *struct {
 		Squelch int `json:"squelch"`
 	} `json:"DSDDemodReport"`
+	NXDNDemodReport *struct {
+		Squelch int `json:"squelch"`
+	} `json:"NXDNDemodReport"`
 }
 
 type Bridge struct {
@@ -131,8 +134,11 @@ func (b *Bridge) squelchOpen(host string, port uint, deviceSetIndex, channelInde
 	if report.DSDDemodReport != nil {
 		return report.DSDDemodReport.Squelch == 1, nil
 	}
+	if report.NXDNDemodReport != nil {
+		return report.NXDNDemodReport.Squelch == 1, nil
+	}
 
-	return false, fmt.Errorf("no NFMDemodReport or DSDDemodReport in response (deviceset %d channel %d)", deviceSetIndex, channelIndex)
+	return false, fmt.Errorf("no NFMDemodReport, DSDDemodReport, or NXDNDemodReport in response (deviceset %d channel %d)", deviceSetIndex, channelIndex)
 }
 
 // bridgeBuildWAV wraps raw L16 mono PCM bytes in a RIFF/WAV header.
