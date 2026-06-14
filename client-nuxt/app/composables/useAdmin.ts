@@ -187,13 +187,17 @@ export interface RTLDongle {
 
 const TOKEN_KEY = 'rdio-admin-token'
 
-const useAdminToken = () => useState<string>('admin:token', () => {
-  if (import.meta.client) return localStorage.getItem(TOKEN_KEY) ?? ''
-  return ''
-})
+const useAdminToken = () => useState<string>('admin:token', () => '')
 
 export const useAdmin = () => {
   const token = useAdminToken()
+
+  // Restore from localStorage on every composable call — the useState initializer
+  // only runs once (baked into the SSG payload as ''), so we restore here instead.
+  if (import.meta.client && !token.value) {
+    token.value = localStorage.getItem(TOKEN_KEY) ?? ''
+  }
+
   const toast = useToast()
 
   const authHeader = () => ({ Authorization: token.value })
