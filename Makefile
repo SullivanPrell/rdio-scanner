@@ -19,45 +19,82 @@ app := rdio-scanner
 date := 2026/05/16
 ver := 7.0.0-dev
 
+# Detect local platform for deploy/run targets
+LOCAL_OS   := $(shell go env GOOS   2>/dev/null || uname -s | tr '[:upper:]' '[:lower:]')
+LOCAL_ARCH := $(shell go env GOARCH 2>/dev/null || uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+LOCAL_BIN  := $(if $(filter windows,$(LOCAL_OS)),$(app).exe,$(app))
+
+# Deployment directory (override with: make deploy DEPLOY_DIR=/usr/local/bin)
+DEPLOY_DIR ?= .
+
 client := $(wildcard client-nuxt/*.json client-nuxt/*.ts client-nuxt/app/**/*.vue client-nuxt/app/**/*.ts)
 server := $(wildcard server/*.go)
 
-build = @cd server && GOOS=$(1) GOARCH=$(3) go build -o ../dist/$(2)-$(3)/$(4)
+build  = @cd server && GOOS=$(1) GOARCH=$(3) go build -o ../dist/$(2)-$(3)/$(4)
 pandoc = @test -d dist/$(1)-$(2) || mkdir -p dist/$(1)-$(2) && pandoc -f markdown -o dist/$(1)-$(2)/$(3) --resource-path docs:docs/platforms $(4) docs/webapp.md docs/faq.md CHANGELOG.md
-zip = @cd dist/$(1)-$(2) && zip -q ../$(app)-$(1)-$(2)-v$(ver).zip * && cd ..
+zip    = @cd dist/$(1)-$(2) && zip -q ../$(app)-$(1)-$(2)-v$(ver).zip * && cd ..
 
-.PHONY: all clean container dist sed
+.PHONY: all help clean deploy run webapp container dist sed
 .PHONY: freebsd freebsd-amd64
 .PHONY: linux linux-386 linux-amd64 linux-arm linux-arm64
 .PHONY: macos macos-amd64 macos-arm64
 .PHONY: windows windows-amd64
 
-all: clean dist
+help: ## Show available targets
+	@echo ""
+	@echo "  Rdio Scanner $(ver)"
+	@echo ""
+	@echo "  Development"
+	@grep -E '^(deploy|run|webapp|clean)[^:]*:.*?## .*$$' $(MAKEFILE_LIST) \
+		| awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36mmake %-20s\033[0m %s\n", $$1, $$2}'
+	@echo ""
+	@echo "  Distribution"
+	@grep -E '^(all|dist|container|sed)[^:]*:.*?## .*$$' $(MAKEFILE_LIST) \
+		| awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36mmake %-20s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^(linux|macos|windows|freebsd)[^:]*:.*?## .*$$' $(MAKEFILE_LIST) \
+		| awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36mmake %-20s\033[0m %s\n", $$1, $$2}'
+	@echo ""
+	@echo "  Variables"
+	@echo "    DEPLOY_DIR   Installation directory       (default: .)"
+	@echo "    ver          Version string               (default: $(ver))"
+	@echo "    date         Release date                 (default: $(date))"
+	@echo ""
 
-clean:
+all: clean dist ## Clean then build all distribution packages
+
+deploy: webapp ## Build for the current platform and install to DEPLOY_DIR (default: .)
+	@echo "Building $(app) for $(LOCAL_OS)/$(LOCAL_ARCH)..."
+	@cd server && GOOS=$(LOCAL_OS) GOARCH=$(LOCAL_ARCH) go build -o ../$(DEPLOY_DIR)/$(LOCAL_BIN)
+	@echo "Installed: $(DEPLOY_DIR)/$(LOCAL_BIN)"
+
+run: deploy ## Build and run locally on port 3000
+	@echo "Starting $(app)..."
+	@$(DEPLOY_DIR)/$(LOCAL_BIN)
+
+clean: ## Remove build artefacts (node_modules, dist, server/webapp)
 	@rm -fr client-nuxt/node_modules client-nuxt/.nuxt client-nuxt/.output dist server/webapp
 
-container: webapp linux-amd64
+container: webapp linux-amd64 ## Build and push multi-arch container image (requires Podman)
 	@podman login docker.io
 	@podman manifest rm localhost/rdio-scanner:latest || true
 	@podman build --platform linux/amd64,linux/arm,linux/arm64 --pull --manifest rdio-scanner:latest .
 	@podman manifest push --format v2s2 localhost/rdio-scanner:latest docker://docker.io/chuot/rdio-scanner:latest
 
-dist: freebsd linux macos windows
+dist: freebsd linux macos windows ## Build all distribution zip packages
 
-sed:
+sed: ## Stamp version and date into source files (usage: make sed ver=X.Y.Z date=YYYY/MM/DD)
 	@sed -i -re "s|^(\s*\"version\":).*$$|\1 \"$(ver)\"|" client-nuxt/package.json
 	@sed -i -re "s|^(const\s+Version\s+=).*$$|\1 \"$(ver)\"|" server/version.go
 	@sed -i -re "s|v[0-9]+\.[0-9]+\.[0-9]+|v$(ver)|" COMPILING.md README.md docs/docker/README.md docs/platforms/*.md
 	@sed -i -re "s|[0-9]{4}/[0-9]{2}/[0-9]{2}|$(date)|" docs/docker/README.md docs/platforms/*.md
 
-webapp: server/webapp/index.html
+webapp: server/webapp/index.html ## Build the Nuxt client into server/webapp/
 
 server/webapp/index.html: $(client)
 	@cd client-nuxt && test -d node_modules || yarn install
 	@cd client-nuxt && yarn build
 
-freebsd: freebsd-amd64
+freebsd: freebsd-amd64 ## Build FreeBSD packages
 freebsd-amd64: webapp dist/$(app)-freebsd-amd64-v$(ver).zip
 
 dist/$(app)-freebsd-amd64-v$(ver).zip: $(server)
@@ -65,7 +102,7 @@ dist/$(app)-freebsd-amd64-v$(ver).zip: $(server)
 	$(call build,freebsd,freebsd,amd64,$(app))
 	$(call zip,freebsd,amd64,$(app))
 
-linux: linux-386 linux-amd64 linux-arm linux-arm64
+linux: linux-386 linux-amd64 linux-arm linux-arm64 ## Build Linux packages (386, amd64, arm, arm64)
 linux-386: webapp dist/$(app)-linux-386-v$(ver).zip
 linux-amd64: webapp dist/$(app)-linux-amd64-v$(ver).zip
 linux-arm: webapp dist/$(app)-linux-arm-v$(ver).zip
@@ -91,7 +128,7 @@ dist/$(app)-linux-arm64-v$(ver).zip: $(server)
 	$(call build,linux,linux,arm64,$(app))
 	$(call zip,linux,arm64,$(app))
 
-macos: macos-amd64 macos-arm64
+macos: macos-amd64 macos-arm64 ## Build macOS packages (amd64, arm64)
 macos-amd64: webapp dist/$(app)-macos-amd64-v$(ver).zip
 macos-arm64: webapp dist/$(app)-macos-arm64-v$(ver).zip
 
@@ -105,7 +142,7 @@ dist/$(app)-macos-arm64-v$(ver).zip: $(server)
 	$(call build,darwin,macos,arm64,$(app))
 	$(call zip,macos,arm64,$(app))
 
-windows: windows-amd64
+windows: windows-amd64 ## Build Windows packages (amd64)
 windows-amd64: webapp dist/$(app)-windows-amd64-v$(ver).zip
 
 dist/$(app)-windows-amd64-v$(ver).zip: $(server)
