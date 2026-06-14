@@ -191,7 +191,7 @@ export const useAdmin = () => {
   const token = useAdminToken()
   const toast = useToast()
 
-  const authHeader = () => ({ Authorization: `Bearer ${token.value}` })
+  const authHeader = () => ({ Authorization: token.value })
 
   const handleError = (err: unknown, context: string) => {
     const msg = err instanceof Error ? err.message : String(err)
