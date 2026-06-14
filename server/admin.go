@@ -61,7 +61,7 @@ func NewAdmin(controller *Controller) *Admin {
 	return &Admin{
 		Attempts:         AdminLoginAttempts{},
 		AttemptsMax:      uint(10),
-		AttemptsMaxDelay: 10 * time.Minute,
+		AttemptsMaxDelay: 0,
 		Broadcast:        make(chan *[]byte),
 		Conns:            make(map[*websocket.Conn]bool),
 		Controller:       controller,
@@ -397,7 +397,7 @@ func (admin *Admin) LoginHandler(w http.ResponseWriter, r *http.Request) {
 			attempt.Date = time.Now()
 		}
 
-		if attempt.Count > admin.AttemptsMax || time.Since(attempt.Date) < admin.AttemptsMaxDelay {
+		if attempt.Count > admin.AttemptsMax {
 			if attempt.Count == admin.AttemptsMax+1 {
 				admin.Controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("too many login attempts for ip=\"%v\"", remoteAddr))
 			}
