@@ -185,7 +185,12 @@ export interface RTLDongle {
   serialNumber: string
 }
 
-const useAdminToken = () => useState<string>('admin:token', () => '')
+const TOKEN_KEY = 'rdio-admin-token'
+
+const useAdminToken = () => useState<string>('admin:token', () => {
+  if (import.meta.client) return localStorage.getItem(TOKEN_KEY) ?? ''
+  return ''
+})
 
 export const useAdmin = () => {
   const token = useAdminToken()
@@ -208,6 +213,7 @@ export const useAdmin = () => {
         body: { password },
       })
       token.value = res.token
+      localStorage.setItem(TOKEN_KEY, res.token)
       return true
     } catch {
       return false
@@ -222,6 +228,7 @@ export const useAdmin = () => {
       })
     } catch { /* ignore */ }
     token.value = ''
+    localStorage.removeItem(TOKEN_KEY)
   }
 
   const changePassword = async (current: string, next: string): Promise<boolean> => {
