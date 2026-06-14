@@ -60,8 +60,8 @@ type AdminLoginAttempts map[string]*AdminLoginAttempt
 func NewAdmin(controller *Controller) *Admin {
 	return &Admin{
 		Attempts:         AdminLoginAttempts{},
-		AttemptsMax:      uint(3),
-		AttemptsMaxDelay: time.Duration(time.Duration.Minutes(10)),
+		AttemptsMax:      uint(10),
+		AttemptsMaxDelay: 10 * time.Minute,
 		Broadcast:        make(chan *[]byte),
 		Conns:            make(map[*websocket.Conn]bool),
 		Controller:       controller,
