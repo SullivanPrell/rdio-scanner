@@ -60,7 +60,7 @@ Containerfile     Podman/Docker image
 - **No test suite** currently exists
 - **WebSocket API** is restricted per `API_ACCESS_POLICY.md` — not a public API
 - The Nuxt client is embedded in the Go binary at build time; static files live in `server/webapp/` (generated, not committed)
-- `client/` (Angular) is superseded — do not add to it; all new frontend work goes in `client-nuxt/`
+- All frontend work goes in `client-nuxt/`; the legacy Angular `client/` directory has been removed
 
 ## Common Tasks
 | Task | How |
