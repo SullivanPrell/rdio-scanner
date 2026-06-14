@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "nuxt generate && rm -rf ../server/webapp && cp -r .output/public ../server/webapp",
+    "build": "nuxt generate && chmod -R u+w ../server/webapp 2>/dev/null; rm -rf ../server/webapp && cp -r .output/public ../server/webapp",
     "dev": "nuxt dev --port 4200",
     "preview": "npx serve .output/public",
     "lint": "eslint ."
