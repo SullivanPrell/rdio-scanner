@@ -1,0 +1,60 @@
+@import "tailwindcss";
+@import "@nuxt/ui";
+
+:root {
+  --scanner-bg: #0a0a0a;
+  --scanner-surface: #141414;
+  --scanner-border: #2a2a2a;
+  --scanner-led-on: #00e676;
+  --scanner-led-off: #1a1a1a;
+  --scanner-active: #00bfa5;
+}
+
+html, body {
+  background: var(--scanner-bg);
+  color: #e0e0e0;
+  min-height: 100vh;
+  font-family: 'Inter', system-ui, sans-serif;
+}
+
+/* LED indicator */
+.led {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--scanner-led-off);
+  box-shadow: none;
+  transition: background 0.1s, box-shadow 0.1s;
+}
+
+.led.active {
+  background: var(--scanner-led-on);
+  box-shadow: 0 0 6px var(--scanner-led-on);
+}
+
+/* Scanner display panel */
+.scanner-display {
+  background: var(--scanner-surface);
+  border: 1px solid var(--scanner-border);
+  border-radius: 12px;
+}
+
+/* Monospace frequency display */
+.freq-display {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.05em;
+}
+
+/* Audio waveform / progress */
+.audio-progress {
+  height: 4px;
+  background: var(--scanner-border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.audio-progress-fill {
+  height: 100%;
+  background: var(--scanner-active);
+  transition: width 0.1s linear;
+}

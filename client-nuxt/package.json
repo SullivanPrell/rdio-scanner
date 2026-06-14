@@ -1,0 +1,22 @@
+{
+  "name": "rdio-scanner-client",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "nuxt generate && rm -rf ../server/webapp && cp -r .output/public ../server/webapp",
+    "dev": "nuxt dev --port 4200",
+    "preview": "npx serve .output/public",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@nuxt/ui": "^4.8.2",
+    "nuxt": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.8.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

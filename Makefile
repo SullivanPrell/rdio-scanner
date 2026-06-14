@@ -19,7 +19,7 @@ app := rdio-scanner
 date := 2026/05/16
 ver := 7.0.0-dev
 
-client := $(wildcard client/*.json client/*.ts)
+client := $(wildcard client-nuxt/*.json client-nuxt/*.ts client-nuxt/app/**/*.vue client-nuxt/app/**/*.ts)
 server := $(wildcard server/*.go)
 
 build = @cd server && GOOS=$(1) GOARCH=$(3) go build -o ../dist/$(2)-$(3)/$(4)
@@ -35,7 +35,7 @@ zip = @cd dist/$(1)-$(2) && zip -q ../$(app)-$(1)-$(2)-v$(ver).zip * && cd ..
 all: clean dist
 
 clean:
-	@rm -fr client/node_modules dist server/webapp
+	@rm -fr client-nuxt/node_modules client-nuxt/.nuxt client-nuxt/.output dist server/webapp
 
 container: webapp linux-amd64
 	@podman login docker.io
@@ -46,7 +46,7 @@ container: webapp linux-amd64
 dist: freebsd linux macos windows
 
 sed:
-	@sed -i -re "s|^(\s*\"version\":).*$$|\1 \"$(ver)\"|" client/package.json
+	@sed -i -re "s|^(\s*\"version\":).*$$|\1 \"$(ver)\"|" client-nuxt/package.json
 	@sed -i -re "s|^(const\s+Version\s+=).*$$|\1 \"$(ver)\"|" server/version.go
 	@sed -i -re "s|v[0-9]+\.[0-9]+\.[0-9]+|v$(ver)|" COMPILING.md README.md docs/docker/README.md docs/platforms/*.md
 	@sed -i -re "s|[0-9]{4}/[0-9]{2}/[0-9]{2}|$(date)|" docs/docker/README.md docs/platforms/*.md
@@ -54,8 +54,8 @@ sed:
 webapp: server/webapp/index.html
 
 server/webapp/index.html: $(client)
-	@cd client && test -d node_modules || npm ci --loglevel=error --no-progress
-	@cd client && npm run build
+	@cd client-nuxt && test -d node_modules || yarn install
+	@cd client-nuxt && yarn build
 
 freebsd: freebsd-amd64
 freebsd-amd64: webapp dist/$(app)-freebsd-amd64-v$(ver).zip
