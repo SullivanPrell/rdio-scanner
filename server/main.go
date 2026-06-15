@@ -164,6 +164,14 @@ func main() {
 
 	http.HandleFunc("/api/admin/trunk-recorder/config", controller.Admin.TrunkRecorderConfigHandler)
 
+	http.HandleFunc("/api/admin/trunk-recorder/service", controller.Admin.TrunkRecorderServiceStatusHandler)
+
+	http.HandleFunc("/api/admin/trunk-recorder/service/action", controller.Admin.TrunkRecorderServiceActionHandler)
+
+	http.HandleFunc("/api/admin/trunk-recorder/service/logs", controller.Admin.TrunkRecorderServiceLogsHandler)
+
+	http.HandleFunc("/api/admin/bridge/status", controller.Admin.BridgeStatusHandler)
+
 	http.HandleFunc("/api/admin/dongles", controller.Admin.DonglesHandler)
 
 	http.HandleFunc("/api/call-upload", controller.Api.CallUploadHandler)

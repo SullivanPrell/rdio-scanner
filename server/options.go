@@ -31,6 +31,13 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// SDRDeviceAssignment maps one detected RTL-SDR dongle to a service.
+type SDRDeviceAssignment struct {
+	Index        int    `json:"index"`
+	SerialNumber string `json:"serialNumber"`
+	AssignTo     string `json:"assignTo"` // "sdrangel" | "trunk-recorder" | ""
+}
+
 type Options struct {
 	AudioConversion             uint                  `json:"audioConversion"`
 	AutoPopulate                bool                  `json:"autoPopulate"`
@@ -49,9 +56,13 @@ type Options struct {
 	PruneDays                   uint                  `json:"pruneDays"`
 	SDRangelBinaryPath          string                `json:"sdrangelBinaryPath"`
 	SDRangelContainerName       string                `json:"sdrangelContainerName"`
+	SDRDeviceAssignments        []SDRDeviceAssignment `json:"sdrDeviceAssignments"`
 	ShowListenersCount          bool                  `json:"showListenersCount"`
 	SortTalkgroups              bool                  `json:"sortTalkgroups"`
 	Time12hFormat               bool                  `json:"time12hFormat"`
+	TrunkRecorderBinaryPath     string                `json:"trunkRecorderBinaryPath"`
+	TrunkRecorderConfigPath     string                `json:"trunkRecorderConfigPath"`
+	TrunkRecorderContainerName  string                `json:"trunkRecorderContainerName"`
 	adminPassword               string
 	adminPasswordNeedChange     bool
 	mutex                       sync.Mutex
@@ -189,6 +200,30 @@ func (options *Options) FromMap(m map[string]any) *Options {
 		options.SDRangelContainerName = v
 	}
 
+	switch v := m["sdrDeviceAssignments"].(type) {
+	case []any:
+		if b, err := json.Marshal(v); err == nil {
+			json.Unmarshal(b, &options.SDRDeviceAssignments)
+		}
+	default:
+		options.SDRDeviceAssignments = []SDRDeviceAssignment{}
+	}
+
+	switch v := m["trunkRecorderBinaryPath"].(type) {
+	case string:
+		options.TrunkRecorderBinaryPath = v
+	}
+
+	switch v := m["trunkRecorderConfigPath"].(type) {
+	case string:
+		options.TrunkRecorderConfigPath = v
+	}
+
+	switch v := m["trunkRecorderContainerName"].(type) {
+	case string:
+		options.TrunkRecorderContainerName = v
+	}
+
 	switch v := m["showListenersCount"].(type) {
 	case bool:
 		options.ShowListenersCount = v
@@ -211,6 +246,48 @@ func (options *Options) FromMap(m map[string]any) *Options {
 	}
 
 	return options
+}
+
+// BridgeFromMap updates only the bridge-related fields from a map, used by
+// the admin config PUT handler when the frontend sends a separate "bridge" key.
+func (options *Options) BridgeFromMap(m map[string]any) {
+	options.mutex.Lock()
+	defer options.mutex.Unlock()
+
+	if v, ok := m["enabled"].(bool); ok {
+		options.BridgeEnabled = v
+	}
+	if v, ok := m["host"].(string); ok {
+		options.BridgeHost = v
+	}
+	if v, ok := m["port"].(float64); ok {
+		options.BridgePort = uint(v)
+	}
+	if v, ok := m["channels"].([]any); ok {
+		if b, err := json.Marshal(v); err == nil {
+			json.Unmarshal(b, &options.BridgeChannels)
+		}
+	}
+	if v, ok := m["sdrangelBinaryPath"].(string); ok {
+		options.SDRangelBinaryPath = v
+	}
+	if v, ok := m["sdrangelContainerName"].(string); ok {
+		options.SDRangelContainerName = v
+	}
+	if v, ok := m["trunkRecorderBinaryPath"].(string); ok {
+		options.TrunkRecorderBinaryPath = v
+	}
+	if v, ok := m["trunkRecorderContainerName"].(string); ok {
+		options.TrunkRecorderContainerName = v
+	}
+	if v, ok := m["trunkRecorderConfigPath"].(string); ok {
+		options.TrunkRecorderConfigPath = v
+	}
+	if v, ok := m["sdrDeviceAssignments"].([]any); ok {
+		if b, err := json.Marshal(v); err == nil {
+			json.Unmarshal(b, &options.SDRDeviceAssignments)
+		}
+	}
 }
 
 func (options *Options) Read(db *Database) error {
@@ -245,8 +322,12 @@ func (options *Options) Read(db *Database) error {
 	options.MaxClients = defaults.options.maxClients
 	options.PlaybackGoesLive = defaults.options.playbackGoesLive
 	options.PruneDays = defaults.options.pruneDays
+	options.SDRDeviceAssignments = []SDRDeviceAssignment{}
 	options.ShowListenersCount = defaults.options.showListenersCount
 	options.SortTalkgroups = defaults.options.sortTalkgroups
+	options.TrunkRecorderBinaryPath = ""
+	options.TrunkRecorderConfigPath = ""
+	options.TrunkRecorderContainerName = ""
 
 	formatError := errorFormatter("options", "read")
 
@@ -417,6 +498,29 @@ func (options *Options) Read(db *Database) error {
 					options.SDRangelContainerName = v
 				}
 			}
+		case "sdrDeviceAssignments":
+			json.Unmarshal([]byte(value.String), &options.SDRDeviceAssignments)
+		case "trunkRecorderBinaryPath":
+			if err = json.Unmarshal([]byte(value.String), &f); err == nil {
+				switch v := f.(type) {
+				case string:
+					options.TrunkRecorderBinaryPath = v
+				}
+			}
+		case "trunkRecorderConfigPath":
+			if err = json.Unmarshal([]byte(value.String), &f); err == nil {
+				switch v := f.(type) {
+				case string:
+					options.TrunkRecorderConfigPath = v
+				}
+			}
+		case "trunkRecorderContainerName":
+			if err = json.Unmarshal([]byte(value.String), &f); err == nil {
+				switch v := f.(type) {
+				case string:
+					options.TrunkRecorderContainerName = v
+				}
+			}
 		case "showListenersCount":
 			if err = json.Unmarshal([]byte(value.String), &f); err == nil {
 				switch v := f.(type) {
@@ -497,9 +601,13 @@ func (options *Options) Write(db *Database) error {
 	set("secret", options.secret)
 	set("sdrangelBinaryPath", options.SDRangelBinaryPath)
 	set("sdrangelContainerName", options.SDRangelContainerName)
+	set("sdrDeviceAssignments", options.SDRDeviceAssignments)
 	set("showListenersCount", options.ShowListenersCount)
 	set("sortTalkgroups", options.SortTalkgroups)
 	set("time12hFormat", options.Time12hFormat)
+	set("trunkRecorderBinaryPath", options.TrunkRecorderBinaryPath)
+	set("trunkRecorderConfigPath", options.TrunkRecorderConfigPath)
+	set("trunkRecorderContainerName", options.TrunkRecorderContainerName)
 
 	if err = tx.Commit(); err != nil {
 		tx.Rollback()

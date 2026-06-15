@@ -36,13 +36,23 @@ export interface ApiKey {
   systems: Record<number, Record<number, boolean>>
 }
 
+export interface SDRDeviceAssignment {
+  index: number
+  serialNumber: string
+  assignTo: '' | 'sdrangel' | 'trunk-recorder'
+}
+
 export interface BridgeConfig {
   enabled: boolean
   host: string
   port: number
   channels: BridgeChannel[]
-  sdrangelBinaryPath?: string
-  sdrangelContainerName?: string
+  sdrangelBinaryPath: string
+  sdrangelContainerName: string
+  trunkRecorderBinaryPath: string
+  trunkRecorderContainerName: string
+  trunkRecorderConfigPath: string
+  sdrDeviceAssignments: SDRDeviceAssignment[]
 }
 
 export interface BridgeChannel {
@@ -55,6 +65,40 @@ export interface BridgeChannel {
   systemRef: number
   talkgroupRef: number
   udpPort: number
+}
+
+export interface BridgeStatus {
+  running: boolean
+  channelCount: number
+  mode: string
+}
+
+export interface SDRangelServiceStatus {
+  running: boolean
+  mode: string
+  message?: string
+  containerId?: string
+  containerName?: string
+  pid?: number
+  startedAt?: string
+  uptimeSeconds?: number
+}
+
+export interface SDRangelServiceResult {
+  success: boolean
+  message: string
+}
+
+export interface TrunkRecorderServiceStatus {
+  running: boolean
+  mode: string
+  message?: string
+  pid?: number
+}
+
+export interface TrunkRecorderServiceResult {
+  success: boolean
+  message: string
 }
 
 export interface DirwatchEntry {
@@ -169,7 +213,7 @@ export interface TodoEntry {
   count: number
 }
 
-export interface SDRangelStatus {
+export interface SDRangelConnectStatus {
   connected: boolean
   version?: string
   os?: string
@@ -412,13 +456,46 @@ export const useAdmin = () => {
 
   // ── SDRangel ───────────────────────────────────────────────────────────────
 
-  const getSDRangelStatus = async (): Promise<SDRangelStatus> => {
+  const getSDRangelStatus = async (): Promise<SDRangelConnectStatus> => {
     try {
-      return await $fetch<SDRangelStatus>('/api/admin/sdrangel/status', {
+      return await $fetch<SDRangelConnectStatus>('/api/admin/sdrangel/status', {
         headers: authHeader(),
       })
     } catch {
       return { connected: false }
+    }
+  }
+
+  const getSDRangelServiceStatus = async (): Promise<SDRangelServiceStatus> => {
+    try {
+      return await $fetch<SDRangelServiceStatus>('/api/admin/sdrangel/service', {
+        headers: authHeader(),
+      })
+    } catch {
+      return { running: false, mode: 'native', message: 'unavailable' }
+    }
+  }
+
+  const sdrangelServiceAction = async (action: 'start' | 'stop' | 'restart', binaryPath?: string, args?: string): Promise<SDRangelServiceResult> => {
+    try {
+      return await $fetch<SDRangelServiceResult>('/api/admin/sdrangel/service/action', {
+        method: 'POST',
+        headers: authHeader(),
+        body: { action, binaryPath: binaryPath ?? '', args: args ?? '' },
+      })
+    } catch (err) {
+      handleError(err, `SDRangel ${action}`)
+      return { success: false, message: String(err) }
+    }
+  }
+
+  const getSDRangelServiceLogs = async (): Promise<string[]> => {
+    try {
+      return await $fetch<string[]>('/api/admin/sdrangel/service/logs', {
+        headers: authHeader(),
+      })
+    } catch {
+      return []
     }
   }
 
@@ -432,6 +509,53 @@ export const useAdmin = () => {
     } catch (err) {
       handleError(err, 'SDRangel provision')
       return null
+    }
+  }
+
+  // ── Trunk-Recorder service ─────────────────────────────────────────────────
+
+  const getTRServiceStatus = async (): Promise<TrunkRecorderServiceStatus> => {
+    try {
+      return await $fetch<TrunkRecorderServiceStatus>('/api/admin/trunk-recorder/service', {
+        headers: authHeader(),
+      })
+    } catch {
+      return { running: false, mode: 'native', message: 'unavailable' }
+    }
+  }
+
+  const trServiceAction = async (action: 'start' | 'stop' | 'restart', binaryPath?: string, configPath?: string): Promise<TrunkRecorderServiceResult> => {
+    try {
+      return await $fetch<TrunkRecorderServiceResult>('/api/admin/trunk-recorder/service/action', {
+        method: 'POST',
+        headers: authHeader(),
+        body: { action, binaryPath: binaryPath ?? '', configPath: configPath ?? '' },
+      })
+    } catch (err) {
+      handleError(err, `trunk-recorder ${action}`)
+      return { success: false, message: String(err) }
+    }
+  }
+
+  const getTRServiceLogs = async (): Promise<string[]> => {
+    try {
+      return await $fetch<string[]>('/api/admin/trunk-recorder/service/logs', {
+        headers: authHeader(),
+      })
+    } catch {
+      return []
+    }
+  }
+
+  // ── Bridge status ──────────────────────────────────────────────────────────
+
+  const getBridgeStatus = async (): Promise<BridgeStatus> => {
+    try {
+      return await $fetch<BridgeStatus>('/api/admin/bridge/status', {
+        headers: authHeader(),
+      })
+    } catch {
+      return { running: false, channelCount: 0, mode: 'sdrangel' }
     }
   }
 
@@ -456,7 +580,8 @@ export const useAdmin = () => {
     apiKey?: string
     systemType?: string
     uploadURL?: string
-  }) => {
+    configPath?: string
+  }): Promise<{ config: unknown; saveMessage?: string } | null> => {
     try {
       return await $fetch('/api/admin/trunk-recorder/config', {
         method: 'POST',
@@ -518,7 +643,14 @@ export const useAdmin = () => {
     getRRCounties,
     importRRCounty,
     getSDRangelStatus,
+    getSDRangelServiceStatus,
+    sdrangelServiceAction,
+    getSDRangelServiceLogs,
     provisionSDRangel,
+    getTRServiceStatus,
+    trServiceAction,
+    getTRServiceLogs,
+    getBridgeStatus,
     getDongles,
     generateTrunkRecorderConfig,
     addUser,

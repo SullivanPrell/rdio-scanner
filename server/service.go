@@ -31,6 +31,46 @@ import (
 	"time"
 )
 
+// ── Ring buffer for native process log capture ─────────────────────────────
+
+type ringBuffer struct {
+	lines []string
+	size  int
+	mu    sync.Mutex
+}
+
+func newRingBuffer(size int) *ringBuffer {
+	return &ringBuffer{size: size}
+}
+
+func (rb *ringBuffer) Write(p []byte) (int, error) {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	ts := time.Now().Format("2006-01-02 15:04:05 ")
+	for _, line := range strings.Split(strings.TrimRight(string(p), "\n"), "\n") {
+		if len(line) == 0 {
+			continue
+		}
+		rb.lines = append(rb.lines, ts+line)
+		if len(rb.lines) > rb.size {
+			rb.lines = rb.lines[1:]
+		}
+	}
+	return len(p), nil
+}
+
+func (rb *ringBuffer) Lines(tail int) []string {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	lines := rb.lines
+	if tail > 0 && len(lines) > tail {
+		lines = lines[len(lines)-tail:]
+	}
+	out := make([]string, len(lines))
+	copy(out, lines)
+	return out
+}
+
 // ── Service status ─────────────────────────────────────────────────────────
 
 type SDRangelServiceStatus struct {
@@ -63,10 +103,13 @@ type SDRangelServiceManager struct {
 	mutex         sync.Mutex
 	nativeProcess *exec.Cmd
 	nativeCancel  context.CancelFunc
+	nativeLogs    *ringBuffer
 }
 
 func NewSDRangelServiceManager() *SDRangelServiceManager {
-	return &SDRangelServiceManager{}
+	return &SDRangelServiceManager{
+		nativeLogs: newRingBuffer(300),
+	}
 }
 
 // Mode returns "docker" if /var/run/docker.sock is connectable, else "native".
@@ -195,7 +238,7 @@ func (m *SDRangelServiceManager) dockerStop(containerName string) SDRangelServic
 
 // dockerLogs returns the last n lines of container stdout+stderr.
 // Docker log multiplexing: 8-byte header [stream(1), unused(3), size(4)] + payload
-func (m *SDRangelServiceManager) dockerLogs(containerName string, tail int) []string {
+func dockerLogs(containerName string, tail int) []string {
 	path := fmt.Sprintf("/containers/%s/logs?stdout=1&stderr=1&tail=%d&timestamps=1", containerName, tail)
 	data, _, err := dockerCall(http.MethodGet, path, nil)
 	if err != nil {
@@ -287,8 +330,8 @@ func (m *SDRangelServiceManager) nativeStart(binaryPath, extraArgs string) SDRan
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, bin, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = io.MultiWriter(os.Stdout, m.nativeLogs)
+	cmd.Stderr = io.MultiWriter(os.Stderr, m.nativeLogs)
 
 	if err := cmd.Start(); err != nil {
 		cancel()
@@ -365,9 +408,13 @@ func (m *SDRangelServiceManager) Restart(containerName, binaryPath, extraArgs st
 
 func (m *SDRangelServiceManager) Logs(containerName string, tail int) []string {
 	if m.mode() == "docker" {
-		return m.dockerLogs(containerName, tail)
+		return dockerLogs(containerName, tail)
 	}
-	return []string{"Live logs are only available in Docker mode. Check system logs for sdrangelsrv output."}
+	lines := m.nativeLogs.Lines(tail)
+	if len(lines) == 0 {
+		return []string{"No output captured yet. Start sdrangelsrv to see logs here."}
+	}
+	return lines
 }
 
 // ── Admin HTTP handlers ────────────────────────────────────────────────────

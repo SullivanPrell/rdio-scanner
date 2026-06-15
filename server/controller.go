@@ -49,7 +49,8 @@ type Controller struct {
 	Logs           *Logs
 	Options        *Options
 	Scheduler      *Scheduler
-	ServiceManager *SDRangelServiceManager
+	ServiceManager  *SDRangelServiceManager
+	TRServiceManager *TrunkRecorderServiceManager
 	Systems        *Systems
 	Tags           *Tags
 	Register       chan *Client
@@ -85,6 +86,7 @@ func NewController(config *Config) *Controller {
 	controller.Downstreams = NewDownstreams(controller)
 	controller.Scheduler = NewScheduler(controller)
 	controller.ServiceManager = NewSDRangelServiceManager()
+	controller.TRServiceManager = NewTrunkRecorderServiceManager()
 
 	controller.Logs.setDaemon(config.daemon)
 	controller.Logs.setDatabase(controller.Database)

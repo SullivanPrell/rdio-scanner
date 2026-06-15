@@ -265,6 +265,16 @@ func (admin *Admin) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
+			switch v := m["bridge"].(type) {
+			case map[string]any:
+				admin.Controller.Options.BridgeFromMap(v)
+				err = admin.Controller.Options.Write(admin.Controller.Database)
+				if err != nil {
+					logError(err)
+				}
+				admin.Controller.Bridge.Restart()
+			}
+
 			switch v := m["options"].(type) {
 			case map[string]any:
 				admin.Controller.Options.FromMap(v)
@@ -321,9 +331,29 @@ func (admin *Admin) GetAuthorization(r *http.Request) string {
 }
 
 func (admin *Admin) GetConfig() map[string]any {
+	opts := admin.Controller.Options
+	bridge := map[string]any{
+		"enabled":                    opts.BridgeEnabled,
+		"host":                       opts.BridgeHost,
+		"port":                       opts.BridgePort,
+		"channels":                   opts.BridgeChannels,
+		"sdrangelBinaryPath":         opts.SDRangelBinaryPath,
+		"sdrangelContainerName":      opts.SDRangelContainerName,
+		"trunkRecorderBinaryPath":    opts.TrunkRecorderBinaryPath,
+		"trunkRecorderContainerName": opts.TrunkRecorderContainerName,
+		"trunkRecorderConfigPath":    opts.TrunkRecorderConfigPath,
+		"sdrDeviceAssignments":       opts.SDRDeviceAssignments,
+	}
+	if bridge["channels"] == nil {
+		bridge["channels"] = []BridgeChannelConfig{}
+	}
+	if bridge["sdrDeviceAssignments"] == nil {
+		bridge["sdrDeviceAssignments"] = []SDRDeviceAssignment{}
+	}
 	return map[string]any{
 		"access":      admin.Controller.Accesses.List,
 		"apikeys":     admin.Controller.Apikeys.List,
+		"bridge":      bridge,
 		"dirwatch":    admin.Controller.Dirwatches.List,
 		"downstreams": admin.Controller.Downstreams.List,
 		"groups":      admin.Controller.Groups.List,

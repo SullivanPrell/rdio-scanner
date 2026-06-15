@@ -64,6 +64,12 @@ type sdrangelChannelReport struct {
 	} `json:"NXDNDemodReport"`
 }
 
+type BridgeStatus struct {
+	Running      bool   `json:"running"`
+	ChannelCount int    `json:"channelCount"`
+	Mode         string `json:"mode"` // always "sdrangel" for now
+}
+
 type Bridge struct {
 	Controller *Controller
 	cancel     context.CancelFunc
@@ -109,6 +115,16 @@ func (b *Bridge) Stop() {
 	b.cancel = nil
 
 	b.Controller.Logs.LogEvent(LogLevelInfo, "sdrangel bridge stopped")
+}
+
+func (b *Bridge) Status() BridgeStatus {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	return BridgeStatus{
+		Running:      b.cancel != nil,
+		ChannelCount: len(b.Controller.Options.BridgeChannels),
+		Mode:         "sdrangel",
+	}
 }
 
 // Restart is called when options are saved via the admin panel.
@@ -317,4 +333,19 @@ func (b *Bridge) monitorChannel(ctx context.Context, cfg BridgeChannelConfig) {
 			wasOpen = isOpen
 		}
 	}
+}
+
+// ── Admin HTTP handler ─────────────────────────────────────────────────────
+
+func (admin *Admin) BridgeStatusHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !admin.ValidateToken(admin.GetAuthorization(r)) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(admin.Controller.Bridge.Status())
 }

@@ -18,13 +18,18 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -87,6 +92,8 @@ type TrunkRecorderGenRequest struct {
 	SystemType string `json:"systemType,omitempty"`
 	// UploadURL overrides the auto-detected upload URL.
 	UploadURL string `json:"uploadURL,omitempty"`
+	// ConfigPath overrides the stored TrunkRecorderConfigPath for where to save.
+	ConfigPath string `json:"configPath,omitempty"`
 }
 
 // ── Generator ──────────────────────────────────────────────────────────────
@@ -286,11 +293,29 @@ func (admin *Admin) TrunkRecorderConfigHandler(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// If configPath is set, also save to disk so trunk-recorder can use it directly.
+	savePath := req.ConfigPath
+	if savePath == "" {
+		savePath = admin.Controller.Options.TrunkRecorderConfigPath
+	}
+	var saveMsg string
+	if savePath != "" {
+		cfgBytes, _ := json.MarshalIndent(cfg, "", "  ")
+		if writeErr := os.WriteFile(savePath, cfgBytes, 0644); writeErr != nil {
+			saveMsg = fmt.Sprintf("config generated but could not save to %s: %v", savePath, writeErr)
+		} else {
+			saveMsg = fmt.Sprintf("config saved to %s", savePath)
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Content-Disposition", `attachment; filename="trunk-recorder.json"`)
+	resp := map[string]any{"config": cfg}
+	if saveMsg != "" {
+		resp["saveMessage"] = saveMsg
+	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	enc.Encode(cfg)
+	enc.Encode(resp)
 }
 
 // DonglesHandler handles GET /api/admin/dongles.
@@ -316,4 +341,323 @@ func (admin *Admin) DonglesHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(dongles)
+}
+
+// ── Trunk-Recorder service manager ────────────────────────────────────────
+
+type TrunkRecorderServiceStatus struct {
+	Running bool   `json:"running"`
+	Mode    string `json:"mode"`    // "docker" | "native"
+	Message string `json:"message,omitempty"`
+	PID     int    `json:"pid,omitempty"`
+}
+
+type TrunkRecorderServiceAction struct {
+	Action        string `json:"action"`        // "start" | "stop" | "restart"
+	BinaryPath    string `json:"binaryPath"`
+	ConfigPath    string `json:"configPath"`
+	ContainerName string `json:"containerName"`
+}
+
+type TrunkRecorderServiceResult struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+}
+
+type TrunkRecorderServiceManager struct {
+	mutex         sync.Mutex
+	nativeProcess *exec.Cmd
+	nativeCancel  context.CancelFunc
+	nativeLogs    *ringBuffer
+}
+
+func NewTrunkRecorderServiceManager() *TrunkRecorderServiceManager {
+	return &TrunkRecorderServiceManager{
+		nativeLogs: newRingBuffer(300),
+	}
+}
+
+func (m *TrunkRecorderServiceManager) mode() string {
+	conn, err := net.Dial("unix", "/var/run/docker.sock")
+	if err == nil {
+		conn.Close()
+		return "docker"
+	}
+	return "native"
+}
+
+func (m *TrunkRecorderServiceManager) dockerStatus(containerName string) TrunkRecorderServiceStatus {
+	data, code, err := dockerCall(http.MethodGet, "/containers/"+containerName+"/json", nil)
+	if err != nil {
+		return TrunkRecorderServiceStatus{Mode: "docker", Message: "docker socket error: " + err.Error()}
+	}
+	if code == http.StatusNotFound {
+		return TrunkRecorderServiceStatus{Mode: "docker", Message: "container " + containerName + " not found"}
+	}
+	var inspect struct {
+		State struct {
+			Running bool `json:"Running"`
+			Pid     int  `json:"Pid"`
+			Status  string `json:"Status"`
+		} `json:"State"`
+	}
+	if err := json.Unmarshal(data, &inspect); err != nil {
+		return TrunkRecorderServiceStatus{Mode: "docker", Message: "inspect parse error: " + err.Error()}
+	}
+	return TrunkRecorderServiceStatus{
+		Mode:    "docker",
+		Running: inspect.State.Running,
+		PID:     inspect.State.Pid,
+		Message: inspect.State.Status,
+	}
+}
+
+func (m *TrunkRecorderServiceManager) dockerStart(containerName string) TrunkRecorderServiceResult {
+	_, code, err := dockerCall(http.MethodPost, "/containers/"+containerName+"/start", nil)
+	if err != nil {
+		return TrunkRecorderServiceResult{Message: "docker socket error: " + err.Error()}
+	}
+	if code == http.StatusNotFound {
+		return TrunkRecorderServiceResult{Message: "container " + containerName + " not found"}
+	}
+	if code != http.StatusNoContent && code != http.StatusNotModified {
+		return TrunkRecorderServiceResult{Message: fmt.Sprintf("unexpected status %d", code)}
+	}
+	return TrunkRecorderServiceResult{Success: true, Message: "trunk-recorder started"}
+}
+
+func (m *TrunkRecorderServiceManager) dockerStop(containerName string) TrunkRecorderServiceResult {
+	_, code, err := dockerCall(http.MethodPost, "/containers/"+containerName+"/stop", nil)
+	if err != nil {
+		return TrunkRecorderServiceResult{Message: "docker socket error: " + err.Error()}
+	}
+	if code == http.StatusNotFound {
+		return TrunkRecorderServiceResult{Message: "container " + containerName + " not found"}
+	}
+	if code != http.StatusNoContent && code != http.StatusNotModified {
+		return TrunkRecorderServiceResult{Message: fmt.Sprintf("unexpected status %d", code)}
+	}
+	return TrunkRecorderServiceResult{Success: true, Message: "trunk-recorder stopped"}
+}
+
+func (m *TrunkRecorderServiceManager) nativeStatus(binaryPath string) TrunkRecorderServiceStatus {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if m.nativeProcess == nil || m.nativeProcess.Process == nil {
+		if binaryPath != "" {
+			if _, err := os.Stat(binaryPath); err != nil {
+				return TrunkRecorderServiceStatus{Mode: "native", Message: "binary not found at: " + binaryPath}
+			}
+		} else if _, err := exec.LookPath("trunk-recorder"); err != nil {
+			return TrunkRecorderServiceStatus{Mode: "native", Message: "trunk-recorder not found in PATH — set Binary Path in Bridge Config"}
+		}
+		return TrunkRecorderServiceStatus{Mode: "native", Message: "not running"}
+	}
+
+	proc, err := os.FindProcess(m.nativeProcess.Process.Pid)
+	if err != nil || proc.Signal(os.Signal(nil)) != nil {
+		m.nativeProcess = nil
+		m.nativeCancel = nil
+		return TrunkRecorderServiceStatus{Mode: "native", Message: "process exited"}
+	}
+
+	return TrunkRecorderServiceStatus{
+		Mode:    "native",
+		Running: true,
+		PID:     m.nativeProcess.Process.Pid,
+		Message: "running",
+	}
+}
+
+func (m *TrunkRecorderServiceManager) nativeStart(binaryPath, configPath string) TrunkRecorderServiceResult {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if m.nativeProcess != nil && m.nativeProcess.Process != nil {
+		return TrunkRecorderServiceResult{Success: true, Message: "already running"}
+	}
+
+	bin := binaryPath
+	if bin == "" {
+		var err error
+		if bin, err = exec.LookPath("trunk-recorder"); err != nil {
+			return TrunkRecorderServiceResult{Message: "trunk-recorder not found; set Binary Path in Bridge Config"}
+		}
+	}
+
+	if configPath == "" {
+		return TrunkRecorderServiceResult{Message: "no config file path set; generate a config first"}
+	}
+	if _, err := os.Stat(configPath); err != nil {
+		return TrunkRecorderServiceResult{Message: "config file not found at: " + configPath}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(ctx, bin, "--config="+configPath)
+	cmd.Stdout = io.MultiWriter(os.Stdout, m.nativeLogs)
+	cmd.Stderr = io.MultiWriter(os.Stderr, m.nativeLogs)
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return TrunkRecorderServiceResult{Message: "failed to start: " + err.Error()}
+	}
+
+	m.nativeProcess = cmd
+	m.nativeCancel = cancel
+
+	go func() {
+		cmd.Wait()
+		m.mutex.Lock()
+		if m.nativeProcess == cmd {
+			m.nativeProcess = nil
+			m.nativeCancel = nil
+		}
+		m.mutex.Unlock()
+	}()
+
+	return TrunkRecorderServiceResult{Success: true, Message: fmt.Sprintf("trunk-recorder started (pid %d)", cmd.Process.Pid)}
+}
+
+func (m *TrunkRecorderServiceManager) nativeStop() TrunkRecorderServiceResult {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if m.nativeProcess == nil || m.nativeProcess.Process == nil {
+		return TrunkRecorderServiceResult{Success: true, Message: "not running"}
+	}
+
+	if m.nativeCancel != nil {
+		m.nativeCancel()
+	}
+	m.nativeProcess.Process.Signal(os.Interrupt)
+	m.nativeProcess = nil
+	m.nativeCancel = nil
+	return TrunkRecorderServiceResult{Success: true, Message: "trunk-recorder stopped"}
+}
+
+func (m *TrunkRecorderServiceManager) Status(containerName, binaryPath string) TrunkRecorderServiceStatus {
+	if m.mode() == "docker" {
+		return m.dockerStatus(containerName)
+	}
+	return m.nativeStatus(binaryPath)
+}
+
+func (m *TrunkRecorderServiceManager) Start(containerName, binaryPath, configPath string) TrunkRecorderServiceResult {
+	if m.mode() == "docker" {
+		return m.dockerStart(containerName)
+	}
+	return m.nativeStart(binaryPath, configPath)
+}
+
+func (m *TrunkRecorderServiceManager) Stop(containerName string) TrunkRecorderServiceResult {
+	if m.mode() == "docker" {
+		return m.dockerStop(containerName)
+	}
+	return m.nativeStop()
+}
+
+func (m *TrunkRecorderServiceManager) Restart(containerName, binaryPath, configPath string) TrunkRecorderServiceResult {
+	stop := m.Stop(containerName)
+	if !stop.Success {
+		return stop
+	}
+	time.Sleep(2 * time.Second)
+	return m.Start(containerName, binaryPath, configPath)
+}
+
+func (m *TrunkRecorderServiceManager) Logs(containerName string, tail int) []string {
+	if m.mode() == "docker" {
+		return dockerLogs(containerName, tail)
+	}
+	lines := m.nativeLogs.Lines(tail)
+	if len(lines) == 0 {
+		return []string{"No output captured yet. Start trunk-recorder to see logs here."}
+	}
+	return lines
+}
+
+// ── Admin HTTP handlers ────────────────────────────────────────────────────
+
+func (admin *Admin) TrunkRecorderServiceStatusHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !admin.ValidateToken(admin.GetAuthorization(r)) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	opts := admin.Controller.Options
+	containerName := opts.TrunkRecorderContainerName
+	if containerName == "" {
+		containerName = "trunk-recorder"
+	}
+	status := admin.Controller.TRServiceManager.Status(containerName, opts.TrunkRecorderBinaryPath)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(status)
+}
+
+func (admin *Admin) TrunkRecorderServiceActionHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !admin.ValidateToken(admin.GetAuthorization(r)) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	var req TrunkRecorderServiceAction
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	opts := admin.Controller.Options
+	containerName := opts.TrunkRecorderContainerName
+	if containerName == "" {
+		containerName = "trunk-recorder"
+	}
+	binaryPath := req.BinaryPath
+	if binaryPath == "" {
+		binaryPath = opts.TrunkRecorderBinaryPath
+	}
+	configPath := req.ConfigPath
+	if configPath == "" {
+		configPath = opts.TrunkRecorderConfigPath
+	}
+
+	var result TrunkRecorderServiceResult
+	switch req.Action {
+	case "start":
+		result = admin.Controller.TRServiceManager.Start(containerName, binaryPath, configPath)
+	case "stop":
+		result = admin.Controller.TRServiceManager.Stop(containerName)
+	case "restart":
+		result = admin.Controller.TRServiceManager.Restart(containerName, binaryPath, configPath)
+	default:
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+func (admin *Admin) TrunkRecorderServiceLogsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !admin.ValidateToken(admin.GetAuthorization(r)) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	containerName := admin.Controller.Options.TrunkRecorderContainerName
+	if containerName == "" {
+		containerName = "trunk-recorder"
+	}
+	logs := admin.Controller.TRServiceManager.Logs(containerName, 100)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(logs)
 }
