@@ -2,6 +2,8 @@
  * useAdmin — composable for all rdio-scanner admin REST API calls.
  */
 
+import { ref, computed, readonly } from 'vue'
+
 export interface AdminConfig {
   access: AccessConfig[]
   apikeys: ApiKey[]
@@ -187,20 +189,17 @@ export interface RTLDongle {
 
 const TOKEN_KEY = 'rdio-admin-token'
 
-const useAdminToken = () => useState<string>('admin:token', () => '')
+// Module-level singleton — survives Vue Router navigation and component teardown.
+// Safe in client-only (ssr: false) mode: one JS context per browser tab.
+const _token = ref('')
+if (typeof window !== 'undefined') {
+  _token.value = localStorage.getItem(TOKEN_KEY) ?? ''
+}
 
 export const useAdmin = () => {
-  const token = useAdminToken()
-
-  // Restore from localStorage on every composable call — the useState initializer
-  // only runs once (baked into the SSG payload as ''), so we restore here instead.
-  if (import.meta.client && !token.value) {
-    token.value = localStorage.getItem(TOKEN_KEY) ?? ''
-  }
-
   const toast = useToast()
 
-  const authHeader = () => ({ Authorization: token.value })
+  const authHeader = () => ({ Authorization: _token.value })
 
   const handleError = (err: unknown, context: string) => {
     const msg = err instanceof Error ? err.message : String(err)
@@ -216,7 +215,7 @@ export const useAdmin = () => {
         method: 'POST',
         body: { password },
       })
-      token.value = res.token
+      _token.value = res.token
       localStorage.setItem(TOKEN_KEY, res.token)
       return true
     } catch {
@@ -231,7 +230,7 @@ export const useAdmin = () => {
         headers: authHeader(),
       })
     } catch { /* ignore */ }
-    token.value = ''
+    _token.value = ''
     localStorage.removeItem(TOKEN_KEY)
   }
 
@@ -249,7 +248,7 @@ export const useAdmin = () => {
     }
   }
 
-  const isLoggedIn = computed(() => !!token.value)
+  const isLoggedIn = computed(() => !!_token.value)
 
   // ── Config ─────────────────────────────────────────────────────────────────
 
@@ -491,7 +490,7 @@ export const useAdmin = () => {
   }
 
   return {
-    token: readonly(token),
+    token: readonly(_token),
     isLoggedIn,
     login,
     logout,
