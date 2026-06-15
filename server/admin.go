@@ -82,6 +82,7 @@ func (admin *Admin) AlertsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if b, err := json.Marshal(Alerts); err == nil {
+			w.Header().Set("Content-Type", "application/json")
 			w.Write(b)
 		} else {
 			w.WriteHeader(http.StatusExpectationFailed)
@@ -365,6 +366,7 @@ func (admin *Admin) LogsHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		w.Header().Set("Content-Type", "application/json")
 		w.Write(b)
 
 	default:
@@ -459,6 +461,7 @@ func (admin *Admin) LoginHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		w.Header().Set("Content-Type", "application/json")
 		w.Write(b)
 
 	default:
@@ -532,6 +535,7 @@ func (admin *Admin) PasswordHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if b, err = json.Marshal(map[string]any{"passwordNeedChange": admin.Controller.Options.adminPasswordNeedChange}); err == nil {
+			w.Header().Set("Content-Type", "application/json")
 			w.Write(b)
 		} else {
 			w.WriteHeader(http.StatusExpectationFailed)
@@ -558,6 +562,7 @@ func (admin *Admin) SendConfig(w http.ResponseWriter) {
 		}
 	}
 	if b, err := json.Marshal(m); err == nil {
+		w.Header().Set("Content-Type", "application/json")
 		w.Write(b)
 	} else {
 		w.WriteHeader(http.StatusExpectationFailed)

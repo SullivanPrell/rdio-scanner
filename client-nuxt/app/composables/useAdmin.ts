@@ -259,9 +259,10 @@ export const useAdmin = () => {
 
   const getConfig = async (): Promise<AdminConfig | null> => {
     try {
-      return await $fetch<AdminConfig>('/api/admin/config', {
+      const res = await $fetch<{ config: AdminConfig; docker?: boolean }>('/api/admin/config', {
         headers: authHeader(),
       })
+      return { ...res.config, docker: res.docker ?? false }
     } catch (err: unknown) {
       if ((err as Record<string, unknown>)?.statusCode === 401) {
         clearAuth()
@@ -275,7 +276,7 @@ export const useAdmin = () => {
   const saveConfig = async (cfg: Partial<AdminConfig>): Promise<boolean> => {
     try {
       await $fetch('/api/admin/config', {
-        method: 'POST',
+        method: 'PUT',
         headers: authHeader(),
         body: cfg,
       })
