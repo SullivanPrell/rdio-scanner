@@ -682,14 +682,7 @@ func (admin *Admin) UserRemoveHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (admin *Admin) ValidateToken(sToken string) bool {
-	found := false
-	for _, t := range admin.Tokens {
-		if t == sToken {
-			found = true
-			break
-		}
-	}
-	if !found {
+	if sToken == "" {
 		return false
 	}
 

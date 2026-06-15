@@ -62,7 +62,10 @@ help: ## Show available targets
 
 all: clean dist ## Clean then build all distribution packages
 
-deploy: webapp ## Build for the current platform and install to DEPLOY_DIR (default: .)
+deploy: ## Build for the current platform and install to DEPLOY_DIR (default: .)
+	@echo "Building client..."
+	@cd client-nuxt && test -d node_modules || yarn install
+	@cd client-nuxt && yarn build
 	@echo "Building $(app) for $(LOCAL_OS)/$(LOCAL_ARCH)..."
 	@cd server && GOOS=$(LOCAL_OS) GOARCH=$(LOCAL_ARCH) go build -o ../$(DEPLOY_DIR)/$(LOCAL_BIN)
 	@echo "Installed: $(DEPLOY_DIR)/$(LOCAL_BIN)"

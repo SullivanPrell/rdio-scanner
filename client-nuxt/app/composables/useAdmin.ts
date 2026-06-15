@@ -226,7 +226,7 @@ export const useAdmin = () => {
   const logout = async () => {
     try {
       await $fetch('/api/admin/logout', {
-        method: 'GET',
+        method: 'POST',
         headers: authHeader(),
       })
     } catch { /* ignore */ }
