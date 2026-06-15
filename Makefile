@@ -60,6 +60,7 @@ all: clean dist ## Clean then build all distribution packages
 
 run: ## Clean stale artifacts, rebuild everything, and run locally on port 3000
 	@rm -fr server/webapp client-nuxt/.nuxt client-nuxt/.output $(LOCAL_BIN) server/$(LOCAL_BIN)
+	@lsof -ti:3000 | xargs kill 2>/dev/null || true
 	@echo "Building client..."
 	@cd client-nuxt && test -d node_modules || yarn install
 	@cd client-nuxt && yarn build
