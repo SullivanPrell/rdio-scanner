@@ -208,15 +208,17 @@ func main() {
 				w.Header().Set("Content-Type", t)
 				w.Write(b)
 
-			} else if url[:len(url)-1] != "/" {
+			} else if path.Ext(url) == "" {
+				// Extensionless URL = client-side route; serve SPA fallback.
 				if b, err := webapp.ReadFile("webapp/index.html"); err == nil {
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
 					w.Write(b)
-
 				} else {
 					w.WriteHeader(http.StatusNotFound)
 				}
 
 			} else {
+				// Missing asset (JS chunk, CSS, etc.) — return 404, not HTML.
 				w.WriteHeader(http.StatusNotFound)
 			}
 		}
