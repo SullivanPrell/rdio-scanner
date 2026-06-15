@@ -112,10 +112,13 @@ func NewSDRangelServiceManager() *SDRangelServiceManager {
 	}
 }
 
-// Mode returns "docker" if /var/run/docker.sock is connectable, else "native".
-// Using Stat is insufficient: the socket file can exist while the process
-// lacks permission to connect (e.g. rdio service user not in docker group).
-func (m *SDRangelServiceManager) mode() string {
+// mode returns "docker" only when a container name is explicitly configured
+// AND the Docker socket is reachable. Native is the default so bare-metal Pi
+// deployments never require Docker to be installed.
+func (m *SDRangelServiceManager) mode(containerName string) string {
+	if containerName == "" {
+		return "native"
+	}
 	conn, err := net.Dial("unix", "/var/run/docker.sock")
 	if err == nil {
 		conn.Close()
@@ -376,21 +379,21 @@ func (m *SDRangelServiceManager) nativeStop() SDRangelServiceResult {
 // ── Public API ─────────────────────────────────────────────────────────────
 
 func (m *SDRangelServiceManager) Status(containerName, binaryPath string) SDRangelServiceStatus {
-	if m.mode() == "docker" {
+	if m.mode(containerName) == "docker" {
 		return m.dockerStatus(containerName)
 	}
 	return m.nativeStatus(binaryPath)
 }
 
 func (m *SDRangelServiceManager) Start(containerName, binaryPath, extraArgs string) SDRangelServiceResult {
-	if m.mode() == "docker" {
+	if m.mode(containerName) == "docker" {
 		return m.dockerStart(containerName)
 	}
 	return m.nativeStart(binaryPath, extraArgs)
 }
 
 func (m *SDRangelServiceManager) Stop(containerName string) SDRangelServiceResult {
-	if m.mode() == "docker" {
+	if m.mode(containerName) == "docker" {
 		return m.dockerStop(containerName)
 	}
 	return m.nativeStop()
@@ -407,7 +410,7 @@ func (m *SDRangelServiceManager) Restart(containerName, binaryPath, extraArgs st
 }
 
 func (m *SDRangelServiceManager) Logs(containerName string, tail int) []string {
-	if m.mode() == "docker" {
+	if m.mode(containerName) == "docker" {
 		return dockerLogs(containerName, tail)
 	}
 	lines := m.nativeLogs.Lines(tail)

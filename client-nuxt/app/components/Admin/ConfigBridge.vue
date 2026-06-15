@@ -206,11 +206,11 @@ function setDongleAssignment(dongle: RTLDongle, assignTo: '' | 'sdrangel' | 'tru
 
 // ── Bridge channels ───────────────────────────────────────────────────────────
 const systemOptions = computed(() =>
-  props.systems.map(s => ({ label: s.label, value: s.systemRef })),
+  (props.systems ?? []).map(s => ({ label: s.label, value: s.systemRef })),
 )
 
 function talkgroupOptions(systemRef: number) {
-  const sys = props.systems.find(s => s.systemRef === systemRef)
+  const sys = (props.systems ?? []).find(s => s.systemRef === systemRef)
   return sys?.talkgroups.map(tg => ({
     label: `${tg.talkgroupRef} – ${tg.name || tg.label}`,
     value: tg.talkgroupRef,
@@ -260,7 +260,7 @@ function formatUptime(seconds?: number) {
 
 const trSystemOptions = computed(() => [
   { label: '— select system —', value: 0 },
-  ...props.systems.map(s => ({ label: s.label, value: s.systemRef })),
+  ...(props.systems ?? []).map(s => ({ label: s.label, value: s.systemRef })),
 ])
 </script>
 

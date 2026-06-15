@@ -377,7 +377,12 @@ func NewTrunkRecorderServiceManager() *TrunkRecorderServiceManager {
 	}
 }
 
-func (m *TrunkRecorderServiceManager) mode() string {
+// mode returns "docker" only when a container name is explicitly configured
+// AND the Docker socket is reachable. Native is the default.
+func (m *TrunkRecorderServiceManager) mode(containerName string) string {
+	if containerName == "" {
+		return "native"
+	}
 	conn, err := net.Dial("unix", "/var/run/docker.sock")
 	if err == nil {
 		conn.Close()
@@ -537,21 +542,21 @@ func (m *TrunkRecorderServiceManager) nativeStop() TrunkRecorderServiceResult {
 }
 
 func (m *TrunkRecorderServiceManager) Status(containerName, binaryPath string) TrunkRecorderServiceStatus {
-	if m.mode() == "docker" {
+	if m.mode(containerName) == "docker" {
 		return m.dockerStatus(containerName)
 	}
 	return m.nativeStatus(binaryPath)
 }
 
 func (m *TrunkRecorderServiceManager) Start(containerName, binaryPath, configPath string) TrunkRecorderServiceResult {
-	if m.mode() == "docker" {
+	if m.mode(containerName) == "docker" {
 		return m.dockerStart(containerName)
 	}
 	return m.nativeStart(binaryPath, configPath)
 }
 
 func (m *TrunkRecorderServiceManager) Stop(containerName string) TrunkRecorderServiceResult {
-	if m.mode() == "docker" {
+	if m.mode(containerName) == "docker" {
 		return m.dockerStop(containerName)
 	}
 	return m.nativeStop()
@@ -567,7 +572,7 @@ func (m *TrunkRecorderServiceManager) Restart(containerName, binaryPath, configP
 }
 
 func (m *TrunkRecorderServiceManager) Logs(containerName string, tail int) []string {
-	if m.mode() == "docker" {
+	if m.mode(containerName) == "docker" {
 		return dockerLogs(containerName, tail)
 	}
 	lines := m.nativeLogs.Lines(tail)
