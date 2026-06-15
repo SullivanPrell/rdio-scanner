@@ -5,6 +5,7 @@ definePageMeta({ layout: 'admin' })
 
 const admin = useAdmin()
 const toast = useToast()
+const router = useRouter()
 
 const cfg = ref<AdminConfig | null>(null)
 const loading = ref(true)
@@ -26,6 +27,9 @@ const tabs = [
 onMounted(async () => {
   cfg.value = await admin.getConfig()
   loading.value = false
+  if (!cfg.value && !admin.isLoggedIn.value) {
+    await router.push('/admin')
+  }
 })
 
 const save = async () => {

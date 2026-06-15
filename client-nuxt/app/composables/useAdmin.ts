@@ -252,13 +252,22 @@ export const useAdmin = () => {
 
   // ── Config ─────────────────────────────────────────────────────────────────
 
+  const clearAuth = () => {
+    _token.value = ''
+    localStorage.removeItem(TOKEN_KEY)
+  }
+
   const getConfig = async (): Promise<AdminConfig | null> => {
     try {
       return await $fetch<AdminConfig>('/api/admin/config', {
         headers: authHeader(),
       })
-    } catch (err) {
-      handleError(err, 'Load config')
+    } catch (err: unknown) {
+      if ((err as Record<string, unknown>)?.statusCode === 401) {
+        clearAuth()
+      } else {
+        handleError(err, 'Load config')
+      }
       return null
     }
   }
