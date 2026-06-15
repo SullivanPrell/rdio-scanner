@@ -206,12 +206,16 @@ func main() {
 					t = mime.TypeByExtension(path.Ext(url))
 				}
 				w.Header().Set("Content-Type", t)
+				if url == "index.html" {
+					w.Header().Set("Cache-Control", "no-store")
+				}
 				w.Write(b)
 
 			} else if path.Ext(url) == "" {
 				// Extensionless URL = client-side route; serve SPA fallback.
 				if b, err := webapp.ReadFile("webapp/index.html"); err == nil {
 					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					w.Header().Set("Cache-Control", "no-store")
 					w.Write(b)
 				} else {
 					w.WriteHeader(http.StatusNotFound)
