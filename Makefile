@@ -19,13 +19,10 @@ app := rdio-scanner
 date := 2026/05/16
 ver := 7.0.0-dev
 
-# Detect local platform for deploy/run targets
+# Detect local platform for run target
 LOCAL_OS   := $(shell go env GOOS   2>/dev/null || uname -s | tr '[:upper:]' '[:lower:]')
 LOCAL_ARCH := $(shell go env GOARCH 2>/dev/null || uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 LOCAL_BIN  := $(if $(filter windows,$(LOCAL_OS)),$(app).exe,$(app))
-
-# Deployment directory (override with: make deploy DEPLOY_DIR=/usr/local/bin)
-DEPLOY_DIR ?= .
 
 client := $(wildcard client-nuxt/*.json client-nuxt/*.ts client-nuxt/app/**/*.vue client-nuxt/app/**/*.ts)
 server := $(wildcard server/*.go)
@@ -34,7 +31,7 @@ build  = @cd server && GOOS=$(1) GOARCH=$(3) go build -o ../dist/$(2)-$(3)/$(4)
 pandoc = @test -d dist/$(1)-$(2) || mkdir -p dist/$(1)-$(2) && pandoc -f markdown -o dist/$(1)-$(2)/$(3) --resource-path docs:docs/platforms $(4) docs/webapp.md docs/faq.md CHANGELOG.md
 zip    = @cd dist/$(1)-$(2) && zip -q ../$(app)-$(1)-$(2)-v$(ver).zip * && cd ..
 
-.PHONY: all help clean deploy run webapp container dist sed
+.PHONY: all help clean run webapp container dist sed
 .PHONY: freebsd freebsd-amd64
 .PHONY: linux linux-386 linux-amd64 linux-arm linux-arm64
 .PHONY: macos macos-amd64 macos-arm64
@@ -45,7 +42,7 @@ help: ## Show available targets
 	@echo "  Rdio Scanner $(ver)"
 	@echo ""
 	@echo "  Development"
-	@grep -E '^(deploy|run|webapp|clean)[^:]*:.*?## .*$$' $(MAKEFILE_LIST) \
+	@grep -E '^(run|clean)[^:]*:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36mmake %-20s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "  Distribution"
@@ -55,27 +52,24 @@ help: ## Show available targets
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36mmake %-20s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "  Variables"
-	@echo "    DEPLOY_DIR   Installation directory       (default: .)"
 	@echo "    ver          Version string               (default: $(ver))"
 	@echo "    date         Release date                 (default: $(date))"
 	@echo ""
 
 all: clean dist ## Clean then build all distribution packages
 
-deploy: ## Build for the current platform and install to DEPLOY_DIR (default: .)
+run: ## Clean stale artifacts, rebuild everything, and run locally on port 3000
+	@rm -fr server/webapp client-nuxt/.nuxt client-nuxt/.output $(LOCAL_BIN) server/$(LOCAL_BIN)
 	@echo "Building client..."
 	@cd client-nuxt && test -d node_modules || yarn install
 	@cd client-nuxt && yarn build
 	@echo "Building $(app) for $(LOCAL_OS)/$(LOCAL_ARCH)..."
-	@cd server && GOOS=$(LOCAL_OS) GOARCH=$(LOCAL_ARCH) go build -o ../$(DEPLOY_DIR)/$(LOCAL_BIN)
-	@echo "Installed: $(DEPLOY_DIR)/$(LOCAL_BIN)"
-
-run: deploy ## Build and run locally on port 3000
+	@cd server && GOOS=$(LOCAL_OS) GOARCH=$(LOCAL_ARCH) go build -o ../$(LOCAL_BIN)
 	@echo "Starting $(app)..."
-	@$(DEPLOY_DIR)/$(LOCAL_BIN)
+	@./$(LOCAL_BIN)
 
-clean: ## Remove build artefacts (node_modules, dist, server/webapp)
-	@rm -fr client-nuxt/node_modules client-nuxt/.nuxt client-nuxt/.output dist server/webapp
+clean: ## Remove build artefacts (node_modules, dist, server/webapp, local binary)
+	@rm -fr client-nuxt/node_modules client-nuxt/.nuxt client-nuxt/.output dist server/webapp $(LOCAL_BIN) server/$(LOCAL_BIN)
 
 container: webapp linux-amd64 ## Build and push multi-arch container image (requires Podman)
 	@podman login docker.io
