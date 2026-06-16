@@ -3,7 +3,8 @@ import type { Downstream, AdminSystem } from '~/composables/useAdmin'
 const props = defineProps<{ modelValue: Downstream[]; systems: AdminSystem[] }>()
 const emit = defineEmits<{ 'update:modelValue': [Downstream[]] }>()
 const ds = computed({ get: () => props.modelValue ?? [], set: v => emit('update:modelValue', v) })
-const add = () => ds.value = [...ds.value, { url: '', apiKey: '', disabled: false, systems: {} }]
+// "*" = forward all systems; a plain {} map forwards nothing.
+const add = () => ds.value = [...ds.value, { url: '', apiKey: '', disabled: false, systems: '*' }]
 </script>
 <template>
   <div class="space-y-3">

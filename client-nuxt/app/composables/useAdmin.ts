@@ -24,7 +24,8 @@ export interface AccessConfig {
   ident: string
   limit?: number
   order?: number
-  systems: Record<number, Record<number, boolean>>
+  // "*" = all systems; a plain {} map is denied by the server (see ApiKey).
+  systems: '*' | Record<number, Record<number, boolean>>
 }
 
 export interface ApiKey {
@@ -122,7 +123,8 @@ export interface Downstream {
   apiKey: string
   disabled: boolean
   order?: number
-  systems: Record<number, boolean>
+  // "*" = forward all systems; a plain {} map forwards nothing (see ApiKey).
+  systems: '*' | Record<number, boolean>
   url: string
 }
 
