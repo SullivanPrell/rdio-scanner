@@ -184,9 +184,49 @@ export const useRdioScanner = () => {
     }
   }
 
-  const handleCall = (call: RdioCall, _flag: string) => {
-    if (!call?.audio?.length) return
+  // The server marshals calls minimally: `audio` is a Node Buffer ({data,type}),
+  // system/talkgroup are refs only (no labels), and frequencies use
+  // errorCount/spikeCount. Normalize to the flat shape the UI renders, unwrapping
+  // the audio bytes and enriching labels from the loaded config (config system /
+  // talkgroup `id` == the call's system / talkgroup ref).
+  const normalizeCall = (raw: RdioCall): RdioCall => {
+    const audioField = raw.audio as unknown as number[] | { data: number[] } | undefined
+    const audio = Array.isArray(audioField) ? audioField : (audioField?.data ?? [])
+    const sys = config.value?.systems.find(s => s.id === raw.system)
+    const tg = sys?.talkgroups.find(t => t.id === raw.talkgroup)
+    const freqs = (raw.frequencies ?? []) as Array<Record<string, number>>
+    return {
+      ...raw,
+      audio,
+      systemLabel:    raw.systemLabel    || sys?.label || '',
+      talkgroupLabel: raw.talkgroupLabel || tg?.label || String(raw.talkgroup ?? ''),
+      talkgroupName:  raw.talkgroupName  || tg?.name  || '',
+      talkgroupTag:   raw.talkgroupTag   || tg?.tag   || '',
+      talkgroupType:  raw.talkgroupType  || tg?.type  || '',
+      talkgroupGroup: raw.talkgroupGroup || tg?.group || '',
+      frequencies: freqs.map(f => ({
+        freq: f.freq,
+        pos: f.pos,
+        error: f.error ?? f.errorCount ?? 0,
+        spike: f.spike ?? f.spikeCount ?? 0,
+      })),
+    }
+  }
+
+  const handleCall = (raw: RdioCall, flag: string) => {
+    const call = normalizeCall(raw)
+    if (!call.audio.length) return
     callHistory.value = [call, ...callHistory.value].slice(0, HISTORY_MAX)
+    // An explicitly requested call (search result / playback) carries a flag —
+    // play it immediately rather than subjecting it to live-feed holds/queueing.
+    if (flag) {
+      playbackMode.value = true
+      stopAudio(false)
+      isPaused.value = false
+      callQueue.value = []
+      playCall(call)
+      return
+    }
     if (holdSys.value && currentCall.value && call.system !== currentCall.value.system) return
     if (holdTg.value  && currentCall.value && call.talkgroup !== currentCall.value.talkgroup) return
     if (livefeedPaused.value) return
