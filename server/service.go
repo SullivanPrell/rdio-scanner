@@ -104,6 +104,7 @@ type SDRangelServiceManager struct {
 	nativeProcess *exec.Cmd
 	nativeCancel  context.CancelFunc
 	nativeLogs    *ringBuffer
+	nativeExited  chan struct{} // closed when the managed native process exits
 }
 
 func NewSDRangelServiceManager() *SDRangelServiceManager {
@@ -272,49 +273,52 @@ func dockerLogs(containerName string, tail int) []string {
 
 // ── Native mode ────────────────────────────────────────────────────────────
 
-func (m *SDRangelServiceManager) nativeStatus(binaryPath string) SDRangelServiceStatus {
+func (m *SDRangelServiceManager) nativeStatus(binaryPath, host string, port uint) SDRangelServiceStatus {
 	m.mutex.Lock()
-	defer m.mutex.Unlock()
-
-	if m.nativeProcess == nil || m.nativeProcess.Process == nil {
-		// Check configured path first, then fall back to PATH lookup
-		if binaryPath != "" {
-			if _, err := os.Stat(binaryPath); err != nil {
-				return SDRangelServiceStatus{
-					Mode:    "native",
-					Message: fmt.Sprintf("binary not found at configured path: %s", binaryPath),
-				}
-			}
-		} else if _, err := exec.LookPath("sdrangelsrv"); err != nil {
-			return SDRangelServiceStatus{
-				Mode:    "native",
-				Message: "sdrangelsrv not found in PATH — set Binary Path in Bridge Config",
-			}
+	managed := m.nativeProcess
+	if managed != nil && managed.Process != nil {
+		pid := managed.Process.Pid
+		proc, err := os.FindProcess(pid)
+		if err == nil && proc.Signal(os.Signal(nil)) == nil {
+			m.mutex.Unlock()
+			return SDRangelServiceStatus{Mode: "native", Running: true, PID: pid, Message: "running"}
 		}
-		return SDRangelServiceStatus{Mode: "native", Message: "not running"}
-	}
-
-	// Check if process is still alive
-	proc, err := os.FindProcess(m.nativeProcess.Process.Pid)
-	if err != nil || proc.Signal(os.Signal(nil)) != nil {
 		m.nativeProcess = nil
 		m.nativeCancel = nil
-		return SDRangelServiceStatus{Mode: "native", Message: "process exited"}
+		m.nativeExited = nil
+	}
+	m.mutex.Unlock()
+
+	// Detect externally-started sdrangelsrv (from a prior session or manual launch)
+	h := host
+	if h == "" {
+		h = "127.0.0.1"
+	}
+	p := port
+	if p == 0 {
+		p = 8091
+	}
+	if conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", h, p), 200*time.Millisecond); err == nil {
+		conn.Close()
+		return SDRangelServiceStatus{Mode: "native", Running: true, Message: "running (external)"}
 	}
 
-	return SDRangelServiceStatus{
-		Mode:    "native",
-		Running: true,
-		PID:     m.nativeProcess.Process.Pid,
-		Message: "running",
+	// Binary existence check for a helpful offline message
+	if binaryPath != "" {
+		if _, err := os.Stat(binaryPath); err != nil {
+			return SDRangelServiceStatus{Mode: "native", Message: fmt.Sprintf("binary not found at configured path: %s", binaryPath)}
+		}
+	} else if _, err := exec.LookPath("sdrangelsrv"); err != nil {
+		return SDRangelServiceStatus{Mode: "native", Message: "sdrangelsrv not found in PATH — set Binary Path in Bridge Config"}
 	}
+	return SDRangelServiceStatus{Mode: "native", Message: "not running"}
 }
 
 func (m *SDRangelServiceManager) nativeStart(binaryPath, extraArgs string) SDRangelServiceResult {
 	m.mutex.Lock()
-	defer m.mutex.Unlock()
 
 	if m.nativeProcess != nil && m.nativeProcess.Process != nil {
+		m.mutex.Unlock()
 		return SDRangelServiceResult{Success: true, Message: "already running"}
 	}
 
@@ -322,6 +326,7 @@ func (m *SDRangelServiceManager) nativeStart(binaryPath, extraArgs string) SDRan
 	if bin == "" {
 		var err error
 		if bin, err = exec.LookPath("sdrangelsrv"); err != nil {
+			m.mutex.Unlock()
 			return SDRangelServiceResult{Message: "sdrangelsrv not found; set Binary Path in Bridge Config"}
 		}
 	}
@@ -338,51 +343,75 @@ func (m *SDRangelServiceManager) nativeStart(binaryPath, extraArgs string) SDRan
 
 	if err := cmd.Start(); err != nil {
 		cancel()
+		m.mutex.Unlock()
 		return SDRangelServiceResult{Message: "failed to start: " + err.Error()}
 	}
 
+	exited := make(chan struct{})
 	m.nativeProcess = cmd
 	m.nativeCancel = cancel
+	m.nativeExited = exited
 
-	// Reap the process when it exits
 	go func() {
 		cmd.Wait()
 		m.mutex.Lock()
 		if m.nativeProcess == cmd {
 			m.nativeProcess = nil
 			m.nativeCancel = nil
+			m.nativeExited = nil
 		}
 		m.mutex.Unlock()
+		close(exited)
 	}()
 
-	return SDRangelServiceResult{Success: true, Message: fmt.Sprintf("sdrangelsrv started (pid %d)", cmd.Process.Pid)}
+	pid := cmd.Process.Pid
+	m.mutex.Unlock()
+
+	// Wait briefly to detect immediate crashes (e.g., port 8091 already in use)
+	select {
+	case <-exited:
+		return SDRangelServiceResult{Message: fmt.Sprintf("sdrangelsrv (pid %d) exited immediately — port 8091 may already be in use. Check Logs.", pid)}
+	case <-time.After(400 * time.Millisecond):
+		return SDRangelServiceResult{Success: true, Message: fmt.Sprintf("sdrangelsrv started (pid %d)", pid)}
+	}
 }
 
 func (m *SDRangelServiceManager) nativeStop() SDRangelServiceResult {
 	m.mutex.Lock()
-	defer m.mutex.Unlock()
 
 	if m.nativeProcess == nil || m.nativeProcess.Process == nil {
+		m.mutex.Unlock()
 		return SDRangelServiceResult{Success: true, Message: "not running"}
 	}
 
+	exited := m.nativeExited
 	if m.nativeCancel != nil {
 		m.nativeCancel()
 	}
 	m.nativeProcess.Process.Signal(os.Interrupt)
-
 	m.nativeProcess = nil
 	m.nativeCancel = nil
+	m.nativeExited = nil
+	m.mutex.Unlock()
+
+	// Wait for the process to fully exit so Restart doesn't hit a port conflict
+	if exited != nil {
+		select {
+		case <-exited:
+		case <-time.After(5 * time.Second):
+		}
+	}
+
 	return SDRangelServiceResult{Success: true, Message: "sdrangelsrv stopped"}
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────
 
-func (m *SDRangelServiceManager) Status(containerName, binaryPath string) SDRangelServiceStatus {
+func (m *SDRangelServiceManager) Status(containerName, binaryPath, host string, port uint) SDRangelServiceStatus {
 	if m.mode(containerName) == "docker" {
 		return m.dockerStatus(containerName)
 	}
-	return m.nativeStatus(binaryPath)
+	return m.nativeStatus(binaryPath, host, port)
 }
 
 func (m *SDRangelServiceManager) Start(containerName, binaryPath, extraArgs string) SDRangelServiceResult {
@@ -404,8 +433,7 @@ func (m *SDRangelServiceManager) Restart(containerName, binaryPath, extraArgs st
 	if !stop.Success {
 		return stop
 	}
-	// Brief pause for the process to fully exit before restarting
-	time.Sleep(2 * time.Second)
+	// nativeStop waits for the process to fully exit, so no sleep needed here
 	return m.Start(containerName, binaryPath, extraArgs)
 }
 
@@ -432,7 +460,15 @@ func (admin *Admin) SDRangelServiceStatusHandler(w http.ResponseWriter, r *http.
 		return
 	}
 	opts := admin.Controller.Options
-	status := admin.Controller.ServiceManager.Status(opts.SDRangelContainerName, opts.SDRangelBinaryPath)
+	host := opts.BridgeHost
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	port := opts.BridgePort
+	if port == 0 {
+		port = 8091
+	}
+	status := admin.Controller.ServiceManager.Status(opts.SDRangelContainerName, opts.SDRangelBinaryPath, host, port)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(status)
 }
