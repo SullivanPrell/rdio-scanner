@@ -64,6 +64,7 @@ export interface BridgeChannel {
   frequencyHz: number
   label: string
   protocol: string
+  squelchDb: number
   sampleRate: number
   systemRef: number
   talkgroupRef: number

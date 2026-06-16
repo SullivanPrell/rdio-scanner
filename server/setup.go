@@ -353,14 +353,23 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 	return result, updated
 }
 
+// bridgeDefaultSquelchDB is the squelch threshold used when a channel doesn't
+// specify one (SquelchDB == 0). Squelch values are negative dBFS, so 0 reliably
+// means "unset" rather than a threshold anyone would pick.
+const bridgeDefaultSquelchDB = -50
+
 // udpSinkSettings builds the UDPSinkSettings payload for one bridge channel.
-// sampleFormat selects the demodulator; squelch lets the bridge segment calls by
-// polling UDPSinkReport. squelchDB / rfBandwidth / fmDeviation are sensible
-// defaults for narrowband voice and can be tuned later.
+// sampleFormat selects the demodulator; the squelch produces the exact-zero PCM
+// runs the bridge uses to segment calls, so squelchDb is the key per-channel
+// tuning knob. rfBandwidth / fmDeviation are sensible narrowband-voice defaults.
 func udpSinkSettings(ch BridgeChannelConfig, freqOffset int64) map[string]interface{} {
 	sr := ch.SampleRate
 	if sr <= 0 {
 		sr = 8000
+	}
+	squelchDB := ch.SquelchDB
+	if squelchDB == 0 {
+		squelchDB = bridgeDefaultSquelchDB
 	}
 	rfBandwidth := 12500.0
 	switch ch.Protocol {
@@ -376,7 +385,7 @@ func udpSinkSettings(ch BridgeChannelConfig, freqOffset int64) map[string]interf
 		"fmDeviation":          5000,
 		"outputSampleRate":     sr,
 		"squelchEnabled":       1,
-		"squelchDB":            -50,
+		"squelchDB":            squelchDB,
 		"squelchGate":          5, // 100ths of a second → 50 ms
 		"agc":                  1,
 		"gain":                 1.0,

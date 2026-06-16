@@ -112,6 +112,7 @@ func buildImportFromChannels(label string, systemRef uint, portBase int, entries
 			UdpPort:      portBase + i,
 			SampleRate:   8000,
 			Protocol:     "nfm",
+			SquelchDB:    bridgeDefaultSquelchDB,
 		})
 	}
 
@@ -223,6 +224,7 @@ func ParseChirpCSV(data []byte, systemLabel string, systemRef uint, portBase int
 			UdpPort:      portBase + portIdx,
 			SampleRate:   8000,
 			Protocol:     proto,
+			SquelchDB:    bridgeDefaultSquelchDB,
 		})
 		portIdx++
 	}
@@ -385,6 +387,7 @@ func ParseRRCSV(data []byte, systemLabel string, systemRef uint, portBase int, p
 			UdpPort:      portBase + int(tgRef) - 1,
 			SampleRate:   8000,
 			Protocol:     proto,
+			SquelchDB:    bridgeDefaultSquelchDB,
 		})
 	}
 
@@ -854,6 +857,7 @@ func rrCountyInfoToImportResult(county rrCountyInfo, systemRef uint, portBase in
 					UdpPort:      portBase + *portIdx,
 					SampleRate:   8000,
 					Protocol:     proto,
+					SquelchDB:    bridgeDefaultSquelchDB,
 				})
 				tgRef++
 				*portIdx++

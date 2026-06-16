@@ -34,7 +34,8 @@ type BridgeChannelConfig struct {
 	DeviceSetIndex int    `json:"deviceSetIndex"`
 	FrequencyHz    uint   `json:"frequencyHz"`
 	Label          string `json:"label"`
-	Protocol       string `json:"protocol"` // "nfm" (default), "dsd", or "nxdn"
+	Protocol       string `json:"protocol"`   // demod: "nfm" (default), "am", "usb", "lsb"
+	SquelchDB      int    `json:"squelchDb"`  // SDRangel squelch threshold, dB (0 ⇒ default -50)
 	SampleRate     int    `json:"sampleRate"`
 	SystemRef      uint   `json:"systemRef"`
 	TalkgroupRef   uint   `json:"talkgroupRef"`

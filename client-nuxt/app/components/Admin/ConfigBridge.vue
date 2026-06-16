@@ -256,6 +256,7 @@ function addChannel() {
       frequencyHz: 0,
       label: '',
       protocol: 'nfm',
+      squelchDb: -50,
       sampleRate: 8000,
       systemRef: 0,
       talkgroupRef: 0,
@@ -680,6 +681,7 @@ const trSystemOptions = computed(() => [
               <th class="px-2 py-1.5 text-left">Label</th>
               <th class="px-2 py-1.5 text-left">Freq (Hz)</th>
               <th class="px-2 py-1.5 text-left">Protocol</th>
+              <th class="px-2 py-1.5 text-left">Squelch (dB)</th>
               <th class="px-2 py-1.5 text-left">System</th>
               <th class="px-2 py-1.5 text-left">Talkgroup</th>
               <th class="px-2 py-1.5 text-left">UDP Port</th>
@@ -696,6 +698,7 @@ const trSystemOptions = computed(() => [
               <td class="px-2 py-1"><UInput v-model="ch.label" size="xs" /></td>
               <td class="px-2 py-1"><UInput v-model.number="ch.frequencyHz" type="number" size="xs" /></td>
               <td class="px-2 py-1"><USelect v-model="ch.protocol" :items="protocolOptions" size="xs" /></td>
+              <td class="px-2 py-1"><UInput v-model.number="ch.squelchDb" type="number" size="xs" /></td>
               <td class="px-2 py-1"><USelect v-model.number="ch.systemRef" :items="systemOptions" size="xs" /></td>
               <td class="px-2 py-1">
                 <USelect v-model.number="ch.talkgroupRef" :items="talkgroupOptions(ch.systemRef)" size="xs" />
@@ -708,7 +711,7 @@ const trSystemOptions = computed(() => [
               </td>
             </tr>
             <tr v-if="!bridge.channels.length">
-              <td colspan="8" class="px-3 py-6 text-center text-neutral-600">
+              <td colspan="9" class="px-3 py-6 text-center text-neutral-600">
                 No channels — add one above, then click Provision SDRangel.
               </td>
             </tr>
@@ -717,8 +720,9 @@ const trSystemOptions = computed(() => [
       </div>
 
       <p class="text-xs text-neutral-600">
-        Each channel maps one SDRangel NFM/DSD/NXDN demodulator to a rdio-scanner talkgroup via UDP audio relay.
-        After adding channels, save config and click Provision SDRangel to push the setup to the running sdrangelsrv.
+        Each channel maps one SDRangel NFM/AM/USB/LSB demodulator to a rdio-scanner talkgroup via UDP audio relay.
+        Squelch (dB) is the per-channel threshold SDRangel uses to gate audio — lower it (e.g. −60) if weak signals
+        aren't opening, raise it if noise records constantly. After editing, save config and click Provision SDRangel.
       </p>
     </div>
   </div>
