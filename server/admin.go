@@ -606,6 +606,130 @@ func (admin *Admin) PasswordHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// mergeImportResult merges an ImportResult into the live controller config and
+// persists it to the database. Tags and groups are deduplicated by label.
+// Systems are merged by systemRef (talkgroups merged by TalkgroupRef). Bridge
+// channels are appended, deduplicating by UDP port.
+func (admin *Admin) mergeImportResult(result *ImportResult) error {
+	admin.mutex.Lock()
+	defer admin.mutex.Unlock()
+
+	// ── Tags: deduplicate by label, build importedId → realId map ─────────
+	tagIDMap := map[uint64]uint64{}
+	for _, t := range result.Tags {
+		if existing, ok := admin.Controller.Tags.GetTagByLabel(t.Label); ok {
+			tagIDMap[t.Id] = existing.Id
+		} else {
+			admin.Controller.Tags.List = append(admin.Controller.Tags.List, &Tag{Label: t.Label})
+			tagIDMap[t.Id] = 0 // resolved after Write+Read
+		}
+	}
+	if len(result.Tags) > 0 {
+		if err := admin.Controller.Tags.Write(admin.Controller.Database); err != nil {
+			return fmt.Errorf("tags write: %w", err)
+		}
+		if err := admin.Controller.Tags.Read(admin.Controller.Database); err != nil {
+			return fmt.Errorf("tags read: %w", err)
+		}
+		for _, t := range result.Tags {
+			if tagIDMap[t.Id] == 0 {
+				if found, ok := admin.Controller.Tags.GetTagByLabel(t.Label); ok {
+					tagIDMap[t.Id] = found.Id
+				}
+			}
+		}
+	}
+
+	// ── Groups: same pattern ───────────────────────────────────────────────
+	groupIDMap := map[uint64]uint64{}
+	for _, g := range result.Groups {
+		if existing, ok := admin.Controller.Groups.GetGroupByLabel(g.Label); ok {
+			groupIDMap[g.Id] = existing.Id
+		} else {
+			admin.Controller.Groups.List = append(admin.Controller.Groups.List, &Group{Label: g.Label})
+			groupIDMap[g.Id] = 0
+		}
+	}
+	if len(result.Groups) > 0 {
+		if err := admin.Controller.Groups.Write(admin.Controller.Database); err != nil {
+			return fmt.Errorf("groups write: %w", err)
+		}
+		if err := admin.Controller.Groups.Read(admin.Controller.Database); err != nil {
+			return fmt.Errorf("groups read: %w", err)
+		}
+		for _, g := range result.Groups {
+			if groupIDMap[g.Id] == 0 {
+				if found, ok := admin.Controller.Groups.GetGroupByLabel(g.Label); ok {
+					groupIDMap[g.Id] = found.Id
+				}
+			}
+		}
+	}
+
+	// ── Systems: merge by systemRef ────────────────────────────────────────
+	for _, importedSys := range result.Systems {
+		// Remap talkgroup tag/group IDs to real DB IDs
+		for _, tg := range importedSys.Talkgroups.List {
+			if newID, ok := tagIDMap[tg.TagId]; ok {
+				tg.TagId = newID
+			}
+			for i, gid := range tg.GroupIds {
+				if newID, ok := groupIDMap[gid]; ok {
+					tg.GroupIds[i] = newID
+				}
+			}
+		}
+
+		if existingSys, ok := admin.Controller.Systems.GetSystemByRef(importedSys.SystemRef); ok {
+			existingRefs := map[uint]bool{}
+			for _, etg := range existingSys.Talkgroups.List {
+				existingRefs[etg.TalkgroupRef] = true
+			}
+			for _, tg := range importedSys.Talkgroups.List {
+				if !existingRefs[tg.TalkgroupRef] {
+					tg.Id = 0
+					existingSys.Talkgroups.List = append(existingSys.Talkgroups.List, tg)
+					existingRefs[tg.TalkgroupRef] = true
+				}
+			}
+		} else {
+			importedSys.Id = 0
+			for _, tg := range importedSys.Talkgroups.List {
+				tg.Id = 0
+			}
+			admin.Controller.Systems.List = append(admin.Controller.Systems.List, importedSys)
+		}
+	}
+	if len(result.Systems) > 0 {
+		if err := admin.Controller.Systems.Write(admin.Controller.Database); err != nil {
+			return fmt.Errorf("systems write: %w", err)
+		}
+		if err := admin.Controller.Systems.Read(admin.Controller.Database); err != nil {
+			return fmt.Errorf("systems read: %w", err)
+		}
+	}
+
+	// ── Bridge channels: append, deduplicating by UDP port ─────────────────
+	if len(result.Channels) > 0 {
+		existingPorts := map[int]bool{}
+		for _, ch := range admin.Controller.Options.BridgeChannels {
+			existingPorts[ch.UdpPort] = true
+		}
+		for _, ch := range result.Channels {
+			if !existingPorts[ch.UdpPort] {
+				admin.Controller.Options.BridgeChannels = append(admin.Controller.Options.BridgeChannels, ch)
+				existingPorts[ch.UdpPort] = true
+			}
+		}
+		if err := admin.Controller.Options.Write(admin.Controller.Database); err != nil {
+			return fmt.Errorf("options write: %w", err)
+		}
+	}
+
+	admin.Controller.EmitConfig()
+	return nil
+}
+
 func (admin *Admin) SendConfig(w http.ResponseWriter) {
 	var m map[string]any
 	_, docker := os.LookupEnv("DOCKER")

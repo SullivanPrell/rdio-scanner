@@ -577,6 +577,9 @@ func (admin *Admin) ImportTRSCSVHandler(w http.ResponseWriter, r *http.Request) 
 		w.Write([]byte(err.Error()))
 		return
 	}
+	if err := admin.mergeImportResult(result); err != nil {
+		admin.Controller.Logs.LogEvent(LogLevelError, fmt.Sprintf("trs-csv import merge: %s", err))
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
 }
@@ -622,6 +625,9 @@ func (admin *Admin) ImportRRCSVHandler(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(err.Error()))
 		return
+	}
+	if err := admin.mergeImportResult(result); err != nil {
+		admin.Controller.Logs.LogEvent(LogLevelError, fmt.Sprintf("rr-csv import merge: %s", err))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
@@ -1019,6 +1025,9 @@ func (admin *Admin) ImportChirpHandler(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(err.Error()))
 		return
+	}
+	if err := admin.mergeImportResult(result); err != nil {
+		admin.Controller.Logs.LogEvent(LogLevelError, fmt.Sprintf("chirp import merge: %s", err))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
