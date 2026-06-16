@@ -90,7 +90,7 @@ func (options *Options) FromMap(m map[string]any) *Options {
 	case float64:
 		options.AudioConversion = uint(v)
 	default:
-		options.MaxClients = defaults.options.audioConversion
+		options.AudioConversion = defaults.options.audioConversion
 	}
 
 	switch v := m["autoPopulate"].(type) {
@@ -100,29 +100,14 @@ func (options *Options) FromMap(m map[string]any) *Options {
 		options.AutoPopulate = defaults.options.autoPopulate
 	}
 
-	switch v := m["bridgeEnabled"].(type) {
-	case bool:
-		options.BridgeEnabled = v
-	}
-
-	switch v := m["bridgeHost"].(type) {
-	case string:
-		options.BridgeHost = v
-	}
-
-	switch v := m["bridgePort"].(type) {
-	case float64:
-		options.BridgePort = uint(v)
-	}
-
-	switch v := m["bridgeChannels"].(type) {
-	case []any:
-		if b, err := json.Marshal(v); err == nil {
-			json.Unmarshal(b, &options.BridgeChannels)
-		}
-	default:
-		options.BridgeChannels = []BridgeChannelConfig{}
-	}
+	// NOTE: bridge / SDR-service fields (bridgeEnabled, bridgeHost, bridgePort,
+	// bridgeChannels, sdrangel*, trunkRecorder*, sdrDeviceAssignments) are
+	// intentionally NOT handled here. They are owned exclusively by
+	// BridgeFromMap (the m["bridge"] config path). The admin client sends the
+	// full options object (which embeds a stale copy of these fields) alongside
+	// the freshly-edited m["bridge"] payload; handling them here too made the
+	// "options" path overwrite the new bridge config with the stale copy,
+	// silently discarding channel/binary-path edits on every Save.
 
 	switch v := m["branding"].(type) {
 	case string:
@@ -190,39 +175,8 @@ func (options *Options) FromMap(m map[string]any) *Options {
 		options.PruneDays = defaults.options.pruneDays
 	}
 
-	switch v := m["sdrangelBinaryPath"].(type) {
-	case string:
-		options.SDRangelBinaryPath = v
-	}
-
-	switch v := m["sdrangelContainerName"].(type) {
-	case string:
-		options.SDRangelContainerName = v
-	}
-
-	switch v := m["sdrDeviceAssignments"].(type) {
-	case []any:
-		if b, err := json.Marshal(v); err == nil {
-			json.Unmarshal(b, &options.SDRDeviceAssignments)
-		}
-	default:
-		options.SDRDeviceAssignments = []SDRDeviceAssignment{}
-	}
-
-	switch v := m["trunkRecorderBinaryPath"].(type) {
-	case string:
-		options.TrunkRecorderBinaryPath = v
-	}
-
-	switch v := m["trunkRecorderConfigPath"].(type) {
-	case string:
-		options.TrunkRecorderConfigPath = v
-	}
-
-	switch v := m["trunkRecorderContainerName"].(type) {
-	case string:
-		options.TrunkRecorderContainerName = v
-	}
+	// sdrangel* / trunkRecorder* / sdrDeviceAssignments are owned by
+	// BridgeFromMap — see the note above.
 
 	switch v := m["showListenersCount"].(type) {
 	case bool:
@@ -428,7 +382,7 @@ func (options *Options) Read(db *Database) error {
 					options.DisableDuplicateDetection = v
 				}
 			}
-		case "duplicateDetectionTimeframe":
+		case "duplicateDetectionTimeFrame":
 			if err = json.Unmarshal([]byte(value.String), &f); err == nil {
 				switch v := f.(type) {
 				case float64:
