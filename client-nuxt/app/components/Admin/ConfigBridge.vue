@@ -270,6 +270,58 @@ function removeChannel(i: number) {
   bridge.value = { ...bridge.value, channels }
 }
 
+// Usable RF span one RTL-SDR dongle can cover at a 2.4 MHz sample rate, leaving
+// margin for filter rolloff and the centre DC spike.
+const SDR_USABLE_HZ = 2_000_000
+
+// autoAssignDevices clusters channel frequencies into the fewest ~2 MHz windows
+// (one per SDR) so nearby frequencies share a dongle and the available SDRs cover
+// as much spectrum as possible. It fills the Dev Set column; the user then Saves
+// and Provisions. With 4 dongles and clustered IndyCar pit/track freqs this maps
+// everything automatically.
+function autoAssignDevices() {
+  const withFreq = bridge.value.channels.filter(c => c.frequencyHz > 0)
+  if (!withFreq.length) {
+    toast.add({ title: 'Add channels with frequencies first', color: 'warning' })
+    return
+  }
+  const sorted = [...withFreq].sort((a, b) => a.frequencyHz - b.frequencyHz)
+  // Greedy minimum-windows cover: each window starts at the first freq it can't fit.
+  const windowStarts: number[] = [sorted[0].frequencyHz]
+  for (const ch of sorted) {
+    if (ch.frequencyHz - windowStarts[windowStarts.length - 1] > SDR_USABLE_HZ) {
+      windowStarts.push(ch.frequencyHz)
+    }
+  }
+  const deviceForFreq = (hz: number) => {
+    for (let i = windowStarts.length - 1; i >= 0; i--) {
+      if (hz >= windowStarts[i]) return i
+    }
+    return 0
+  }
+  bridge.value = {
+    ...bridge.value,
+    channels: bridge.value.channels.map(c =>
+      c.frequencyHz > 0 ? { ...c, deviceSetIndex: deviceForFreq(c.frequencyHz) } : c),
+  }
+  const needed = windowStarts.length
+  const available = dongles.value.length || 4
+  const spanMHz = ((sorted[sorted.length - 1].frequencyHz - sorted[0].frequencyHz) / 1e6).toFixed(2)
+  if (needed > available) {
+    toast.add({
+      title: `Needs ${needed} SDRs, only ${available} available`,
+      description: `Frequencies span ${spanMHz} MHz; each SDR covers ~${(SDR_USABLE_HZ / 1e6).toFixed(1)} MHz. Channels on device sets ≥ ${available} won't be received until more SDRs are added.`,
+      color: 'warning',
+    })
+  } else {
+    toast.add({
+      title: `Assigned ${withFreq.length} channel(s) across ${needed} SDR${needed > 1 ? 's' : ''}`,
+      description: `Span ${spanMHz} MHz. Review the Dev Set column, Save, then Provision.`,
+      color: 'success',
+    })
+  }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function formatUptime(seconds?: number) {
   if (!seconds) return ''
@@ -598,6 +650,15 @@ const trSystemOptions = computed(() => [
         <div class="flex gap-2">
           <UButton icon="i-heroicons-plus" size="xs" variant="ghost" @click="addChannel">
             Add Channel
+          </UButton>
+          <UButton
+            icon="i-heroicons-cpu-chip"
+            size="xs"
+            variant="ghost"
+            :disabled="!bridge.channels.length"
+            @click="autoAssignDevices"
+          >
+            Auto-assign SDRs
           </UButton>
           <UButton
             icon="i-heroicons-bolt"
