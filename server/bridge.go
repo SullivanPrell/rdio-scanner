@@ -41,22 +41,107 @@ type BridgeChannelConfig struct {
 	UdpPort        int    `json:"udpPort"`
 }
 
-var bridgeHTTPClient = &http.Client{
-	Timeout: 200 * time.Millisecond,
-	Transport: &http.Transport{
-		MaxConnsPerHost:     4,
-		MaxIdleConnsPerHost: 4,
-		IdleConnTimeout:     30 * time.Second,
-	},
+// Call segmentation parameters. SDRangel's UDPSink keeps the per-channel UDP
+// stream flowing continuously and writes *exact-zero* PCM whenever its squelch
+// is closed (confirmed in SDRangel's udpsinksink.cpp: every demod path emits
+// `udpWriteX(0)` when !m_squelchOpen). The stream itself therefore encodes
+// SDRangel's own squelch decision, so the bridge segments calls purely from the
+// audio — no per-channel REST polling, which lets it scale to any number of
+// channels and removes the squelch-poll latency on call boundaries.
+const (
+	// bridgeSilenceFloor is the |sample| level below which a window counts as
+	// silence. Closed squelch is exact zero; open-squelch carrier noise sits
+	// well above this, so the floor only guards against stray DC.
+	bridgeSilenceFloor = 16
+
+	// bridgeHangTime keeps a call open across brief drop-outs (signal fading,
+	// momentary squelch close) so one transmission isn't split into many.
+	bridgeHangTime = 750 * time.Millisecond
+
+	// bridgeMaxCallDur caps a single call so a stuck-open squelch can't grow
+	// the buffer without bound; longer transmissions are split at this point.
+	bridgeMaxCallDur = 5 * time.Minute
+)
+
+// chunkActive reports whether a block of S16LE mono PCM contains any audio above
+// the silence floor (i.e. SDRangel's squelch was open while it was produced).
+func chunkActive(pcm []byte) bool {
+	for i := 0; i+1 < len(pcm); i += 2 {
+		v := int32(int16(uint16(pcm[i]) | uint16(pcm[i+1])<<8))
+		if v < 0 {
+			v = -v
+		}
+		if v > bridgeSilenceFloor {
+			return true
+		}
+	}
+	return false
 }
 
-// sdrangelChannelReport is the subset of the SDRangel channel report we care
-// about. UDPSinkReport exposes a squelch flag (1 = open) the bridge polls to
-// segment calls.
-type sdrangelChannelReport struct {
-	UDPSinkReport *struct {
-		Squelch int `json:"squelch"`
-	} `json:"UDPSinkReport"`
+// trimTrailingSilence drops trailing exact-zero S16LE samples — the closed-
+// squelch tail the hang-time leaves on the end of a recording.
+func trimTrailingSilence(pcm []byte) []byte {
+	n := len(pcm)
+	for n >= 2 && pcm[n-2] == 0 && pcm[n-1] == 0 {
+		n -= 2
+	}
+	return pcm[:n]
+}
+
+// callSegmenter turns a stream of PCM chunks into discrete calls using only the
+// audio content. feed is driven by arriving chunks; tick is a watchdog so a call
+// still finalizes if the UDP stream stalls. Both report a finished call's
+// trimmed PCM and start time when a boundary is crossed.
+type callSegmenter struct {
+	hangTime  time.Duration
+	maxDur    time.Duration
+	recording bool
+	pcm       []byte
+	startTime time.Time
+	lastAudio time.Time
+}
+
+func (s *callSegmenter) feed(chunk []byte, now time.Time) (pcm []byte, start time.Time, done bool) {
+	active := chunkActive(chunk)
+
+	if active && !s.recording {
+		s.recording = true
+		s.pcm = s.pcm[:0]
+		s.startTime = now
+		s.lastAudio = now
+	}
+
+	if !s.recording {
+		return nil, time.Time{}, false
+	}
+
+	s.pcm = append(s.pcm, chunk...)
+	if active {
+		s.lastAudio = now
+	}
+
+	if now.Sub(s.lastAudio) >= s.hangTime || now.Sub(s.startTime) >= s.maxDur {
+		return s.finish()
+	}
+	return nil, time.Time{}, false
+}
+
+func (s *callSegmenter) tick(now time.Time) (pcm []byte, start time.Time, done bool) {
+	if s.recording && now.Sub(s.lastAudio) >= s.hangTime {
+		return s.finish()
+	}
+	return nil, time.Time{}, false
+}
+
+func (s *callSegmenter) finish() (pcm []byte, start time.Time, done bool) {
+	out := trimTrailingSilence(s.pcm)
+	start = s.startTime
+	s.recording = false
+	s.pcm = nil
+	if len(out) == 0 {
+		return nil, time.Time{}, false
+	}
+	return out, start, true
 }
 
 type BridgeStatus struct {
@@ -131,28 +216,6 @@ func (b *Bridge) Restart() {
 	}
 }
 
-func (b *Bridge) squelchOpen(host string, port uint, deviceSetIndex, channelIndex int) (bool, error) {
-	url := fmt.Sprintf("http://%s:%d/sdrangel/deviceset/%d/channel/%d/report",
-		host, port, deviceSetIndex, channelIndex)
-
-	resp, err := bridgeHTTPClient.Get(url)
-	if err != nil {
-		return false, err
-	}
-	defer resp.Body.Close()
-
-	var report sdrangelChannelReport
-	if err := json.NewDecoder(resp.Body).Decode(&report); err != nil {
-		return false, fmt.Errorf("decode report: %w", err)
-	}
-
-	if report.UDPSinkReport != nil {
-		return report.UDPSinkReport.Squelch == 1, nil
-	}
-
-	return false, fmt.Errorf("no UDPSinkReport in response (deviceset %d channel %d)", deviceSetIndex, channelIndex)
-}
-
 // bridgeBuildWAV wraps raw L16 mono PCM bytes in a RIFF/WAV header.
 func bridgeBuildWAV(pcm []byte, sampleRate int) []byte {
 	const (
@@ -212,16 +275,6 @@ func (b *Bridge) monitorChannel(ctx context.Context, cfg BridgeChannelConfig) {
 		sampleRate = 8000
 	}
 
-	host := b.Controller.Options.BridgeHost
-	if host == "" {
-		host = "127.0.0.1"
-	}
-
-	port := b.Controller.Options.BridgePort
-	if port == 0 {
-		port = 8091
-	}
-
 	udpAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("0.0.0.0:%d", cfg.UdpPort))
 	if err != nil {
 		b.Controller.Logs.LogEvent(LogLevelError, fmt.Sprintf("bridge: %s: udp resolve: %v", cfg.Label, err))
@@ -240,14 +293,22 @@ func (b *Bridge) monitorChannel(ctx context.Context, cfg BridgeChannelConfig) {
 		conn.Close()
 	}()
 
-	var (
-		recording       bool
-		pcmBuf          []byte
-		startTime       time.Time
-		wasOpen         bool
-		consecutiveErrs int
-		lastErrLog      time.Time
-	)
+	seg := &callSegmenter{hangTime: bridgeHangTime, maxDur: bridgeMaxCallDur}
+
+	submit := func(pcm []byte, start time.Time) {
+		call := NewCall()
+		call.Audio = bridgeBuildWAV(pcm, sampleRate)
+		call.AudioFilename = fmt.Sprintf("%s-%d.wav", cfg.Label, start.UnixMilli())
+		call.AudioMime = "audio/wav"
+		call.Timestamp = start
+		call.Meta.SystemRef = cfg.SystemRef
+		call.Meta.TalkgroupRef = cfg.TalkgroupRef
+		if cfg.FrequencyHz > 0 {
+			call.Frequencies = []CallFrequency{{Frequency: cfg.FrequencyHz}}
+		}
+		b.Controller.Ingest <- call
+		b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: call submitted (duration=%dms pcm=%d bytes)", cfg.Label, len(pcm)*1000/(2*sampleRate), len(pcm)))
+	}
 
 	audioCh := make(chan []byte, 256)
 	udpBuf := make([]byte, 4096)
@@ -312,7 +373,9 @@ func (b *Bridge) monitorChannel(ctx context.Context, cfg BridgeChannelConfig) {
 		}
 	}()
 
-	// Poll squelch state every 250ms, buffer audio while open.
+	// Segment calls straight from the audio stream. Arriving chunks drive the
+	// segmenter; the 250ms watchdog ticker finalizes an in-progress call if the
+	// UDP stream stalls (e.g. SDRangel stops) so it can't hang open forever.
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -325,59 +388,17 @@ func (b *Bridge) monitorChannel(ctx context.Context, cfg BridgeChannelConfig) {
 			if !ok {
 				return
 			}
-			if recording {
-				pcmBuf = append(pcmBuf, chunk...)
+			was := seg.recording
+			if pcm, start, done := seg.feed(chunk, time.Now()); done {
+				submit(pcm, start)
+			} else if !was && seg.recording {
+				b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: recording started (sys=%d tg=%d)", cfg.Label, cfg.SystemRef, cfg.TalkgroupRef))
 			}
 
 		case <-ticker.C:
-			isOpen, pollErr := b.squelchOpen(host, port, cfg.DeviceSetIndex, cfg.ChannelIndex)
-
-			if pollErr != nil {
-				consecutiveErrs++
-				if consecutiveErrs == 1 || time.Since(lastErrLog) >= 60*time.Second {
-					b.Controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("bridge: %s: squelch poll failed (%d consecutive): %v", cfg.Label, consecutiveErrs, pollErr))
-					lastErrLog = time.Now()
-				}
-				wasOpen = false
-				continue
+			if pcm, start, done := seg.tick(time.Now()); done {
+				submit(pcm, start)
 			}
-
-			if consecutiveErrs > 0 {
-				b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: squelch poll restored after %d failure(s)", cfg.Label, consecutiveErrs))
-				consecutiveErrs = 0
-			}
-
-			switch {
-			case isOpen && !wasOpen:
-				recording = true
-				pcmBuf = nil
-				startTime = time.Now()
-				b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: recording started (sys=%d tg=%d)", cfg.Label, cfg.SystemRef, cfg.TalkgroupRef))
-
-			case !isOpen && wasOpen && recording:
-				recording = false
-
-				if len(pcmBuf) > 0 {
-					call := NewCall()
-					call.Audio = bridgeBuildWAV(pcmBuf, sampleRate)
-					call.AudioFilename = fmt.Sprintf("%s-%d.wav", cfg.Label, startTime.UnixMilli())
-					call.AudioMime = "audio/wav"
-					call.Timestamp = startTime
-					call.Meta.SystemRef = cfg.SystemRef
-					call.Meta.TalkgroupRef = cfg.TalkgroupRef
-
-					if cfg.FrequencyHz > 0 {
-						call.Frequencies = []CallFrequency{{Frequency: cfg.FrequencyHz}}
-					}
-
-					b.Controller.Ingest <- call
-					b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: call submitted (duration=%dms pcm=%d bytes)", cfg.Label, time.Since(startTime).Milliseconds(), len(pcmBuf)))
-				}
-
-				pcmBuf = nil
-			}
-
-			wasOpen = isOpen
 		}
 	}
 }

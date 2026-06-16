@@ -1,0 +1,199 @@
+// Copyright (C) 2019-2026 Chrystian Huot <chrystian.huot@saubeo.solutions>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+
+package main
+
+import (
+	"encoding/binary"
+	"testing"
+	"time"
+)
+
+// silentChunk returns n exact-zero S16LE samples — what SDRangel's UDPSink
+// emits while its squelch is closed.
+func silentChunk(n int) []byte { return make([]byte, n*2) }
+
+// loudChunk returns n S16LE samples at the given amplitude.
+func loudChunk(n int, amp int16) []byte {
+	b := make([]byte, n*2)
+	for i := range n {
+		binary.LittleEndian.PutUint16(b[i*2:], uint16(amp))
+	}
+	return b
+}
+
+func TestChunkActive(t *testing.T) {
+	cases := []struct {
+		name string
+		pcm  []byte
+		want bool
+	}{
+		{"all zero", silentChunk(256), false},
+		{"loud", loudChunk(256, 1000), true},
+		{"single loud sample in silence", append(silentChunk(255), loudChunk(1, 5000)...), true},
+		{"sub-floor noise", loudChunk(256, 8), false},
+		{"at floor", loudChunk(256, 16), false},
+		{"just over floor", loudChunk(256, 17), true},
+		{"loud negative", loudChunk(256, -1000), true},
+		{"min int16", loudChunk(8, -32768), true},
+		{"empty", nil, false},
+		{"odd trailing byte ignored", []byte{0x00}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := chunkActive(c.pcm); got != c.want {
+				t.Fatalf("chunkActive=%v want %v", got, c.want)
+			}
+		})
+	}
+}
+
+func TestTrimTrailingSilence(t *testing.T) {
+	// trailing zeros removed, interior + non-zero ending preserved
+	if got := trimTrailingSilence(append(loudChunk(2, 100), silentChunk(3)...)); len(got) != 4 {
+		t.Fatalf("trailing trim: got %d bytes want 4", len(got))
+	}
+	interior := append(append(loudChunk(1, 100), silentChunk(1)...), loudChunk(1, 100)...)
+	if got := trimTrailingSilence(interior); len(got) != 6 {
+		t.Fatalf("interior silence must be kept: got %d bytes want 6", len(got))
+	}
+	if got := trimTrailingSilence(silentChunk(10)); len(got) != 0 {
+		t.Fatalf("all silence: got %d bytes want 0", len(got))
+	}
+	// a non-zero low byte ending must not be trimmed (only full-zero samples)
+	if got := trimTrailingSilence([]byte{0x10, 0x00}); len(got) != 2 {
+		t.Fatalf("quiet non-zero sample must be kept: got %d want 2", len(got))
+	}
+}
+
+// segHarness drives a callSegmenter with synthetic timestamps and collects the
+// PCM of every finalized call.
+type segHarness struct {
+	seg *callSegmenter
+	t0  time.Time
+	got [][]byte
+}
+
+func newSegHarness() *segHarness {
+	return &segHarness{
+		seg: &callSegmenter{hangTime: 750 * time.Millisecond, maxDur: 5 * time.Minute},
+		t0:  time.Unix(0, 0),
+	}
+}
+
+func (h *segHarness) feed(chunk []byte, at time.Duration) {
+	if pcm, _, done := h.seg.feed(chunk, h.t0.Add(at)); done {
+		h.got = append(h.got, pcm)
+	}
+}
+
+func (h *segHarness) tick(at time.Duration) {
+	if pcm, _, done := h.seg.tick(h.t0.Add(at)); done {
+		h.got = append(h.got, pcm)
+	}
+}
+
+func TestSegmenterSingleCall(t *testing.T) {
+	h := newSegHarness()
+	const ms = time.Millisecond
+	// 300ms of audio, then silence until past the hang-time
+	h.feed(loudChunk(800, 1000), 0)
+	h.feed(loudChunk(800, 1000), 100*ms)
+	h.feed(loudChunk(800, 1000), 200*ms)
+	h.feed(silentChunk(800), 300*ms) // 100ms since last audio
+	h.feed(silentChunk(800), 950*ms) // 750ms since last audio -> finalize
+
+	if len(h.got) != 1 {
+		t.Fatalf("got %d calls want 1", len(h.got))
+	}
+	// trailing silence trimmed -> only the 3 loud chunks (3*800 samples * 2 bytes)
+	if len(h.got[0]) != 3*800*2 {
+		t.Fatalf("call pcm = %d bytes want %d (trailing silence not trimmed?)", len(h.got[0]), 3*800*2)
+	}
+}
+
+func TestSegmenterSplitsDistinctTransmissions(t *testing.T) {
+	h := newSegHarness()
+	const ms = time.Millisecond
+	h.feed(loudChunk(800, 1000), 0)
+	h.feed(silentChunk(800), 800*ms) // 800ms gap -> finalize call 1
+	h.feed(loudChunk(800, 1000), 900*ms)
+	h.feed(silentChunk(800), 1700*ms) // 800ms gap -> finalize call 2
+
+	if len(h.got) != 2 {
+		t.Fatalf("got %d calls want 2", len(h.got))
+	}
+	for i, c := range h.got {
+		if len(c) != 800*2 {
+			t.Fatalf("call %d pcm = %d bytes want %d", i, len(c), 800*2)
+		}
+	}
+}
+
+func TestSegmenterBridgesShortGap(t *testing.T) {
+	h := newSegHarness()
+	const ms = time.Millisecond
+	// audio, a 200ms drop-out (shorter than hang-time), more audio -> one call
+	h.feed(loudChunk(800, 1000), 0)
+	h.feed(silentChunk(800), 200*ms) // interior gap, < 750ms
+	h.feed(loudChunk(800, 1000), 400*ms)
+	h.feed(silentChunk(800), 1150*ms) // 750ms after last audio -> finalize
+
+	if len(h.got) != 1 {
+		t.Fatalf("short gap split the call: got %d want 1", len(h.got))
+	}
+	// loud + interior-silence + loud kept (trailing trimmed): 3 chunks
+	if len(h.got[0]) != 3*800*2 {
+		t.Fatalf("bridged call pcm = %d bytes want %d", len(h.got[0]), 3*800*2)
+	}
+}
+
+func TestSegmenterIgnoresSilenceOnly(t *testing.T) {
+	h := newSegHarness()
+	const ms = time.Millisecond
+	for i := range 20 {
+		h.feed(silentChunk(800), time.Duration(i*100)*ms)
+	}
+	h.tick(5000 * ms)
+	if len(h.got) != 0 {
+		t.Fatalf("silence produced %d calls want 0", len(h.got))
+	}
+}
+
+func TestSegmenterWatchdogFinalizesOnStall(t *testing.T) {
+	h := newSegHarness()
+	const ms = time.Millisecond
+	// audio starts, then the UDP stream stops entirely (no more chunks)
+	h.feed(loudChunk(800, 1000), 0)
+	h.tick(500 * ms) // 500ms since audio -> not yet
+	if len(h.got) != 0 {
+		t.Fatalf("finalized too early")
+	}
+	h.tick(800 * ms) // 800ms since audio -> finalize via watchdog
+	if len(h.got) != 1 {
+		t.Fatalf("watchdog did not finalize stalled call: got %d want 1", len(h.got))
+	}
+	if len(h.got[0]) != 800*2 {
+		t.Fatalf("stalled call pcm = %d bytes want %d", len(h.got[0]), 800*2)
+	}
+}
+
+func TestSegmenterCapsLongCall(t *testing.T) {
+	seg := &callSegmenter{hangTime: 750 * time.Millisecond, maxDur: 1 * time.Second}
+	t0 := time.Unix(0, 0)
+	const ms = time.Millisecond
+	var calls int
+	// continuous audio past maxDur must split rather than grow unbounded
+	for i := 0; i <= 12; i++ {
+		if _, _, done := seg.feed(loudChunk(800, 1000), t0.Add(time.Duration(i*100)*ms)); done {
+			calls++
+		}
+	}
+	if calls < 1 {
+		t.Fatalf("max-duration cap never fired: got %d calls", calls)
+	}
+}
