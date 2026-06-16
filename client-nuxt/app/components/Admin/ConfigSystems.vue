@@ -8,8 +8,8 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ 'update:modelValue': [AdminSystem[]] }>()
 
-const systems = computed({
-  get: () => props.modelValue,
+const systems = computed<AdminSystem[]>({
+  get: () => props.modelValue ?? [],
   set: v => emit('update:modelValue', v),
 })
 
@@ -38,6 +38,7 @@ const removeSystem = (i: number) => {
 }
 
 const addTalkgroup = (sys: AdminSystem) => {
+  if (!sys.talkgroups) sys.talkgroups = []
   const maxRef = sys.talkgroups.reduce((m, t) => Math.max(m, t.talkgroupRef), 0)
   sys.talkgroups.push({
     talkgroupRef: maxRef + 1,
@@ -51,8 +52,8 @@ const addTalkgroup = (sys: AdminSystem) => {
   })
 }
 
-const groupOptions = computed(() => props.groups.map(g => ({ label: g.label, value: g.id! })))
-const tagOptions = computed(() => props.tags.map(t => ({ label: t.label, value: t.id! })))
+const groupOptions = computed(() => (props.groups ?? []).map(g => ({ label: g.label, value: g.id! })))
+const tagOptions = computed(() => (props.tags ?? []).map(t => ({ label: t.label, value: t.id! })))
 
 const tgTypeOptions = [
   { label: 'P25', value: 'p25' },
@@ -112,7 +113,7 @@ const tgTypeOptions = [
           <!-- Talkgroups -->
           <div>
             <div class="flex items-center justify-between mb-2">
-              <span class="text-sm font-semibold text-neutral-300">Talkgroups ({{ sys.talkgroups.length }})</span>
+              <span class="text-sm font-semibold text-neutral-300">Talkgroups ({{ (sys.talkgroups ?? []).length }})</span>
               <UButton icon="i-heroicons-plus" size="xs" variant="ghost" @click="addTalkgroup(sys)">
                 Add
               </UButton>
@@ -130,7 +131,7 @@ const tgTypeOptions = [
                 <span class="col-span-1" />
               </div>
               <div
-                v-for="(tg, ti) in sys.talkgroups"
+                v-for="(tg, ti) in (sys.talkgroups ?? [])"
                 :key="ti"
                 class="grid grid-cols-12 gap-2 px-3 py-1.5 border-t border-neutral-800 items-center text-sm"
               >
@@ -146,10 +147,10 @@ const tgTypeOptions = [
                   variant="ghost"
                   size="xs"
                   class="col-span-1"
-                  @click="sys.talkgroups.splice(ti, 1)"
+                  @click="sys.talkgroups?.splice(ti, 1)"
                 />
               </div>
-              <div v-if="!sys.talkgroups.length" class="px-3 py-4 text-xs text-neutral-600 text-center">
+              <div v-if="!(sys.talkgroups ?? []).length" class="px-3 py-4 text-xs text-neutral-600 text-center">
                 No talkgroups — import from CSV or add manually.
               </div>
             </div>
