@@ -135,20 +135,20 @@ export interface Tag {
 }
 
 export interface Options {
-  audioConversion: string
+  audioConversion: number
   autoPopulate: boolean
   branding: string
-  dimmerDelay: number | false
-  duplicatesDelay: number
+  dimmerDelay: number
+  disableDuplicateDetection: boolean
+  duplicateDetectionTimeFrame: number
+  email: string
   keypadBeeps: string
   maxClients: number
   playbackGoesLive: boolean
+  pruneDays: number
   showListenersCount: boolean
   sortTalkgroups: boolean
-  tagsToggle: boolean
   time12hFormat: boolean
-  pruneDays: number
-  searchPatchedTalkgroups: boolean
 }
 
 export interface AdminSystem {
