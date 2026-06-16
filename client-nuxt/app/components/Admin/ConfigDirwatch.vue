@@ -58,10 +58,10 @@ const add = () => {
                 <UInput v-model="entry.directory" placeholder="/path/to/audio/files" />
               </UFormField>
               <UFormField label="Type">
-                <USelect v-model="entry.type" :options="typeOptions" />
+                <USelect v-model="entry.type" :items="typeOptions" />
               </UFormField>
               <UFormField label="System">
-                <USelect v-model="entry.systemId" :options="systemOptions" placeholder="Any" />
+                <USelect v-model="entry.systemId" :items="systemOptions" placeholder="Any" />
               </UFormField>
               <UFormField label="Extension">
                 <UInput v-model="entry.extension" placeholder=".wav, .mp3" />
@@ -82,7 +82,7 @@ const add = () => {
 
             <div class="flex justify-end">
               <UButton icon="i-heroicons-trash" color="error" variant="ghost" size="sm"
-                @click="entries.value = entries.value.filter((_, idx) => idx !== i)">
+                @click="entries = entries.filter((_, idx) => idx !== i)">
                 Remove
               </UButton>
             </div>

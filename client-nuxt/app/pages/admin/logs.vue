@@ -42,7 +42,7 @@ useHead({ title: 'Logs – Admin – Rdio Scanner' })
           variant="ghost"
           size="sm"
           :loading="loading"
-          @click="async () => { loading = true; logs.value = await admin.getLogs(); loading = false }"
+          @click="async () => { loading = true; logs = await admin.getLogs(); loading = false }"
         />
       </div>
     </div>

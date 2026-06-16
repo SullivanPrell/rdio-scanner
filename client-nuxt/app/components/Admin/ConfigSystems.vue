@@ -138,9 +138,9 @@ const tgTypeOptions = [
                 <UInput v-model.number="tg.talkgroupRef" type="number" size="xs" class="col-span-1" />
                 <UInput v-model="tg.label" size="xs" class="col-span-2" maxlength="8" />
                 <UInput v-model="tg.name" size="xs" class="col-span-3" />
-                <USelect v-model="tg.type" :options="tgTypeOptions" size="xs" class="col-span-2" />
-                <USelect v-model="tg.groupIds[0]" :options="groupOptions" size="xs" class="col-span-2" />
-                <USelect v-model="tg.tagId" :options="tagOptions" size="xs" class="col-span-1" />
+                <USelect v-model="tg.type" :items="tgTypeOptions" size="xs" class="col-span-2" />
+                <USelect v-model="tg.groupIds[0]" :items="groupOptions" size="xs" class="col-span-2" />
+                <USelect v-model="tg.tagId" :items="tagOptions" size="xs" class="col-span-1" />
                 <UButton
                   icon="i-heroicons-trash"
                   color="error"

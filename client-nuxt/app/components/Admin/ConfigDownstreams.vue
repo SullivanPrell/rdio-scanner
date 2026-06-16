@@ -16,7 +16,7 @@ const add = () => ds.value = [...ds.value, { url: '', apiKey: '', disabled: fals
       </div>
       <div class="flex items-center justify-between">
         <UCheckbox v-model="d.disabled" label="Disabled" />
-        <UButton icon="i-heroicons-trash" color="error" variant="ghost" size="sm" @click="ds.value = ds.value.filter((_,idx)=>idx!==i)">Remove</UButton>
+        <UButton icon="i-heroicons-trash" color="error" variant="ghost" size="sm" @click="ds = ds.filter((_,idx)=>idx!==i)">Remove</UButton>
       </div>
     </div>
   </div>

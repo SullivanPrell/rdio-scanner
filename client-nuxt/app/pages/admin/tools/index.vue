@@ -250,7 +250,7 @@ useHead({ title: 'Tools – Admin – Rdio Scanner' })
               ? 'Trunking protocol of this system'
               : 'Channel modulation — Auto-detect reads the mode from the CSV'"
           >
-            <USelect v-model="importProtocol" :options="typeOptions" class="max-w-xs" />
+            <USelect v-model="importProtocol" :items="typeOptions" class="max-w-xs" />
           </UFormField>
 
           <!-- System label & ref -->
@@ -375,7 +375,7 @@ useHead({ title: 'Tools – Admin – Rdio Scanner' })
           <UFormField label="System">
             <USelect
               v-model.number="trSystemRef"
-              :options="(cfg?.systems ?? []).map(s => ({ label: s.label, value: s.systemRef }))"
+              :items="(cfg?.systems ?? []).map(s => ({ label: s.label, value: s.systemRef }))"
               placeholder="Select system"
             />
           </UFormField>

@@ -49,7 +49,7 @@ const copyKey = (key: string) => {
       <div class="flex items-center justify-between">
         <UCheckbox v-model="apikey.disabled" label="Disabled" />
         <UButton icon="i-heroicons-trash" color="error" variant="ghost" size="sm"
-          @click="keys.value = keys.value.filter((_, idx) => idx !== i)">
+          @click="keys = keys.filter((_, idx) => idx !== i)">
           Remove
         </UButton>
       </div>

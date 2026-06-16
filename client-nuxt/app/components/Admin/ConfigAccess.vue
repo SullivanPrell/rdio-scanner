@@ -19,7 +19,7 @@ const add = () => entries.value = [...entries.value, { code: '', ident: '', syst
         <UFormField label="Limit (0 = unlimited)"><UInput v-model.number="entry.limit" type="number" min="0" /></UFormField>
       </div>
       <div class="flex justify-end">
-        <UButton icon="i-heroicons-trash" color="error" variant="ghost" size="sm" @click="entries.value = entries.value.filter((_,idx)=>idx!==i)">Remove</UButton>
+        <UButton icon="i-heroicons-trash" color="error" variant="ghost" size="sm" @click="entries = entries.filter((_,idx)=>idx!==i)">Remove</UButton>
       </div>
     </div>
   </div>

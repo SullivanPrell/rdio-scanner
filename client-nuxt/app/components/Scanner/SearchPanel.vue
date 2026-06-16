@@ -44,13 +44,13 @@ watch(() => opts.value.system, () => { opts.value.talkgroup = undefined })
       <div class="grid grid-cols-2 gap-2">
         <USelect
           v-model="opts.system"
-          :options="systemOptions"
+          :items="systemOptions"
           placeholder="All systems"
           size="sm"
         />
         <USelect
           v-model="opts.talkgroup"
-          :options="talkgroupOptions"
+          :items="talkgroupOptions"
           placeholder="All talkgroups"
           size="sm"
           :disabled="!opts.system"
@@ -60,7 +60,7 @@ watch(() => opts.value.system, () => { opts.value.talkgroup = undefined })
         <UInput v-model="opts.date" type="date" size="sm" placeholder="Date" />
         <USelect
           v-model="opts.sort"
-          :options="[{ label: 'Newest first', value: -1 }, { label: 'Oldest first', value: 1 }]"
+          :items="[{ label: 'Newest first', value: -1 }, { label: 'Oldest first', value: 1 }]"
           size="sm"
         />
       </div>

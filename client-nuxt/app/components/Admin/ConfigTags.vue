@@ -11,7 +11,7 @@ const add = () => tags.value = [...tags.value, { label: '' }]
     <div class="space-y-2 max-w-md">
       <div v-for="(t, i) in tags" :key="i" class="flex gap-2 items-center">
         <UInput v-model="t.label" class="flex-1" placeholder="Tag name" />
-        <UButton icon="i-heroicons-trash" color="error" variant="ghost" size="sm" @click="tags.value = tags.value.filter((_,idx)=>idx!==i)" />
+        <UButton icon="i-heroicons-trash" color="error" variant="ghost" size="sm" @click="tags = tags.filter((_,idx)=>idx!==i)" />
       </div>
       <div v-if="!tags.length" class="text-neutral-500 text-sm py-4 text-center">No tags configured.</div>
     </div>

@@ -476,10 +476,10 @@ const trSystemOptions = computed(() => [
         <p class="text-sm font-semibold text-neutral-300">Generate Config</p>
         <div class="grid grid-cols-2 gap-3">
           <UFormField label="System">
-            <USelect v-model.number="trGenSystemRef" :options="trSystemOptions" />
+            <USelect v-model.number="trGenSystemRef" :items="trSystemOptions" />
           </UFormField>
           <UFormField label="System Type">
-            <USelect v-model="trGenSystemType" :options="[
+            <USelect v-model="trGenSystemType" :items="[
               { label: 'P25 Phase 1', value: 'P25' },
               { label: 'P25 Phase 2', value: 'P25p2' },
               { label: 'DMR', value: 'dmr' },
@@ -558,7 +558,7 @@ const trSystemOptions = computed(() => [
                 <USelect
                   :model-value="dongleAssignment(dongle.index)"
                   size="xs"
-                  :options="[
+                  :items="[
                     { label: 'Unassigned', value: '' },
                     { label: 'SDRangel', value: 'sdrangel' },
                     { label: 'Trunk-Recorder', value: 'trunk-recorder' },
@@ -634,10 +634,10 @@ const trSystemOptions = computed(() => [
             >
               <td class="px-2 py-1"><UInput v-model="ch.label" size="xs" /></td>
               <td class="px-2 py-1"><UInput v-model.number="ch.frequencyHz" type="number" size="xs" /></td>
-              <td class="px-2 py-1"><USelect v-model="ch.protocol" :options="protocolOptions" size="xs" /></td>
-              <td class="px-2 py-1"><USelect v-model.number="ch.systemRef" :options="systemOptions" size="xs" /></td>
+              <td class="px-2 py-1"><USelect v-model="ch.protocol" :items="protocolOptions" size="xs" /></td>
+              <td class="px-2 py-1"><USelect v-model.number="ch.systemRef" :items="systemOptions" size="xs" /></td>
               <td class="px-2 py-1">
-                <USelect v-model.number="ch.talkgroupRef" :options="talkgroupOptions(ch.systemRef)" size="xs" />
+                <USelect v-model.number="ch.talkgroupRef" :items="talkgroupOptions(ch.systemRef)" size="xs" />
               </td>
               <td class="px-2 py-1"><UInput v-model.number="ch.udpPort" type="number" size="xs" /></td>
               <td class="px-2 py-1"><UInput v-model.number="ch.deviceSetIndex" type="number" size="xs" /></td>

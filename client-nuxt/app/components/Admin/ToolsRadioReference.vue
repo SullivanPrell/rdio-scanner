@@ -70,7 +70,7 @@ watch(selectedState, () => {
         <UFormField label="State">
           <USelect
             v-model.number="selectedState"
-            :options="states.map(s => ({ label: s.name, value: s.id }))"
+            :items="states.map(s => ({ label: s.name, value: s.id }))"
             placeholder="Select state"
           />
         </UFormField>
@@ -80,7 +80,7 @@ watch(selectedState, () => {
         <UFormField label="County">
           <USelect
             v-model.number="selectedCounty"
-            :options="counties.map(c => ({ label: c.name, value: c.id }))"
+            :items="counties.map(c => ({ label: c.name, value: c.id }))"
             placeholder="Select county"
           />
         </UFormField>
