@@ -2,7 +2,7 @@
 import type { Downstream, AdminSystem } from '~/composables/useAdmin'
 const props = defineProps<{ modelValue: Downstream[]; systems: AdminSystem[] }>()
 const emit = defineEmits<{ 'update:modelValue': [Downstream[]] }>()
-const ds = computed({ get: () => props.modelValue, set: v => emit('update:modelValue', v) })
+const ds = computed({ get: () => props.modelValue ?? [], set: v => emit('update:modelValue', v) })
 const add = () => ds.value = [...ds.value, { url: '', apiKey: '', disabled: false, systems: {} }]
 </script>
 <template>

@@ -248,7 +248,7 @@ func dockerLogs(containerName string, tail int) []string {
 		return []string{"error reading logs: " + err.Error()}
 	}
 
-	var lines []string
+	lines := []string{}
 	r := bytes.NewReader(data)
 	for {
 		var hdr [8]byte

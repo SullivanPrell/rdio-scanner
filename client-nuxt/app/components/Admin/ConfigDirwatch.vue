@@ -9,12 +9,12 @@ const props = defineProps<{
 const emit = defineEmits<{ 'update:modelValue': [DirwatchEntry[]] }>()
 
 const entries = computed({
-  get: () => props.modelValue,
+  get: () => props.modelValue ?? [],
   set: v => emit('update:modelValue', v),
 })
 
 const systemOptions = computed(() =>
-  props.systems.map(s => ({ label: s.label, value: s.id }))
+  (props.systems ?? []).map(s => ({ label: s.label, value: s.id }))
 )
 
 const typeOptions = [

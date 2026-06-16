@@ -2,7 +2,7 @@
 import type { Group } from '~/composables/useAdmin'
 const props = defineProps<{ modelValue: Group[] }>()
 const emit = defineEmits<{ 'update:modelValue': [Group[]] }>()
-const groups = computed({ get: () => props.modelValue, set: v => emit('update:modelValue', v) })
+const groups = computed({ get: () => props.modelValue ?? [], set: v => emit('update:modelValue', v) })
 const add = () => groups.value = [...groups.value, { label: '' }]
 </script>
 <template>

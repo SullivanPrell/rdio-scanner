@@ -2,7 +2,7 @@
 import type { AccessConfig, AdminSystem } from '~/composables/useAdmin'
 const props = defineProps<{ modelValue: AccessConfig[]; systems: AdminSystem[] }>()
 const emit = defineEmits<{ 'update:modelValue': [AccessConfig[]] }>()
-const entries = computed({ get: () => props.modelValue, set: v => emit('update:modelValue', v) })
+const entries = computed({ get: () => props.modelValue ?? [], set: v => emit('update:modelValue', v) })
 const add = () => entries.value = [...entries.value, { code: '', ident: '', systems: {} }]
 </script>
 <template>

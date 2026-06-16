@@ -4,7 +4,7 @@ import type { ApiKey, AdminSystem } from '~/composables/useAdmin'
 const props = defineProps<{ modelValue: ApiKey[]; systems: AdminSystem[] }>()
 const emit = defineEmits<{ 'update:modelValue': [ApiKey[]] }>()
 
-const keys = computed({ get: () => props.modelValue, set: v => emit('update:modelValue', v) })
+const keys = computed({ get: () => props.modelValue ?? [], set: v => emit('update:modelValue', v) })
 
 const newKey = () => crypto.randomUUID?.() ?? Math.random().toString(36).slice(2)
 

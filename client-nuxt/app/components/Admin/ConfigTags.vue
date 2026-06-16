@@ -2,7 +2,7 @@
 import type { Tag } from '~/composables/useAdmin'
 const props = defineProps<{ modelValue: Tag[] }>()
 const emit = defineEmits<{ 'update:modelValue': [Tag[]] }>()
-const tags = computed({ get: () => props.modelValue, set: v => emit('update:modelValue', v) })
+const tags = computed({ get: () => props.modelValue ?? [], set: v => emit('update:modelValue', v) })
 const add = () => tags.value = [...tags.value, { label: '' }]
 </script>
 <template>

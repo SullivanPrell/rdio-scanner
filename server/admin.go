@@ -352,16 +352,44 @@ func (admin *Admin) GetConfig() map[string]any {
 		"trunkRecorderConfigPath":    opts.TrunkRecorderConfigPath,
 		"sdrDeviceAssignments":       assignments,
 	}
+	accesses := admin.Controller.Accesses.List
+	if accesses == nil {
+		accesses = []*Access{}
+	}
+	apikeys := admin.Controller.Apikeys.List
+	if apikeys == nil {
+		apikeys = []*Apikey{}
+	}
+	dirwatches := admin.Controller.Dirwatches.List
+	if dirwatches == nil {
+		dirwatches = []*Dirwatch{}
+	}
+	downstreams := admin.Controller.Downstreams.List
+	if downstreams == nil {
+		downstreams = []*Downstream{}
+	}
+	groups := admin.Controller.Groups.List
+	if groups == nil {
+		groups = []*Group{}
+	}
+	systems := admin.Controller.Systems.List
+	if systems == nil {
+		systems = []*System{}
+	}
+	tags := admin.Controller.Tags.List
+	if tags == nil {
+		tags = []*Tag{}
+	}
 	return map[string]any{
-		"access":      admin.Controller.Accesses.List,
-		"apikeys":     admin.Controller.Apikeys.List,
+		"access":      accesses,
+		"apikeys":     apikeys,
 		"bridge":      bridge,
-		"dirwatch":    admin.Controller.Dirwatches.List,
-		"downstreams": admin.Controller.Downstreams.List,
-		"groups":      admin.Controller.Groups.List,
+		"dirwatch":    dirwatches,
+		"downstreams": downstreams,
+		"groups":      groups,
 		"options":     admin.Controller.Options,
-		"systems":     admin.Controller.Systems.List,
-		"tags":        admin.Controller.Tags.List,
+		"systems":     systems,
+		"tags":        tags,
 		"version":     Version,
 	}
 }
