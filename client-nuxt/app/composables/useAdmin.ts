@@ -33,7 +33,9 @@ export interface ApiKey {
   ident: string
   key: string
   order?: number
-  systems: Record<number, Record<number, boolean>>
+  // Server grants access on "*" (all systems) or a [{id, talkgroups}] list.
+  // A plain object/{} denies everything, so new keys default to "*".
+  systems: '*' | Record<number, Record<number, boolean>>
 }
 
 export interface SDRDeviceAssignment {

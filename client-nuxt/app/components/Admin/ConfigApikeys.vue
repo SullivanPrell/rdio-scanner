@@ -9,7 +9,8 @@ const keys = computed({ get: () => props.modelValue ?? [], set: v => emit('updat
 const newKey = () => crypto.randomUUID?.() ?? Math.random().toString(36).slice(2)
 
 const add = () => {
-  keys.value = [...keys.value, { ident: '', key: newKey(), disabled: false, systems: {} }]
+  // "*" = access to all systems; the server denies a plain {} map.
+  keys.value = [...keys.value, { ident: '', key: newKey(), disabled: false, systems: '*' }]
 }
 
 const copyKey = (key: string) => {
@@ -37,7 +38,7 @@ const copyKey = (key: string) => {
         <UFormField label="Identifier">
           <UInput v-model="apikey.ident" placeholder="My recorder" />
         </UFormField>
-        <UFormField label="Key">
+        <UFormField label="Key" description="Use in your recorder's upload config (trunk-recorder apiKey). Grants all-system access.">
           <div class="flex gap-2">
             <UInput v-model="apikey.key" class="flex-1 font-mono text-xs" readonly />
             <UButton icon="i-heroicons-clipboard" variant="ghost" size="sm" @click="copyKey(apikey.key)" />
