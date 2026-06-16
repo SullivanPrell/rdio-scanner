@@ -62,6 +62,8 @@ run: ## Stop any running instance (service or direct), rebuild everything, and r
 	@sudo systemctl stop rdio-scanner 2>/dev/null || true
 	@sudo systemctl disable rdio-scanner 2>/dev/null || true
 	@pkill -x rdio-scanner 2>/dev/null || true
+	@pkill -x sdrangelsrv 2>/dev/null || true
+	@pkill -x trunk-recorder 2>/dev/null || true
 	@rm -fr server/webapp client-nuxt/.nuxt client-nuxt/.output node_modules/.cache/nuxt $(LOCAL_BIN) server/$(LOCAL_BIN)
 	@echo "Building client..."
 	@cd client-nuxt && test -d node_modules || yarn install

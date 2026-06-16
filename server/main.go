@@ -28,9 +28,11 @@ import (
 	"mime"
 	"net/http"
 	"os"
+	"os/signal"
 	"path"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -306,6 +308,15 @@ func main() {
 	}
 
 	log.Println("please consider sponsoring the project at https://github.com/sponsors/chuot")
+
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+		<-sigCh
+		controller.ServiceManager.Stop(controller.Options.SDRangelContainerName)
+		controller.TRServiceManager.Stop(controller.Options.TrunkRecorderContainerName)
+		os.Exit(0)
+	}()
 
 	server := newServer(fmt.Sprintf("%s:%s", addr, port), nil)
 
