@@ -432,11 +432,7 @@ func (admin *Admin) SDRangelServiceStatusHandler(w http.ResponseWriter, r *http.
 		return
 	}
 	opts := admin.Controller.Options
-	containerName := opts.SDRangelContainerName
-	if containerName == "" {
-		containerName = "sdrangelsrv"
-	}
-	status := admin.Controller.ServiceManager.Status(containerName, opts.SDRangelBinaryPath)
+	status := admin.Controller.ServiceManager.Status(opts.SDRangelContainerName, opts.SDRangelBinaryPath)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(status)
 }
@@ -457,10 +453,6 @@ func (admin *Admin) SDRangelServiceActionHandler(w http.ResponseWriter, r *http.
 	}
 
 	opts := admin.Controller.Options
-	containerName := opts.SDRangelContainerName
-	if containerName == "" {
-		containerName = "sdrangelsrv"
-	}
 	binaryPath := req.BinaryPath
 	if binaryPath == "" {
 		binaryPath = opts.SDRangelBinaryPath
@@ -469,11 +461,11 @@ func (admin *Admin) SDRangelServiceActionHandler(w http.ResponseWriter, r *http.
 	var result SDRangelServiceResult
 	switch req.Action {
 	case "start":
-		result = admin.Controller.ServiceManager.Start(containerName, binaryPath, req.Args)
+		result = admin.Controller.ServiceManager.Start(opts.SDRangelContainerName, binaryPath, req.Args)
 	case "stop":
-		result = admin.Controller.ServiceManager.Stop(containerName)
+		result = admin.Controller.ServiceManager.Stop(opts.SDRangelContainerName)
 	case "restart":
-		result = admin.Controller.ServiceManager.Restart(containerName, binaryPath, req.Args)
+		result = admin.Controller.ServiceManager.Restart(opts.SDRangelContainerName, binaryPath, req.Args)
 	default:
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -492,11 +484,7 @@ func (admin *Admin) SDRangelServiceLogsHandler(w http.ResponseWriter, r *http.Re
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	containerName := admin.Controller.Options.SDRangelContainerName
-	if containerName == "" {
-		containerName = "sdrangelsrv"
-	}
-	logs := admin.Controller.ServiceManager.Logs(containerName, 100)
+	logs := admin.Controller.ServiceManager.Logs(admin.Controller.Options.SDRangelContainerName, 100)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(logs)
 }

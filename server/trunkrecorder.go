@@ -594,11 +594,7 @@ func (admin *Admin) TrunkRecorderServiceStatusHandler(w http.ResponseWriter, r *
 		return
 	}
 	opts := admin.Controller.Options
-	containerName := opts.TrunkRecorderContainerName
-	if containerName == "" {
-		containerName = "trunk-recorder"
-	}
-	status := admin.Controller.TRServiceManager.Status(containerName, opts.TrunkRecorderBinaryPath)
+	status := admin.Controller.TRServiceManager.Status(opts.TrunkRecorderContainerName, opts.TrunkRecorderBinaryPath)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(status)
 }
@@ -619,10 +615,6 @@ func (admin *Admin) TrunkRecorderServiceActionHandler(w http.ResponseWriter, r *
 	}
 
 	opts := admin.Controller.Options
-	containerName := opts.TrunkRecorderContainerName
-	if containerName == "" {
-		containerName = "trunk-recorder"
-	}
 	binaryPath := req.BinaryPath
 	if binaryPath == "" {
 		binaryPath = opts.TrunkRecorderBinaryPath
@@ -635,11 +627,11 @@ func (admin *Admin) TrunkRecorderServiceActionHandler(w http.ResponseWriter, r *
 	var result TrunkRecorderServiceResult
 	switch req.Action {
 	case "start":
-		result = admin.Controller.TRServiceManager.Start(containerName, binaryPath, configPath)
+		result = admin.Controller.TRServiceManager.Start(opts.TrunkRecorderContainerName, binaryPath, configPath)
 	case "stop":
-		result = admin.Controller.TRServiceManager.Stop(containerName)
+		result = admin.Controller.TRServiceManager.Stop(opts.TrunkRecorderContainerName)
 	case "restart":
-		result = admin.Controller.TRServiceManager.Restart(containerName, binaryPath, configPath)
+		result = admin.Controller.TRServiceManager.Restart(opts.TrunkRecorderContainerName, binaryPath, configPath)
 	default:
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -658,11 +650,7 @@ func (admin *Admin) TrunkRecorderServiceLogsHandler(w http.ResponseWriter, r *ht
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	containerName := admin.Controller.Options.TrunkRecorderContainerName
-	if containerName == "" {
-		containerName = "trunk-recorder"
-	}
-	logs := admin.Controller.TRServiceManager.Logs(containerName, 100)
+	logs := admin.Controller.TRServiceManager.Logs(admin.Controller.Options.TrunkRecorderContainerName, 100)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(logs)
 }
