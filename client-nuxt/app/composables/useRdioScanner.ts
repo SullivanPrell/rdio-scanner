@@ -168,7 +168,11 @@ export const useRdioScanner = () => {
       case WsCmd.Expired:        handleExpired(); break
       case WsCmd.ListCall:       listResult.value = rest[0] as RdioListResult; break
       case WsCmd.ListenersCount: listenersCount.value = rest[0] as number; break
-      case WsCmd.LivefeedMap:    if (rest[0]) livefeedMap.value = rest[0] as RdioLivefeedMap; break
+      // The server replies to our LFM with a boolean ack ("livefeed active?"),
+      // NOT the map — the client owns the livefeed map. Only adopt an actual map
+      // object; otherwise the boolean ack clobbers livefeedMap with `true`, which
+      // unchecks every talkgroup and breaks all selection.
+      case WsCmd.LivefeedMap:    if (rest[0] && typeof rest[0] === 'object') livefeedMap.value = rest[0] as RdioLivefeedMap; break
       case WsCmd.Max:            maxReached.value = true; break
       case WsCmd.Pin:            pinRequired.value = rest[0] === 'required'; break
       case WsCmd.Version:        serverVersion.value = String(rest[0]); break
