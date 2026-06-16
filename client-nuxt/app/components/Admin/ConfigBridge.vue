@@ -10,14 +10,13 @@ import type {
 
 const props = defineProps<{ modelValue: BridgeConfig; systems: AdminSystem[] }>()
 const emit = defineEmits<{ 'update:modelValue': [BridgeConfig] }>()
-const bridge = computed<BridgeConfig>({
-  get: () => ({
-    ...props.modelValue,
-    channels: props.modelValue?.channels ?? [],
-    sdrDeviceAssignments: props.modelValue?.sdrDeviceAssignments ?? [],
-  }),
-  set: v => emit('update:modelValue', v),
+const bridge = ref<BridgeConfig>({
+  ...props.modelValue,
+  channels: props.modelValue?.channels ?? [],
+  sdrDeviceAssignments: props.modelValue?.sdrDeviceAssignments ?? [],
 })
+
+watch(bridge, val => emit('update:modelValue', val), { deep: true })
 
 const admin = useAdmin()
 const toast = useToast()
@@ -112,20 +111,39 @@ async function sdrangelAction(action: 'start' | 'stop' | 'restart') {
   await refreshSDRangelLogs()
 }
 
+const SDR_SAMPLE_RATE = 2400000 // ~2.4 MHz usable window per RTL-SDR dongle
+
 async function provision() {
   provisioning.value = true
-  const deviceSets = bridge.value.channels.reduce((acc, ch) => {
-    if (!acc.find((d: { index: number }) => d.index === ch.deviceSetIndex)) {
-      acc.push({
-        index: ch.deviceSetIndex,
-        hwType: 'RTLSDR',
-        sequence: ch.deviceSetIndex,
-        centerFrequencyHz: ch.frequencyHz,
-        sampleRateHz: 2400000,
+
+  // Group channels by SDR device set and centre each dongle on the midpoint of
+  // its channels, so one dongle's ~2.4 MHz window covers them all. (Centring on
+  // the first channel left channels more than ~1.2 MHz away out of range.)
+  const freqsByDevice = new Map<number, number[]>()
+  for (const ch of bridge.value.channels) {
+    if (!ch.frequencyHz) continue
+    const arr = freqsByDevice.get(ch.deviceSetIndex) ?? []
+    arr.push(ch.frequencyHz)
+    freqsByDevice.set(ch.deviceSetIndex, arr)
+  }
+
+  const deviceSets = [...freqsByDevice.entries()].map(([index, freqs]) => {
+    const min = Math.min(...freqs)
+    const max = Math.max(...freqs)
+    let center = Math.round((min + max) / 2)
+    // Nudge the centre off any channel that lands exactly on it — RTL-SDR has a
+    // DC spike at the tuned centre frequency that would corrupt that channel.
+    if (freqs.includes(center)) center += 100000
+    if (max - min > SDR_SAMPLE_RATE * 0.9) {
+      toast.add({
+        title: `Device set ${index}: channels span ${((max - min) / 1e6).toFixed(2)} MHz`,
+        description: `One SDR only covers ~${(SDR_SAMPLE_RATE / 1e6).toFixed(1)} MHz. Spread these across more device sets.`,
+        color: 'warning',
       })
     }
-    return acc
-  }, [] as unknown[])
+    return { index, hwType: 'RTLSDR', sequence: index, centerFrequencyHz: center, sampleRateHz: SDR_SAMPLE_RATE }
+  })
+
   const result = await admin.provisionSDRangel({ deviceSets, channels: bridge.value.channels })
   provisioning.value = false
   if (result) toast.add({ title: 'SDRangel provisioned', color: 'success' })
@@ -222,9 +240,10 @@ function talkgroupOptions(systemRef: number) {
 }
 
 const protocolOptions = [
-  { label: 'NFM (analog)', value: 'nfm' },
-  { label: 'DSD (digital)', value: 'dsd' },
-  { label: 'NXDN', value: 'nxdn' },
+  { label: 'NFM (narrowband FM)', value: 'nfm' },
+  { label: 'AM', value: 'am' },
+  { label: 'USB', value: 'usb' },
+  { label: 'LSB', value: 'lsb' },
 ]
 
 function addChannel() {
