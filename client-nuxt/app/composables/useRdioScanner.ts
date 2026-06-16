@@ -166,7 +166,7 @@ export const useRdioScanner = () => {
       case WsCmd.Config:         handleConfig(rest[0] as RdioConfig); break
       case WsCmd.Call:           handleCall(rest[0] as RdioCall, rest[1] as string); break
       case WsCmd.Expired:        handleExpired(); break
-      case WsCmd.ListCall:       listResult.value = rest[0] as RdioListResult; break
+      case WsCmd.ListCall:       listResult.value = normalizeListResult(rest[0]); break
       case WsCmd.ListenersCount: listenersCount.value = rest[0] as number; break
       // The server replies to our LFM with a boolean ack ("livefeed active?"),
       // NOT the map — the client owns the livefeed map. Only adopt an actual map
@@ -238,6 +238,33 @@ export const useRdioScanner = () => {
       callQueue.value = [...callQueue.value, call]
     } else {
       playCall(call)
+    }
+  }
+
+  // The server's call-search reply (LCL) is { count, results:[{id,system,talkgroup,
+  // dateTime}], ... } — the items are refs with no labels, under `results` not
+  // `calls`. Map it to the flat shape SearchPanel renders, enriching labels from
+  // config. (Without this, listResult.calls is undefined and the panel throws.)
+  const normalizeListResult = (raw: unknown): RdioListResult => {
+    const r = (raw ?? {}) as { count?: number; results?: unknown[]; calls?: unknown[] }
+    const items = (r.results ?? r.calls ?? []) as Array<Record<string, unknown>>
+    return {
+      count: r.count ?? items.length,
+      calls: items.map((c) => {
+        const system = c.system as number
+        const talkgroup = c.talkgroup as number
+        const sys = config.value?.systems.find(s => s.id === system)
+        const tg = sys?.talkgroups.find(t => t.id === talkgroup)
+        return {
+          id: c.id as number,
+          dateTime: c.dateTime as string,
+          system,
+          talkgroup,
+          talkgroupLabel: (c.talkgroupLabel as string) || tg?.label || String(talkgroup ?? ''),
+          talkgroupName: (c.talkgroupName as string) || tg?.name || '',
+          duration: c.duration as number | undefined,
+        }
+      }),
     }
   }
 
