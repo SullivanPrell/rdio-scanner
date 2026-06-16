@@ -123,8 +123,6 @@ func (client *Client) Init(controller *Controller, request *http.Request, conn *
 		})
 
 		defer func() {
-			client.Send = nil
-
 			ticker.Stop()
 
 			if timer != nil {
@@ -189,6 +187,18 @@ func (client *Client) GetRemoteAddr() string {
 	return GetRemoteAddr(client.request)
 }
 
+// trySend queues a message for the client without ever blocking. Several of
+// these sends happen while clients.mutex is held (EmitCall/EmitConfig), so a
+// single client that isn't draining its buffer — a slow or stalled phone —
+// must not stall delivery to every other listener. A full buffer drops the
+// message; the ping/read deadlines disconnect a truly dead client soon after.
+func (client *Client) trySend(message *Message) {
+	select {
+	case client.Send <- message:
+	default:
+	}
+}
+
 func (client *Client) SendConfig(groups *Groups, options *Options, systems *Systems, tags *Tags) {
 	client.SystemsMap = systems.GetScopedSystems(client, groups, tags, options.SortTalkgroups)
 	client.GroupsData = groups.GetGroupsData(&client.SystemsMap)
@@ -212,14 +222,14 @@ func (client *Client) SendConfig(groups *Groups, options *Options, systems *Syst
 		"time12hFormat":      options.Time12hFormat,
 	}
 
-	client.Send <- &Message{Command: MessageCommandConfig, Payload: payload}
+	client.trySend(&Message{Command: MessageCommandConfig, Payload: payload})
 }
 
 func (client *Client) SendListenersCount(count int) {
-	client.Send <- &Message{
+	client.trySend(&Message{
 		Command: MessagecommandListenersCount,
 		Payload: count,
-	}
+	})
 }
 
 type Clients struct {
@@ -266,7 +276,7 @@ func (clients *Clients) EmitCall(call *Call, restricted bool) {
 
 	for c := range clients.Map {
 		if (!restricted || c.Access.HasAccess(call)) && c.Livefeed.IsEnabled(call) {
-			c.Send <- &Message{Command: MessageCommandCall, Payload: call}
+			c.trySend(&Message{Command: MessageCommandCall, Payload: call})
 		}
 	}
 }
@@ -281,7 +291,7 @@ func (clients *Clients) EmitConfig(controller *Controller) {
 
 	for c := range clients.Map {
 		if restricted {
-			c.Send <- &Message{Command: MessageCommandPin}
+			c.trySend(&Message{Command: MessageCommandPin})
 
 		} else {
 			c.SendConfig(controller.Groups, controller.Options, controller.Systems, controller.Tags)
