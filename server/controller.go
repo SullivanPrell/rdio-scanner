@@ -28,35 +28,36 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 )
 
 type Controller struct {
-	Accesses       *Accesses
-	Admin          *Admin
-	Api            *Api
-	Apikeys        *Apikeys
-	Bridge         *Bridge
-	Calls          *Calls
-	Clients        *Clients
-	Config         *Config
-	Database       *Database
-	Delayer        *Delayer
-	Dirwatches     *Dirwatches
-	Downstreams    *Downstreams
-	FFMpeg         *FFMpeg
-	Groups         *Groups
-	Logs           *Logs
-	Options        *Options
-	Scheduler      *Scheduler
-	ServiceManager  *SDRangelServiceManager
+	Accesses         *Accesses
+	Admin            *Admin
+	Api              *Api
+	Apikeys          *Apikeys
+	Bridge           *Bridge
+	Calls            *Calls
+	Clients          *Clients
+	Config           *Config
+	Database         *Database
+	Delayer          *Delayer
+	Dirwatches       *Dirwatches
+	Downstreams      *Downstreams
+	FFMpeg           *FFMpeg
+	Groups           *Groups
+	Logs             *Logs
+	Options          *Options
+	Scheduler        *Scheduler
+	ServiceManager   *SDRangelServiceManager
 	TRServiceManager *TrunkRecorderServiceManager
-	Systems        *Systems
-	Tags           *Tags
-	Register       chan *Client
-	Unregister     chan *Client
-	Ingest         chan *Call
-	running        bool
+	Systems          *Systems
+	Tags             *Tags
+	Register         chan *Client
+	Unregister       chan *Client
+	Ingest           chan *Call
+	running          bool
 }
 
 func NewController(config *Config) *Controller {
@@ -567,7 +568,7 @@ func (controller *Controller) Start() error {
 
 	go func() {
 		c := make(chan os.Signal, 8)
-		signal.Notify(c, os.Interrupt)
+		signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 		<-c
 		controller.Terminate()
 	}()
@@ -616,6 +617,11 @@ func (controller *Controller) Start() error {
 
 func (controller *Controller) Terminate() {
 	controller.Dirwatches.Stop()
+
+	// Stop any sdrangelsrv / trunk-recorder processes we spawned so they don't
+	// outlive us holding the SDR devices (which would block the next start).
+	controller.ServiceManager.Stop(controller.Options.SDRangelContainerName)
+	controller.TRServiceManager.Stop(controller.Options.TrunkRecorderContainerName)
 
 	if err := controller.Database.Sql.Close(); err != nil {
 		log.Println(err)
