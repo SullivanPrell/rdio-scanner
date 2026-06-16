@@ -358,12 +358,13 @@ export const useAdmin = () => {
 
   // ── Import: CHIRP CSV ──────────────────────────────────────────────────────
 
-  const importChirp = async (file: File, systemLabel: string, systemRef: number, portBase: number) => {
+  const importChirp = async (file: File, systemLabel: string, systemRef: number, portBase: number, protocol = '') => {
     const body = new FormData()
     body.append('file', file)
     body.append('systemLabel', systemLabel)
     body.append('systemRef', String(systemRef))
     body.append('portBase', String(portBase))
+    if (protocol) body.append('protocol', protocol)
     try {
       return await $fetch('/api/admin/import/chirp', {
         method: 'POST',
@@ -378,12 +379,13 @@ export const useAdmin = () => {
 
   // ── Import: RadioReference CSV ─────────────────────────────────────────────
 
-  const importRRCsv = async (file: File, systemLabel: string, systemRef: number, portBase: number) => {
+  const importRRCsv = async (file: File, systemLabel: string, systemRef: number, portBase: number, protocol = '') => {
     const body = new FormData()
     body.append('file', file)
     body.append('systemLabel', systemLabel)
     body.append('systemRef', String(systemRef))
     body.append('portBase', String(portBase))
+    if (protocol) body.append('protocol', protocol)
     try {
       return await $fetch('/api/admin/import/rr-csv', {
         method: 'POST',
@@ -398,11 +400,12 @@ export const useAdmin = () => {
 
   // ── Import: TRS (trunked) CSV ──────────────────────────────────────────────
 
-  const importTrsCsv = async (file: File, systemLabel: string, systemRef: number) => {
+  const importTrsCsv = async (file: File, systemLabel: string, systemRef: number, systemKind = '') => {
     const body = new FormData()
     body.append('file', file)
     body.append('systemLabel', systemLabel)
     body.append('systemRef', String(systemRef))
+    if (systemKind) body.append('systemKind', systemKind)
     try {
       return await $fetch('/api/admin/import/trs-csv', {
         method: 'POST',

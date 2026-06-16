@@ -22,13 +22,40 @@ onMounted(async () => {
 })
 
 // ── CSV Import ─────────────────────────────────────────────────────────────
-const importType = ref<'chirp' | 'rr-csv' | 'trs-csv'>('chirp')
+const importFormat = ref<'chirp' | 'rr'>('chirp')
+const importUsage = ref<'standard' | 'trunk'>('standard')
+const importProtocol = ref('')
 const importFile = ref<File | null>(null)
 const importSystemLabel = ref('')
 const importSystemRef = ref(1)
 const importPortBase = ref(50000)
 const importLoading = ref(false)
 const importResult = ref<unknown>(null)
+
+const standardProtocolOptions = [
+  { label: 'Auto-detect from CSV', value: '' },
+  { label: 'NFM (narrowband FM)', value: 'nfm' },
+  { label: 'AM', value: 'am' },
+  { label: 'P25', value: 'p25' },
+  { label: 'DSD (P25 / DMR / NXDN auto)', value: 'dsd' },
+]
+const trunkKindOptions = [
+  { label: 'P25 Phase 1', value: 'p25' },
+  { label: 'P25 Phase 2', value: 'p25phase2' },
+  { label: 'DMR', value: 'dmr' },
+  { label: 'NXDN', value: 'nxdn' },
+]
+
+const typeOptions = computed(() =>
+  importUsage.value === 'trunk' ? trunkKindOptions : standardProtocolOptions,
+)
+
+watch(importFormat, fmt => {
+  if (fmt === 'chirp') importUsage.value = 'standard'
+})
+watch(importUsage, () => {
+  importProtocol.value = importUsage.value === 'trunk' ? 'p25' : ''
+})
 
 const handleFileChange = (e: Event) => {
   const input = e.target as HTMLInputElement
@@ -41,12 +68,12 @@ const runImport = async () => {
   importResult.value = null
 
   let res: unknown = null
-  if (importType.value === 'chirp') {
-    res = await admin.importChirp(importFile.value, importSystemLabel.value, importSystemRef.value, importPortBase.value)
-  } else if (importType.value === 'rr-csv') {
-    res = await admin.importRRCsv(importFile.value, importSystemLabel.value, importSystemRef.value, importPortBase.value)
-  } else if (importType.value === 'trs-csv') {
-    res = await admin.importTrsCsv(importFile.value, importSystemLabel.value, importSystemRef.value)
+  if (importFormat.value === 'chirp') {
+    res = await admin.importChirp(importFile.value, importSystemLabel.value, importSystemRef.value, importPortBase.value, importProtocol.value)
+  } else if (importUsage.value === 'standard') {
+    res = await admin.importRRCsv(importFile.value, importSystemLabel.value, importSystemRef.value, importPortBase.value, importProtocol.value)
+  } else {
+    res = await admin.importTrsCsv(importFile.value, importSystemLabel.value, importSystemRef.value, importProtocol.value)
   }
 
   importResult.value = res
@@ -162,18 +189,71 @@ useHead({ title: 'Tools – Admin – Rdio Scanner' })
       <UCard>
         <template #header><span class="font-semibold">CSV Import</span></template>
 
-        <div class="space-y-4">
-          <UFormField label="Import format">
-            <URadioGroup
-              v-model="importType"
-              :options="[
-                { label: 'CHIRP (analog/digital frequencies)', value: 'chirp' },
-                { label: 'RadioReference Frequency Export', value: 'rr-csv' },
-                { label: 'RadioReference Trunked System (TRS)', value: 'trs-csv' },
-              ]"
-            />
+        <div class="space-y-5">
+          <!-- Step 1: Format -->
+          <UFormField label="Format">
+            <div class="flex gap-2 flex-wrap">
+              <button
+                v-for="opt in [
+                  { value: 'chirp', label: 'CHIRP', desc: 'Analog / digital frequencies' },
+                  { value: 'rr',    label: 'RadioReference', desc: 'Frequency or TRS export' },
+                ]"
+                :key="opt.value"
+                type="button"
+                class="flex-1 min-w-32 px-4 py-2.5 rounded-lg border text-left transition-colors"
+                :class="importFormat === opt.value
+                  ? 'border-primary-500 bg-primary-500/10 text-white'
+                  : 'border-neutral-700 text-neutral-400 hover:border-neutral-500'"
+                @click="importFormat = opt.value as 'chirp' | 'rr'"
+              >
+                <div class="font-medium text-sm">{{ opt.label }}</div>
+                <div class="text-xs opacity-70 mt-0.5">{{ opt.desc }}</div>
+              </button>
+            </div>
           </UFormField>
 
+          <!-- Step 2: Import type -->
+          <UFormField label="Import type">
+            <div class="flex gap-2 flex-wrap">
+              <button
+                v-for="opt in [
+                  { value: 'standard', label: 'Standard', desc: 'SDRangel bridge channels' },
+                  { value: 'trunk',    label: 'Trunk', desc: 'trunk-recorder talkgroups' },
+                ]"
+                :key="opt.value"
+                type="button"
+                class="flex-1 min-w-32 px-4 py-2.5 rounded-lg border text-left transition-colors"
+                :class="[
+                  importUsage === opt.value
+                    ? 'border-primary-500 bg-primary-500/10 text-white'
+                    : 'border-neutral-700 text-neutral-400 hover:border-neutral-500',
+                  opt.value === 'trunk' && importFormat === 'chirp'
+                    ? 'opacity-40 cursor-not-allowed pointer-events-none'
+                    : '',
+                ]"
+                :disabled="opt.value === 'trunk' && importFormat === 'chirp'"
+                @click="importUsage = opt.value as 'standard' | 'trunk'"
+              >
+                <div class="font-medium text-sm">{{ opt.label }}</div>
+                <div class="text-xs opacity-70 mt-0.5">{{ opt.desc }}</div>
+              </button>
+            </div>
+            <p v-if="importFormat === 'chirp'" class="text-xs text-neutral-500 mt-1.5">
+              CHIRP exports conventional frequencies — Trunk mode requires a RadioReference TRS export.
+            </p>
+          </UFormField>
+
+          <!-- Step 3: Type / Protocol -->
+          <UFormField
+            :label="importUsage === 'trunk' ? 'System type' : 'Protocol'"
+            :description="importUsage === 'trunk'
+              ? 'Trunking protocol of this system'
+              : 'Channel modulation — Auto-detect reads the mode from the CSV'"
+          >
+            <USelect v-model="importProtocol" :options="typeOptions" class="max-w-xs" />
+          </UFormField>
+
+          <!-- System label & ref -->
           <div class="grid grid-cols-2 gap-4">
             <UFormField label="System label">
               <UInput v-model="importSystemLabel" placeholder="My City P25" />
@@ -183,14 +263,16 @@ useHead({ title: 'Tools – Admin – Rdio Scanner' })
             </UFormField>
           </div>
 
+          <!-- Port base (Standard only) -->
           <UFormField
-            v-if="importType !== 'trs-csv'"
+            v-if="importUsage === 'standard'"
             label="Bridge port base"
             description="Starting UDP port for SDRangel channels (e.g. 50000)"
           >
-            <UInput v-model.number="importPortBase" type="number" min="1024" max="65000" />
+            <UInput v-model.number="importPortBase" type="number" min="1024" max="65000" class="max-w-xs" />
           </UFormField>
 
+          <!-- File picker -->
           <UFormField label="CSV file">
             <input type="file" accept=".csv,.txt" @change="handleFileChange" />
           </UFormField>

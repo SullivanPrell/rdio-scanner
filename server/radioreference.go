@@ -141,7 +141,7 @@ func GMRSPreset(systemRef uint, portBase int) *ImportResult {
 
 // ParseChirpCSV parses a CHIRP-exported CSV file and returns an ImportResult.
 // systemLabel and systemRef identify the rdio-scanner system to create.
-func ParseChirpCSV(data []byte, systemLabel string, systemRef uint, portBase int) (*ImportResult, error) {
+func ParseChirpCSV(data []byte, systemLabel string, systemRef uint, portBase int, protocolOverride string) (*ImportResult, error) {
 	r := csv.NewReader(strings.NewReader(string(data)))
 	r.Comment = '#'
 	r.TrimLeadingSpace = true
@@ -211,6 +211,9 @@ func ParseChirpCSV(data []byte, systemLabel string, systemRef uint, portBase int
 		if mode == "DSD" || mode == "NXDN" || mode == "P25" || mode == "DMR" {
 			proto = "dsd"
 		}
+		if protocolOverride != "" {
+			proto = protocolOverride
+		}
 
 		channels = append(channels, BridgeChannelConfig{
 			Label:        name,
@@ -255,7 +258,7 @@ func truncate8(s string) string {
 //	6  Alpha Tag        → talkgroup Label (≤8 chars)
 //	9  Mode             → protocol
 //	11 Tag              → Tag label
-func ParseRRCSV(data []byte, systemLabel string, systemRef uint, portBase int) (*ImportResult, error) {
+func ParseRRCSV(data []byte, systemLabel string, systemRef uint, portBase int, protocolOverride string) (*ImportResult, error) {
 	r := csv.NewReader(strings.NewReader(string(data)))
 	r.TrimLeadingSpace = true
 	r.LazyQuotes = true
@@ -370,6 +373,9 @@ func ParseRRCSV(data []byte, systemLabel string, systemRef uint, portBase int) (
 		case "P25":
 			proto = "p25"
 		}
+		if protocolOverride != "" {
+			proto = protocolOverride
+		}
 
 		channels = append(channels, BridgeChannelConfig{
 			Label:        label,
@@ -407,7 +413,7 @@ func ParseRRCSV(data []byte, systemLabel string, systemRef uint, portBase int) (
 //
 // No bridge channels are produced: P25 trunked systems cannot be demodulated
 // per-talkgroup with SDRangel's NFMDemod — they require a P25 trunk controller.
-func ParseTRSTalkgroupCSV(data []byte, systemLabel string, systemRef uint) (*ImportResult, error) {
+func ParseTRSTalkgroupCSV(data []byte, systemLabel string, systemRef uint, systemKind string) (*ImportResult, error) {
 	r := csv.NewReader(strings.NewReader(string(data)))
 	r.TrimLeadingSpace = true
 	r.LazyQuotes = true
@@ -421,6 +427,9 @@ func ParseTRSTalkgroupCSV(data []byte, systemLabel string, systemRef uint) (*Imp
 	sys.Label = systemLabel
 	sys.SystemRef = systemRef
 	sys.Kind = "p25"
+	if systemKind != "" {
+		sys.Kind = systemKind
+	}
 
 	groupMap := map[string]uint64{}
 	tagMap := map[string]uint64{}
@@ -562,7 +571,7 @@ func (admin *Admin) ImportTRSCSVHandler(w http.ResponseWriter, r *http.Request) 
 	if sysRef <= 0 {
 		sysRef = 1
 	}
-	result, err := ParseTRSTalkgroupCSV(data, sysLabel, uint(sysRef))
+	result, err := ParseTRSTalkgroupCSV(data, sysLabel, uint(sysRef), r.FormValue("systemKind"))
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(err.Error()))
@@ -608,7 +617,7 @@ func (admin *Admin) ImportRRCSVHandler(w http.ResponseWriter, r *http.Request) {
 	if portBase <= 0 {
 		portBase = 9000
 	}
-	result, err := ParseRRCSV(data, sysLabel, uint(sysRef), portBase)
+	result, err := ParseRRCSV(data, sysLabel, uint(sysRef), portBase, r.FormValue("protocol"))
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(err.Error()))
@@ -1005,7 +1014,7 @@ func (admin *Admin) ImportChirpHandler(w http.ResponseWriter, r *http.Request) {
 	if portBase <= 0 {
 		portBase = 9000
 	}
-	result, err := ParseChirpCSV(data, sysLabel, uint(sysRef), portBase)
+	result, err := ParseChirpCSV(data, sysLabel, uint(sysRef), portBase, r.FormValue("protocol"))
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(err.Error()))
