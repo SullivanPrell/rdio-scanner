@@ -21,7 +21,6 @@
 package main
 
 import (
-	"database/sql"
 	"fmt"
 	"sync"
 	"time"
@@ -59,15 +58,23 @@ func (delayer *Delayer) Delay(call *Call) {
 		remaining := time.Until(timestamp)
 
 		if err := delayer.push(call, timestamp); err == nil {
-			delayer.timers[call.Id] = *time.AfterFunc(remaining, func() {
+			timer := time.AfterFunc(remaining, func() {
 				if err := delayer.pop(call); err != nil {
 					logError(err)
 				}
 
+				// Runs in its own goroutine, concurrently with other timers
+				// and with Delay() inserts — the map needs the mutex.
+				delayer.mutex.Lock()
 				delete(delayer.timers, call.Id)
+				delayer.mutex.Unlock()
 
 				delayer.controller.EmitCall(call)
 			})
+
+			delayer.mutex.Lock()
+			delayer.timers[call.Id] = *timer
+			delayer.mutex.Unlock()
 
 		} else {
 			logError(err)
@@ -79,50 +86,10 @@ func (delayer *Delayer) Delay(call *Call) {
 }
 
 func (delayer *Delayer) Start() error {
-	var (
-		err   error
-		query string
-		rows  *sql.Rows
-	)
-
-	delayer.mutex.Lock()
-
-	callIds := map[uint64]int64{}
-
-	formatError := errorFormatter("delayer", "restore")
-
-	query = `SELECT "callId", "timestamp" from "delayed"`
-	if rows, err = delayer.controller.Database.Sql.Query(query); err != nil {
-		return formatError(err, query)
-	}
-
-	for rows.Next() {
-		var (
-			callId    uint64
-			timestamp int64
-		)
-
-		if err = rows.Scan(&callId, &timestamp); err != nil {
-			break
-		}
-
-		callIds[callId] = timestamp
-	}
-
-	rows.Close()
-
+	callIds, err := delayer.drainDelayed()
 	if err != nil {
-		return formatError(err, "")
+		return err
 	}
-
-	if len(callIds) > 0 {
-		query = `DELETE FROM "delayed"`
-		if _, err = delayer.controller.Database.Sql.Exec(query); err != nil {
-			return formatError(err, query)
-		}
-	}
-
-	delayer.mutex.Unlock()
 
 	for callId, timestamp := range callIds {
 		if call, err := delayer.controller.Calls.GetCall(callId); err == nil {
@@ -138,6 +105,51 @@ func (delayer *Delayer) Start() error {
 	}
 
 	return nil
+}
+
+// drainDelayed reads and clears the persisted delayed-call table, returning the
+// callId -> timestamp map. The mutex is held only for the DB work (a defer so
+// every error path releases it), not across the EmitCall/Delay restore loop in
+// Start, which re-acquires the mutex via the timer callbacks.
+func (delayer *Delayer) drainDelayed() (map[uint64]int64, error) {
+	delayer.mutex.Lock()
+	defer delayer.mutex.Unlock()
+
+	formatError := errorFormatter("delayer", "restore")
+	callIds := map[uint64]int64{}
+
+	query := `SELECT "callId", "timestamp" from "delayed"`
+	rows, err := delayer.controller.Database.Sql.Query(query)
+	if err != nil {
+		return nil, formatError(err, query)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			callId    uint64
+			timestamp int64
+		)
+
+		if err = rows.Scan(&callId, &timestamp); err != nil {
+			return nil, formatError(err, "")
+		}
+
+		callIds[callId] = timestamp
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, formatError(err, "")
+	}
+
+	if len(callIds) > 0 {
+		query = `DELETE FROM "delayed"`
+		if _, err = delayer.controller.Database.Sql.Exec(query); err != nil {
+			return nil, formatError(err, query)
+		}
+	}
+
+	return callIds, nil
 }
 
 func (delayer *Delayer) getDelay(call *Call) uint {
