@@ -332,23 +332,25 @@ func (admin *Admin) GetAuthorization(r *http.Request) string {
 
 func (admin *Admin) GetConfig() map[string]any {
 	opts := admin.Controller.Options
+	channels := opts.BridgeChannels
+	if channels == nil {
+		channels = []BridgeChannelConfig{}
+	}
+	assignments := opts.SDRDeviceAssignments
+	if assignments == nil {
+		assignments = []SDRDeviceAssignment{}
+	}
 	bridge := map[string]any{
 		"enabled":                    opts.BridgeEnabled,
 		"host":                       opts.BridgeHost,
 		"port":                       opts.BridgePort,
-		"channels":                   opts.BridgeChannels,
+		"channels":                   channels,
 		"sdrangelBinaryPath":         opts.SDRangelBinaryPath,
 		"sdrangelContainerName":      opts.SDRangelContainerName,
 		"trunkRecorderBinaryPath":    opts.TrunkRecorderBinaryPath,
 		"trunkRecorderContainerName": opts.TrunkRecorderContainerName,
 		"trunkRecorderConfigPath":    opts.TrunkRecorderConfigPath,
-		"sdrDeviceAssignments":       opts.SDRDeviceAssignments,
-	}
-	if bridge["channels"] == nil {
-		bridge["channels"] = []BridgeChannelConfig{}
-	}
-	if bridge["sdrDeviceAssignments"] == nil {
-		bridge["sdrDeviceAssignments"] = []SDRDeviceAssignment{}
+		"sdrDeviceAssignments":       assignments,
 	}
 	return map[string]any{
 		"access":      admin.Controller.Accesses.List,

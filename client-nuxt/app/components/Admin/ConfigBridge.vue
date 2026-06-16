@@ -10,8 +10,12 @@ import type {
 
 const props = defineProps<{ modelValue: BridgeConfig; systems: AdminSystem[] }>()
 const emit = defineEmits<{ 'update:modelValue': [BridgeConfig] }>()
-const bridge = computed({
-  get: () => props.modelValue,
+const bridge = computed<BridgeConfig>({
+  get: () => ({
+    ...props.modelValue,
+    channels: props.modelValue?.channels ?? [],
+    sdrDeviceAssignments: props.modelValue?.sdrDeviceAssignments ?? [],
+  }),
   set: v => emit('update:modelValue', v),
 })
 
@@ -211,7 +215,7 @@ const systemOptions = computed(() =>
 
 function talkgroupOptions(systemRef: number) {
   const sys = (props.systems ?? []).find(s => s.systemRef === systemRef)
-  return sys?.talkgroups.map(tg => ({
+  return sys?.talkgroups?.map(tg => ({
     label: `${tg.talkgroupRef} – ${tg.name || tg.label}`,
     value: tg.talkgroupRef,
   })) ?? []
