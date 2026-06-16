@@ -38,9 +38,9 @@ type sdrangelDeviceSetsResponse struct {
 }
 
 type SDRangelDeviceSet struct {
-	Index  int                `json:"samplingDeviceIndex"`
-	HwType string             `json:"samplingDeviceHwType"`
-	Chans  []SDRangelChannel  `json:"channels"`
+	Index  int               `json:"samplingDeviceIndex"`
+	HwType string            `json:"samplingDeviceHwType"`
+	Chans  []SDRangelChannel `json:"channels"`
 }
 
 type SDRangelChannel struct {
@@ -175,6 +175,36 @@ func (c *sdrangelClient) patchJSON(path string, body interface{}) error {
 	return nil
 }
 
+func (c *sdrangelClient) deleteReq(path string) (int, error) {
+	req, err := http.NewRequest(http.MethodDelete, c.apiURL(path), nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	io.ReadAll(resp.Body)
+	return resp.StatusCode, nil
+}
+
+// clearChannels removes every channel on a device set so re-provisioning is
+// idempotent. Channels reindex on delete, so we repeatedly delete index 0 and
+// stop when the API reports there is no channel 0 left (status >= 400).
+func (c *sdrangelClient) clearChannels(dsIndex int) int {
+	const maxChannels = 64
+	removed := 0
+	for removed < maxChannels {
+		code, err := c.deleteReq(fmt.Sprintf("/deviceset/%d/channel/0", dsIndex))
+		if err != nil || code >= 400 {
+			break
+		}
+		removed++
+	}
+	return removed
+}
+
 // ── Status ─────────────────────────────────────────────────────────────────
 
 func (c *sdrangelClient) getStatus() (*SDRangelStatus, error) {
@@ -196,14 +226,16 @@ func (c *sdrangelClient) getStatus() (*SDRangelStatus, error) {
 
 // ── Provision ──────────────────────────────────────────────────────────────
 
-// provision configures SDRangel device sets and channels to match the bridge config.
-// For each bridge channel it creates:
+// provision configures SDRangel device sets and channels to match the bridge
+// config. For each bridge channel it creates a single UDPSink channel: SDRangel's
+// "UDP Sink" RX channel demodulates the signal (NFM/AM/SSB per the channel's
+// protocol) and streams S16LE mono audio straight to a per-channel UDP port that
+// the rdio-scanner bridge listens on. UDPSinkReport exposes a squelch flag the
+// bridge polls to segment calls.
 //
-//	NFMDemod (or DSDDemod/NXDNDemod) → named virtual audio pipe "RSRV_RS_{dsIdx}_{demodIdx}"
-//	AudioNetSink → reads from that audio pipe, sends L16 PCM over UDP to the bridge port
-//
-// It returns the SDRangelProvisionResult and a copy of channels with ChannelIndex updated
-// to the actual SDRangel-assigned demod index, which callers must persist to the bridge config.
+// Existing channels on each device set are removed first so re-provisioning is
+// idempotent. It returns the result and a copy of channels with ChannelIndex set
+// to the SDRangel-assigned channel index, which callers must persist.
 func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []BridgeChannelConfig) (*SDRangelProvisionResult, []BridgeChannelConfig) {
 	result := &SDRangelProvisionResult{Messages: []string{}}
 	updated := make([]BridgeChannelConfig, len(channels))
@@ -250,24 +282,27 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 			sr = 2400000
 		}
 
-		settingsKey := dsCfg.HwType + "Settings"
+		settingsKey := deviceSettingsKey(dsCfg.HwType)
 		if err := c.patchJSON(fmt.Sprintf("/deviceset/%d/device/settings", dsCfg.Index), map[string]interface{}{
 			"deviceHwType": dsCfg.HwType,
 			settingsKey: map[string]interface{}{
 				"centerFrequency": dsCfg.CenterFrequencyHz,
 				"devSampleRate":   sr,
-				"agc":             true,
-				"dcBlock":         true,
+				"agc":             1,
+				"dcBlock":         1,
 			},
 		}); err != nil {
 			result.Messages = append(result.Messages, fmt.Sprintf("warning: failed to configure device %d settings: %v", dsCfg.Index, err))
 		}
+
+		if n := c.clearChannels(dsCfg.Index); n > 0 {
+			result.Messages = append(result.Messages, fmt.Sprintf("device set %d: cleared %d existing channel(s)", dsCfg.Index, n))
+		}
+
 		result.Messages = append(result.Messages, fmt.Sprintf("device set %d: %s seq=%d center=%d Hz SR=%d", dsCfg.Index, dsCfg.HwType, dsCfg.Sequence, dsCfg.CenterFrequencyHz, sr))
 	}
 
-	// Create NFMDemod + AudioNetSink pair for each bridge channel.
-	// The audio pipe name is derived from the SDRangel-assigned demod index (not the stored
-	// ChannelIndex which may be 0 for all channels before first provisioning).
+	// Create one UDPSink channel per bridge channel.
 	for i, ch := range channels {
 		cf := centerFreq[ch.DeviceSetIndex]
 		var freqOffset int64
@@ -275,78 +310,33 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 			freqOffset = int64(ch.FrequencyHz) - int64(cf)
 		}
 
-		channelType := channelTypeForProtocol(ch.Protocol)
-
-		var addedDemod struct {
+		var added struct {
 			Index int `json:"index"`
 		}
 		if err := c.postJSON(fmt.Sprintf("/deviceset/%d/channel", ch.DeviceSetIndex), map[string]interface{}{
-			"channelType":              channelType,
+			"channelType":              "UDPSink",
 			"direction":                0,
 			"originatorDeviceSetIndex": ch.DeviceSetIndex,
-		}, &addedDemod); err != nil {
-			result.Messages = append(result.Messages, fmt.Sprintf("failed to add %s for %s: %v", channelType, ch.Label, err))
+		}, &added); err != nil {
+			result.Messages = append(result.Messages, fmt.Sprintf("failed to add UDPSink for %s: %v", ch.Label, err))
 			continue
 		}
 
-		// Pipe name uses the real SDRangel-assigned demod index so each channel gets a unique pipe.
-		audioPipe := fmt.Sprintf("RSRV_RS_%d_%d", ch.DeviceSetIndex, addedDemod.Index)
-
-		demodSettingsKey := channelType + "Settings"
-		if err := c.patchJSON(fmt.Sprintf("/deviceset/%d/channel/%d/settings", ch.DeviceSetIndex, addedDemod.Index), map[string]interface{}{
-			"channelType": channelType,
-			"direction":   0,
-			demodSettingsKey: map[string]interface{}{
-				"inputFrequencyOffset": freqOffset,
-				"rfBandwidth":          12500,
-				"afBandwidth":          3000,
-				"volume":               2.0,
-				"squelch":              -50.0,
-				"audioDeviceName":      audioPipe,
-				"title":                ch.Label,
-			},
+		if err := c.patchJSON(fmt.Sprintf("/deviceset/%d/channel/%d/settings", ch.DeviceSetIndex, added.Index), map[string]interface{}{
+			"channelType":     "UDPSink",
+			"direction":       0,
+			"UDPSinkSettings": udpSinkSettings(ch, freqOffset),
 		}); err != nil {
-			result.Messages = append(result.Messages, fmt.Sprintf("warning: failed to configure %s for %s: %v", channelType, ch.Label, err))
+			result.Messages = append(result.Messages, fmt.Sprintf("warning: failed to configure UDPSink for %s: %v", ch.Label, err))
 		}
 
-		var addedSink struct {
-			Index int `json:"index"`
-		}
-		if err := c.postJSON(fmt.Sprintf("/deviceset/%d/channel", ch.DeviceSetIndex), map[string]interface{}{
-			"channelType":              "AudioNetSink",
-			"direction":                0,
-			"originatorDeviceSetIndex": ch.DeviceSetIndex,
-		}, &addedSink); err != nil {
-			result.Messages = append(result.Messages, fmt.Sprintf("failed to add AudioNetSink for %s: %v", ch.Label, err))
-			continue
-		}
-
-		sr := ch.SampleRate
-		if sr <= 0 {
-			sr = 8000
-		}
-		if err := c.patchJSON(fmt.Sprintf("/deviceset/%d/channel/%d/settings", ch.DeviceSetIndex, addedSink.Index), map[string]interface{}{
-			"channelType": "AudioNetSink",
-			"direction":   0,
-			"AudioNetSinkSettings": map[string]interface{}{
-				"inputAudioDeviceName": audioPipe,
-				"udpAddress":           "127.0.0.1",
-				"udpPort":              ch.UdpPort,
-				"codec":                0,
-				"sampleRate":           sr,
-				"channels":             1,
-				"title":                ch.Label + " → UDP",
-			},
-		}); err != nil {
-			result.Messages = append(result.Messages, fmt.Sprintf("warning: failed to configure AudioNetSink for %s: %v", ch.Label, err))
-		}
-
-		// Persist the actual demod channel index so the bridge polls the right channel.
-		updated[i].ChannelIndex = addedDemod.Index
+		// Persist the SDRangel-assigned channel index so the bridge polls the
+		// correct per-channel squelch report.
+		updated[i].ChannelIndex = added.Index
 
 		result.Messages = append(result.Messages, fmt.Sprintf(
-			"channel %q: %s idx=%d → pipe %q → UDP %d (offset %+d Hz)",
-			ch.Label, channelType, addedDemod.Index, audioPipe, ch.UdpPort, freqOffset,
+			"channel %q: UDPSink idx=%d fmt=%d → UDP %d (offset %+d Hz)",
+			ch.Label, added.Index, protocolToSampleFormat(ch.Protocol), ch.UdpPort, freqOffset,
 		))
 	}
 
@@ -363,14 +353,76 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 	return result, updated
 }
 
-func channelTypeForProtocol(proto string) string {
+// udpSinkSettings builds the UDPSinkSettings payload for one bridge channel.
+// sampleFormat selects the demodulator; squelch lets the bridge segment calls by
+// polling UDPSinkReport. squelchDB / rfBandwidth / fmDeviation are sensible
+// defaults for narrowband voice and can be tuned later.
+func udpSinkSettings(ch BridgeChannelConfig, freqOffset int64) map[string]interface{} {
+	sr := ch.SampleRate
+	if sr <= 0 {
+		sr = 8000
+	}
+	rfBandwidth := 12500.0
+	switch ch.Protocol {
+	case "am":
+		rfBandwidth = 10000
+	case "usb", "lsb":
+		rfBandwidth = 3000
+	}
+	return map[string]interface{}{
+		"sampleFormat":         protocolToSampleFormat(ch.Protocol),
+		"inputFrequencyOffset": freqOffset,
+		"rfBandwidth":          rfBandwidth,
+		"fmDeviation":          5000,
+		"outputSampleRate":     sr,
+		"squelchEnabled":       1,
+		"squelchDB":            -50,
+		"squelchGate":          5, // 100ths of a second → 50 ms
+		"agc":                  1,
+		"gain":                 1.0,
+		"channelMute":          0,
+		"udpAddress":           "127.0.0.1",
+		"udpPort":              ch.UdpPort,
+		"title":                ch.Label,
+	}
+}
+
+// protocolToSampleFormat maps a bridge channel protocol to a UDPSink sampleFormat
+// enum value (mono audio variants). UDPSink handles analog modes only; digital
+// modes (DSD/NXDN) need a different path and are not provisioned here.
+func protocolToSampleFormat(proto string) int {
 	switch proto {
-	case "dsd":
-		return "DSDDemod"
-	case "nxdn":
-		return "NXDNDemod"
+	case "am":
+		return 8 // FormatAMMono
+	case "usb":
+		return 7 // FormatUSBMono
+	case "lsb":
+		return 6 // FormatLSBMono
 	default:
-		return "NFMDemod"
+		return 3 // FormatNFMMono
+	}
+}
+
+// deviceSettingsKey maps a device hardware type to the JSON key SDRangel expects
+// for that device's settings object in a DeviceSettings payload. The keys are
+// lowerCamelCase and not a simple transform of the hwType (e.g. RTLSDR →
+// rtlSdrSettings), so the common SDRs are listed explicitly.
+func deviceSettingsKey(hwType string) string {
+	switch hwType {
+	case "RTLSDR":
+		return "rtlSdrSettings"
+	case "Airspy":
+		return "airspySettings"
+	case "AirspyHF":
+		return "airspyHFSettings"
+	case "HackRF":
+		return "hackRFInputSettings"
+	case "LimeSDR":
+		return "limeSdrInputSettings"
+	case "SDRplayV3":
+		return "sdrPlayV3Settings"
+	default:
+		return hwType + "Settings"
 	}
 }
 

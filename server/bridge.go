@@ -27,8 +27,8 @@ import (
 	"time"
 )
 
-// BridgeChannelConfig maps one SDRangel demodulator channel to a rdio-scanner talkgroup.
-// Each channel gets its own UDP port that SDRangel's AudioNetSink streams L16 PCM audio to.
+// BridgeChannelConfig maps one SDRangel UDPSink channel to a rdio-scanner talkgroup.
+// Each channel gets its own UDP port that SDRangel streams S16LE mono audio to.
 type BridgeChannelConfig struct {
 	ChannelIndex   int    `json:"channelIndex"`
 	DeviceSetIndex int    `json:"deviceSetIndex"`
@@ -50,18 +50,13 @@ var bridgeHTTPClient = &http.Client{
 	},
 }
 
-// sdrangelChannelReport is the subset of the SDRangel channel report we care about.
-// NFMDemodReport, DSDDemodReport, and NXDNDemodReport all expose a Squelch field.
+// sdrangelChannelReport is the subset of the SDRangel channel report we care
+// about. UDPSinkReport exposes a squelch flag (1 = open) the bridge polls to
+// segment calls.
 type sdrangelChannelReport struct {
-	NFMDemodReport *struct {
+	UDPSinkReport *struct {
 		Squelch int `json:"squelch"`
-	} `json:"NFMDemodReport"`
-	DSDDemodReport *struct {
-		Squelch int `json:"squelch"`
-	} `json:"DSDDemodReport"`
-	NXDNDemodReport *struct {
-		Squelch int `json:"squelch"`
-	} `json:"NXDNDemodReport"`
+	} `json:"UDPSinkReport"`
 }
 
 type BridgeStatus struct {
@@ -151,17 +146,11 @@ func (b *Bridge) squelchOpen(host string, port uint, deviceSetIndex, channelInde
 		return false, fmt.Errorf("decode report: %w", err)
 	}
 
-	if report.NFMDemodReport != nil {
-		return report.NFMDemodReport.Squelch == 1, nil
-	}
-	if report.DSDDemodReport != nil {
-		return report.DSDDemodReport.Squelch == 1, nil
-	}
-	if report.NXDNDemodReport != nil {
-		return report.NXDNDemodReport.Squelch == 1, nil
+	if report.UDPSinkReport != nil {
+		return report.UDPSinkReport.Squelch == 1, nil
 	}
 
-	return false, fmt.Errorf("no NFMDemodReport, DSDDemodReport, or NXDNDemodReport in response (deviceset %d channel %d)", deviceSetIndex, channelIndex)
+	return false, fmt.Errorf("no UDPSinkReport in response (deviceset %d channel %d)", deviceSetIndex, channelIndex)
 }
 
 // bridgeBuildWAV wraps raw L16 mono PCM bytes in a RIFF/WAV header.
@@ -192,6 +181,29 @@ func bridgeBuildWAV(pcm []byte, sampleRate int) []byte {
 	buf.Write(pcm)
 
 	return buf.Bytes()
+}
+
+// rtpPayloadOffset returns the byte offset where the RTP payload begins, or -1
+// if pkt is not a well-formed RTP datagram. SDRangel can emit demodulated audio
+// over UDP either as raw L16 PCM or wrapped in RTP (the audio output device's
+// "use RTP" flag). RTP (RFC 3550 §5.1) always carries version 2 in the top two
+// bits of byte 0; raw L16 PCM has no such structure. The header is 12 bytes plus
+// a 4-byte CSRC entry per CC and an optional extension header.
+func rtpPayloadOffset(pkt []byte) int {
+	if len(pkt) < 12 || pkt[0]>>6 != 2 {
+		return -1
+	}
+	off := 12 + int(pkt[0]&0x0F)*4 // fixed header + CSRC list
+	if pkt[0]&0x10 != 0 {          // extension header present
+		if len(pkt) < off+4 {
+			return -1
+		}
+		off += 4 + (int(pkt[off+2])<<8|int(pkt[off+3]))*4
+	}
+	if len(pkt) < off {
+		return -1
+	}
+	return off
 }
 
 func (b *Bridge) monitorChannel(ctx context.Context, cfg BridgeChannelConfig) {
@@ -240,15 +252,50 @@ func (b *Bridge) monitorChannel(ctx context.Context, cfg BridgeChannelConfig) {
 	audioCh := make(chan []byte, 256)
 	udpBuf := make([]byte, 4096)
 
-	// UDP reader goroutine — feeds raw PCM chunks into audioCh.
+	// UDP reader goroutine — feeds L16 PCM chunks into audioCh.
+	//
+	// SDRangel may send the audio as raw L16 or RTP-framed. We decide once per
+	// stream and stick with it: RTP framing is only confirmed after two
+	// consecutive datagrams share an SSRC and carry a monotonic sequence number,
+	// so genuine PCM (which can briefly look RTP-shaped) is never mis-stripped.
 	go func() {
 		defer close(audioCh)
+		var (
+			rtpDecided bool
+			rtpFramed  bool
+			rtpSeen    bool
+			prevSeq    uint16
+			prevSSRC   uint32
+		)
 		for {
 			conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
 			n, _, err := conn.ReadFromUDP(udpBuf)
 			if n > 0 {
-				chunk := make([]byte, n)
-				copy(chunk, udpBuf[:n])
+				data := udpBuf[:n]
+
+				if !rtpDecided {
+					if off := rtpPayloadOffset(data); off >= 0 {
+						seq := uint16(data[2])<<8 | uint16(data[3])
+						ssrc := uint32(data[8])<<24 | uint32(data[9])<<16 | uint32(data[10])<<8 | uint32(data[11])
+						if rtpSeen && ssrc == prevSSRC && seq == prevSeq+1 {
+							rtpFramed, rtpDecided = true, true
+							b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: detected RTP-framed UDP audio, stripping headers", cfg.Label))
+						}
+						prevSeq, prevSSRC, rtpSeen = seq, ssrc, true
+					} else {
+						rtpFramed, rtpDecided = false, true
+					}
+				}
+
+				payload := data
+				if rtpFramed {
+					if off := rtpPayloadOffset(data); off >= 0 {
+						payload = data[off:]
+					}
+				}
+
+				chunk := make([]byte, len(payload))
+				copy(chunk, payload)
 				select {
 				case audioCh <- chunk:
 				default: // drop if consumer is behind
