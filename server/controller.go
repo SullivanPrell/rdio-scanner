@@ -280,7 +280,10 @@ func (controller *Controller) IngestCall(call *Call) {
 
 		if len(call.Meta.UnitRefs) > 0 {
 			for i, unitRef := range call.Meta.UnitRefs {
-				if len(call.Meta.UnitLabels)-1 > i {
+				// UnitRefs and UnitLabels are filled in lockstep by the parsers,
+				// so the label for index i is at UnitLabels[i]. Guard with > i
+				// (not len-1 > i, which dropped the last/only label).
+				if len(call.Meta.UnitLabels) > i {
 					if len(call.Meta.UnitLabels[i]) > 0 {
 						units.Add(unitRef, call.Meta.UnitLabels[i])
 					}
