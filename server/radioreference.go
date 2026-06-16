@@ -176,8 +176,8 @@ func ParseChirpCSV(data []byte, systemLabel string, systemRef uint, portBase int
 		}
 		name := strings.TrimSpace(rec[1])
 		freqStr := strings.TrimSpace(rec[2])
-		skip := strings.TrimSpace(rec[15])
-		if skip == "S" {
+		// CHIRP column counts vary by version; guard optional trailing columns.
+		if len(rec) > 15 && strings.TrimSpace(rec[15]) == "S" {
 			continue
 		}
 		comment := ""
