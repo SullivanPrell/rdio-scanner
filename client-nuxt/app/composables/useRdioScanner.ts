@@ -337,6 +337,10 @@ export const useRdioScanner = () => {
     ws.onmessage = (ev) => parseMessage(ev.data)
     if (import.meta.client) {
       clock.value = new Date().toISOString()
+      // connect() re-runs on every reconnect; clear any prior clock interval
+      // first so reconnects don't orphan a 1 Hz timer each (they accumulate and
+      // eventually freeze the tab with redundant re-renders).
+      if (clockTimer) clearInterval(clockTimer)
       clockTimer  = setInterval(() => { clock.value = new Date().toISOString() }, 1000)
     }
   }
@@ -346,6 +350,9 @@ export const useRdioScanner = () => {
     if (clockTimer) { clearInterval(clockTimer); clockTimer = null }
     if (ws) { ws.onclose = null; ws.close(); ws = null }
     stopAudio()
+    // Browsers cap concurrent AudioContexts (~6); each scanner mount creates a
+    // fresh closure, so without closing it here every visit leaks one.
+    if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null }
     connected.value = false
   }
 
