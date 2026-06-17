@@ -121,7 +121,7 @@ async function provision() {
   // the first channel left channels more than ~1.2 MHz away out of range.)
   const freqsByDevice = new Map<number, number[]>()
   for (const ch of bridge.value.channels) {
-    if (!ch.frequencyHz) continue
+    if (!ch.frequencyHz || ch.deviceSetIndex < 0) continue // skip parked/unassigned
     const arr = freqsByDevice.get(ch.deviceSetIndex) ?? []
     arr.push(ch.frequencyHz)
     freqsByDevice.set(ch.deviceSetIndex, arr)
@@ -144,7 +144,7 @@ async function provision() {
     return { index, hwType: 'RTLSDR', sequence: index, centerFrequencyHz: center, sampleRateHz: SDR_SAMPLE_RATE }
   })
 
-  const result = await admin.provisionSDRangel({ deviceSets, channels: bridge.value.channels })
+  const result = await admin.provisionSDRangel({ deviceSets, channels: bridge.value.channels.filter(c => c.deviceSetIndex >= 0) })
   provisioning.value = false
   if (result) toast.add({ title: 'SDRangel provisioned', color: 'success' })
 }
@@ -308,24 +308,38 @@ function autoAssignDevices() {
       windowStarts.push(ch.frequencyHz)
     }
   }
-  const deviceForFreq = (hz: number) => {
+  const needed = windowStarts.length
+  const available = dongles.value.length || 4
+
+  // Map a frequency to its ~2 MHz window index (the highest window start ≤ freq).
+  const windowForFreq = (hz: number) => {
     for (let i = windowStarts.length - 1; i >= 0; i--) {
       if (hz >= windowStarts[i]) return i
     }
     return 0
+  }
+  // Only hand out device-set indices for SDRs that physically exist. A channel
+  // whose window falls beyond the available dongles is parked (deviceSetIndex
+  // -1) instead of being pointed at a device set that was never created —
+  // provisioning skips it and it simply isn't received until more SDRs are
+  // added. Reception within each covered window is unaffected: one dongle
+  // handles every channel inside its ~2 MHz window at once.
+  const deviceForFreq = (hz: number) => {
+    const w = windowForFreq(hz)
+    return w < available ? w : -1
   }
   bridge.value = {
     ...bridge.value,
     channels: bridge.value.channels.map(c =>
       c.frequencyHz > 0 ? { ...c, deviceSetIndex: deviceForFreq(c.frequencyHz) } : c),
   }
-  const needed = windowStarts.length
-  const available = dongles.value.length || 4
+
   const spanMHz = ((sorted[sorted.length - 1].frequencyHz - sorted[0].frequencyHz) / 1e6).toFixed(2)
   if (needed > available) {
+    const parked = withFreq.filter(c => windowForFreq(c.frequencyHz) >= available).length
     toast.add({
       title: `Needs ${needed} SDRs, only ${available} available`,
-      description: `Frequencies span ${spanMHz} MHz; each SDR covers ~${(SDR_USABLE_HZ / 1e6).toFixed(1)} MHz. Channels on device sets ≥ ${available} won't be received until more SDRs are added.`,
+      description: `Frequencies span ${spanMHz} MHz; each SDR covers ~${(SDR_USABLE_HZ / 1e6).toFixed(1)} MHz. Assigned ${available} SDR${available > 1 ? 's' : ''}; ${parked} channel(s) left unassigned (Dev Set −1) — they won't be received until more SDRs are added.`,
       color: 'warning',
     })
   } else {
@@ -727,7 +741,10 @@ const trSystemOptions = computed(() => [
                 />
               </td>
               <td class="px-2 py-1"><UInput v-model.number="ch.udpPort" type="number" size="xs" /></td>
-              <td class="px-2 py-1"><UInput v-model.number="ch.deviceSetIndex" type="number" size="xs" /></td>
+              <td class="px-2 py-1">
+                <UInput v-model.number="ch.deviceSetIndex" type="number" size="xs" />
+                <span v-if="ch.deviceSetIndex < 0" class="block text-[10px] text-amber-500 mt-0.5">unassigned</span>
+              </td>
               <td class="px-2 py-1">
                 <UButton icon="i-heroicons-trash" color="error" variant="ghost" size="xs"
                   @click="removeChannel(i)" />
