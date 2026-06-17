@@ -189,6 +189,26 @@ func (c *sdrangelClient) deleteReq(path string) (int, error) {
 	return resp.StatusCode, nil
 }
 
+// waitReady blocks until SDRangel's main thread is free to accept the next
+// provisioning step. SDRangel handles device/channel creation asynchronously
+// (addSourceDevice → SpectrumVis → FFTW plan), and FFTW's planner is NOT
+// thread-safe — firing the next request while a plan is still building races on
+// the planner and segfaults sdrangelsrv (reproducible on a Pi 5 / arm64). While
+// the main thread is planning it stops answering the REST API, so a GET that
+// returns promptly means it has drained its queue and the next step is safe.
+func (c *sdrangelClient) waitReady(maxWait time.Duration) {
+	time.Sleep(150 * time.Millisecond) // let the just-queued work actually start
+	probe := &http.Client{Timeout: 2 * time.Second}
+	deadline := time.Now().Add(maxWait)
+	for time.Now().Before(deadline) {
+		if resp, err := probe.Get(c.apiURL("/devicesets")); err == nil {
+			resp.Body.Close()
+			return // answered within 2s → main thread is idle, safe to proceed
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+}
+
 // clearChannels removes every channel on a device set so re-provisioning is
 // idempotent. Channels reindex on delete, so we repeatedly delete index 0 and
 // stop when the API reports there is no channel 0 left (status >= 400).
@@ -300,6 +320,10 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 		}
 
 		result.Messages = append(result.Messages, fmt.Sprintf("device set %d: %s seq=%d center=%d Hz SR=%d", dsCfg.Index, dsCfg.HwType, dsCfg.Sequence, dsCfg.CenterFrequencyHz, sr))
+
+		// The device set spins up a SpectrumVis FFT plan; wait it out before the
+		// next step so its planner call can't race the next one (segfault guard).
+		c.waitReady(90 * time.Second)
 	}
 
 	// Create one UDPSink channel per bridge channel.
@@ -338,6 +362,10 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 			"channel %q: UDPSink idx=%d fmt=%d → UDP %d (offset %+d Hz)",
 			ch.Label, added.Index, protocolToSampleFormat(ch.Protocol), ch.UdpPort, freqOffset,
 		))
+
+		// Each UDPSink also builds an FFT plan; pace channel creation so two
+		// plans never build concurrently (the FFTW-planner race / segfault).
+		c.waitReady(90 * time.Second)
 	}
 
 	// Start all configured devices
