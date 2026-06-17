@@ -285,6 +285,15 @@ function removeChannel(i: number) {
   bridge.value = { ...bridge.value, channels }
 }
 
+// Wipe the whole channel list in one click. Confirmed because it can drop a
+// large config, but it's only the edit buffer — Save persists, reload undoes.
+function removeAllChannels() {
+  const n = bridge.value.channels.length
+  if (!n) return
+  if (!window.confirm(`Remove all ${n} bridge channel${n > 1 ? 's' : ''}? Save to persist this, or reload the page to undo.`)) return
+  bridge.value = { ...bridge.value, channels: [] }
+}
+
 // Usable RF span one RTL-SDR dongle can cover at a 2.4 MHz sample rate, leaving
 // margin for filter rolloff and the centre DC spike.
 const SDR_USABLE_HZ = 2_000_000
@@ -679,6 +688,16 @@ const trSystemOptions = computed(() => [
         <div class="flex gap-2">
           <UButton icon="i-heroicons-plus" size="xs" variant="ghost" @click="addChannel">
             Add Channel
+          </UButton>
+          <UButton
+            icon="i-heroicons-trash"
+            size="xs"
+            variant="ghost"
+            color="error"
+            :disabled="!bridge.channels.length"
+            @click="removeAllChannels"
+          >
+            Remove All
           </UButton>
           <UButton
             icon="i-heroicons-cpu-chip"
