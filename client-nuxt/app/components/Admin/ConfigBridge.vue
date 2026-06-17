@@ -45,6 +45,11 @@ const detectingDongles = ref(false)
 
 // ── SDRangel provisioning ─────────────────────────────────────────────────────
 const provisioning = ref(false)
+// Per-step output from the last provision() call. The server returns these in
+// result.messages; the Live Logs ring buffer only captures stdout from an
+// sdrangelsrv that rdio-scanner spawned itself (empty for an adopted/external
+// instance), so this is the real diagnostic of what provisioning actually did.
+const provisionMessages = ref<string[]>([])
 
 // ── Trunk-recorder config generation ─────────────────────────────────────────
 const trGenSystemRef = ref<number>(0)
@@ -146,7 +151,32 @@ async function provision() {
 
   const result = await admin.provisionSDRangel({ deviceSets, channels: bridge.value.channels.filter(c => c.deviceSetIndex >= 0) })
   provisioning.value = false
-  if (result) toast.add({ title: 'SDRangel provisioned', color: 'success' })
+
+  if (!result) {
+    // Network/HTTP failure — handleError already toasted the details.
+    provisionMessages.value = ['provision: request failed — see error toast (is the server reachable?)']
+    return
+  }
+
+  provisionMessages.value = result.messages?.length
+    ? result.messages
+    : ['provision: returned no messages']
+
+  // result.success is only false on early-exit errors (e.g. can't reach SDRangel);
+  // per-channel failures still return success=true, so scan the messages too.
+  const problems = (result.messages ?? []).filter(m => /failed|warning|cannot/i.test(m))
+  if (!result.success || problems.length) {
+    toast.add({
+      title: result.success ? `Provisioned with ${problems.length} problem(s)` : 'SDRangel provision failed',
+      description: problems[0] ?? 'See the provision output below.',
+      color: result.success ? 'warning' : 'error',
+    })
+  } else {
+    toast.add({ title: 'SDRangel provisioned', color: 'success' })
+  }
+
+  // Pull any stdout from a managed sdrangelsrv (e.g. a crash during provisioning).
+  await refreshSDRangelLogs()
 }
 
 // ── Trunk-recorder actions ────────────────────────────────────────────────────
@@ -493,6 +523,19 @@ const trSystemOptions = computed(() => [
         </span>
       </div>
 
+      <!-- Provision output -->
+      <div v-if="provisionMessages.length">
+        <p class="text-xs font-semibold text-neutral-400 uppercase tracking-wide mb-1.5">Last Provision</p>
+        <div class="bg-neutral-950 rounded border border-neutral-800 font-mono text-xs p-3 max-h-48 overflow-y-auto space-y-0.5">
+          <div
+            v-for="(line, i) in provisionMessages"
+            :key="i"
+            class="leading-relaxed"
+            :class="/failed|warning|cannot/i.test(line) ? 'text-amber-400' : 'text-neutral-300'"
+          >{{ line }}</div>
+        </div>
+      </div>
+
       <!-- Live logs -->
       <div>
         <div class="flex items-center justify-between mb-1.5">
@@ -506,7 +549,7 @@ const trSystemOptions = computed(() => [
           class="bg-neutral-950 rounded border border-neutral-800 font-mono text-xs p-3 h-48 overflow-y-auto space-y-0.5"
         >
           <div v-for="(line, i) in sdrangelLogs" :key="i" class="text-neutral-300 leading-relaxed">{{ line }}</div>
-          <div v-if="!sdrangelLogs.length" class="text-neutral-600">No log output captured.</div>
+          <div v-if="!sdrangelLogs.length" class="text-neutral-600">No log output captured. (Only an sdrangelsrv that rdio-scanner started itself is captured here — an externally-launched instance shows nothing.)</div>
         </div>
       </div>
     </div>

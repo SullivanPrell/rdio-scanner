@@ -93,6 +93,11 @@ export interface SDRangelServiceResult {
   message: string
 }
 
+export interface SDRangelProvisionResult {
+  success: boolean
+  messages: string[]
+}
+
 export interface TrunkRecorderServiceStatus {
   running: boolean
   mode: string
@@ -507,9 +512,9 @@ export const useAdmin = () => {
     }
   }
 
-  const provisionSDRangel = async (body: unknown) => {
+  const provisionSDRangel = async (body: unknown): Promise<SDRangelProvisionResult | null> => {
     try {
-      return await $fetch('/api/admin/sdrangel/provision', {
+      return await $fetch<SDRangelProvisionResult>('/api/admin/sdrangel/provision', {
         method: 'POST',
         headers: authHeader(),
         body,
