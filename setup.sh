@@ -698,6 +698,20 @@ EOF
 udevadm control --reload-rules && udevadm trigger 2>/dev/null || true
 info "RTL-SDR udev rules applied."
 
+# ── Headless audio (snd-dummy) ─────────────────────────────────────────────
+
+step "Configuring headless audio (snd-dummy)"
+# SDRangel's UDPSink opens an audio OUTPUT device before it streams PCM. A
+# headless Pi has only HDMI sinks (unusable with no display), so SDRangel logs
+# "Audio device '' failed" / "cannot bind audio socket" and sends nothing.
+# Load a virtual snd-dummy ALSA card at every boot so a usable sink always
+# exists; scripts/sdr-audio-prep.sh then makes it the default PipeWire sink.
+echo 'snd-dummy' > /etc/modules-load.d/snd-dummy.conf
+modprobe snd-dummy 2>/dev/null || true
+info "snd-dummy will load on every boot (/etc/modules-load.d/snd-dummy.conf)"
+warn "Make the Dummy the default sink in the session that runs sdrangelsrv:"
+warn "  bash ${REPO_ROOT}/scripts/sdr-audio-prep.sh   (runs automatically via 'make run')"
+
 # ── sysctl tuning ─────────────────────────────────────────────────────────
 
 cat > /etc/sysctl.d/99-sdr-perf.conf <<'EOF'

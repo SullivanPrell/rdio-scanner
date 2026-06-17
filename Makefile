@@ -71,6 +71,8 @@ run: ## Stop any running instance (service or direct), rebuild everything, and r
 	@cd client-nuxt && yarn build
 	@echo "Building $(app) for $(LOCAL_OS)/$(LOCAL_ARCH)..."
 	@cd server && GOOS=$(LOCAL_OS) GOARCH=$(LOCAL_ARCH) go build -o ../$(LOCAL_BIN)
+	@echo "Preparing headless audio sink (SDRangel)..."
+	@bash scripts/sdr-audio-prep.sh || true
 	@echo "Starting $(app)..."
 	@./$(LOCAL_BIN)
 
