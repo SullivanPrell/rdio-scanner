@@ -1016,13 +1016,13 @@ func (dirwatches *Dirwatches) Write(db *Database) error {
 		}
 
 		if count == 0 {
-			query = fmt.Sprintf(`INSERT INTO "dirwatches" ("delay", "deleteAfter", "directory", "disabled", "extension", "frequency", "mask", "order", "siteId", "systemId", "talkgroupId", "type") VALUES (%d, %t, '%s', %t, '%s', %d, '%s', %d, %d, %d, %d, '%s')`, dirwatch.Delay, dirwatch.DeleteAfter, dirwatch.Directory, dirwatch.Disabled, dirwatch.Extension, dirwatch.Frequency, dirwatch.Mask, dirwatch.Order, dirwatch.SiteId, dirwatch.SystemId, dirwatch.TalkgroupId, dirwatch.Kind)
+			query = fmt.Sprintf(`INSERT INTO "dirwatches" ("delay", "deleteAfter", "directory", "disabled", "extension", "frequency", "mask", "order", "siteId", "systemId", "talkgroupId", "type") VALUES (%d, %t, '%s', %t, '%s', %d, '%s', %d, %d, %d, %d, '%s')`, dirwatch.Delay, dirwatch.DeleteAfter, escapeQuotes(dirwatch.Directory), dirwatch.Disabled, escapeQuotes(dirwatch.Extension), dirwatch.Frequency, escapeQuotes(dirwatch.Mask), dirwatch.Order, dirwatch.SiteId, dirwatch.SystemId, dirwatch.TalkgroupId, escapeQuotes(dirwatch.Kind))
 			if _, err = tx.Exec(query); err != nil {
 				break
 			}
 
 		} else {
-			query = fmt.Sprintf(`UPDATE "dirwatches" SET "delay" = %d, "deleteAfter" = %t, "directory" = '%s', "disabled" = %t, "extension" = '%s', "frequency" = %d, "mask" = '%s', "order" = %d, "siteId" = %d, "systemId" = %d, "talkgroupId" = %d, "type" = '%s' WHERE "dirwatchId" = %d`, dirwatch.Delay, dirwatch.DeleteAfter, dirwatch.Directory, dirwatch.Disabled, dirwatch.Extension, dirwatch.Frequency, dirwatch.Mask, dirwatch.Order, dirwatch.SiteId, dirwatch.SystemId, dirwatch.TalkgroupId, dirwatch.Kind, dirwatch.Id)
+			query = fmt.Sprintf(`UPDATE "dirwatches" SET "delay" = %d, "deleteAfter" = %t, "directory" = '%s', "disabled" = %t, "extension" = '%s', "frequency" = %d, "mask" = '%s', "order" = %d, "siteId" = %d, "systemId" = %d, "talkgroupId" = %d, "type" = '%s' WHERE "dirwatchId" = %d`, dirwatch.Delay, dirwatch.DeleteAfter, escapeQuotes(dirwatch.Directory), dirwatch.Disabled, escapeQuotes(dirwatch.Extension), dirwatch.Frequency, escapeQuotes(dirwatch.Mask), dirwatch.Order, dirwatch.SiteId, dirwatch.SystemId, dirwatch.TalkgroupId, escapeQuotes(dirwatch.Kind), dirwatch.Id)
 			if _, err = tx.Exec(query); err != nil {
 				break
 			}

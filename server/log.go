@@ -83,7 +83,7 @@ func (logs *Logs) LogEvent(level string, message string) error {
 			Message:  message,
 		}
 
-		query := fmt.Sprintf(`INSERT INTO "logs" ("level", "message", "timestamp") VALUES ('%s', '%s', %d)`, l.Level, l.Message, l.DateTime.UnixMilli())
+		query := fmt.Sprintf(`INSERT INTO "logs" ("level", "message", "timestamp") VALUES ('%s', '%s', %d)`, escapeQuotes(l.Level), escapeQuotes(l.Message), l.DateTime.UnixMilli())
 		if _, err := logs.database.Sql.Exec(query); err != nil {
 			return fmt.Errorf("logs.logevent: %s in %s", err, query)
 		}
@@ -140,7 +140,7 @@ func (logs *Logs) Search(searchOptions *LogsSearchOptions, db *Database) (*LogsS
 
 	switch v := searchOptions.Level.(type) {
 	case string:
-		where += fmt.Sprintf(` AND "level" = '%s'`, v)
+		where += fmt.Sprintf(` AND "level" = '%s'`, escapeQuotes(v))
 	}
 
 	switch v := searchOptions.Sort.(type) {
