@@ -698,18 +698,26 @@ EOF
 udevadm control --reload-rules && udevadm trigger 2>/dev/null || true
 info "RTL-SDR udev rules applied."
 
-# ── Headless audio (snd-dummy) ─────────────────────────────────────────────
+# ── Headless audio (ALSA→PipeWire bridge + snd-dummy) ──────────────────────
 
-step "Configuring headless audio (snd-dummy)"
-# SDRangel's UDPSink opens an audio OUTPUT device before it streams PCM. A
-# headless Pi has only HDMI sinks (unusable with no display), so SDRangel logs
-# "Audio device '' failed" / "cannot bind audio socket" and sends nothing.
-# Load a virtual snd-dummy ALSA card at every boot so a usable sink always
-# exists; scripts/sdr-audio-prep.sh then makes it the default PipeWire sink.
+step "Configuring headless audio"
+# SDRangel's UDPSink opens a Qt audio OUTPUT device before it streams PCM. Its
+# server build uses Qt's ALSA backend, so it opens ALSA's "default" device --
+# which on a headless Pi resolves to HDMI (no display -> unusable). SDRangel then
+# logs "Audio device '' failed" / "cannot bind audio socket" and streams nothing.
+# Two pieces fix it:
+#   1. pipewire-alsa makes ALSA's "default" route THROUGH PipeWire instead of to
+#      raw HDMI (without it, "default" = vc4hdmi0 and SDRangel gets no audio).
+#   2. snd-dummy is a virtual sink that always accepts audio; sdr-audio-prep.sh
+#      makes it the default PipeWire sink, so the chain becomes
+#      Qt ALSA "default" -> PipeWire -> Dummy, and UDPSink binds.
+DEBIAN_FRONTEND=noninteractive apt-get install -y pipewire-alsa 2>/dev/null \
+    && info "pipewire-alsa installed — ALSA 'default' now routes through PipeWire" \
+    || warn "could not install pipewire-alsa — SDRangel audio will likely fail (apt-get install pipewire-alsa)"
 echo 'snd-dummy' > /etc/modules-load.d/snd-dummy.conf
 modprobe snd-dummy 2>/dev/null || true
 info "snd-dummy will load on every boot (/etc/modules-load.d/snd-dummy.conf)"
-warn "Make the Dummy the default sink in the session that runs sdrangelsrv:"
+warn "Set the Dummy as the default sink in the session that runs sdrangelsrv:"
 warn "  bash ${REPO_ROOT}/scripts/sdr-audio-prep.sh   (runs automatically via 'make run')"
 
 # ── sysctl tuning ─────────────────────────────────────────────────────────

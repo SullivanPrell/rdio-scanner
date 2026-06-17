@@ -209,6 +209,37 @@ func (c *sdrangelClient) waitReady(maxWait time.Duration) {
 	}
 }
 
+// waitReachable polls GET /devicesets until SDRangel answers (decoding the
+// result into out) or maxWait elapses. A provision is usually triggered exactly
+// when SDRangel is busy — running the existing channels, planning FFTW, or stuck
+// retrying a missing audio device — and during that the single main thread stops
+// servicing the REST API, so a request hits the client timeout. Aborting the
+// whole provision on one slow GET is wrong: when the main thread drains, the GET
+// returns in milliseconds. So retry (with a generous per-attempt timeout) rather
+// than give up. The shared client stays at a short 5s timeout so the status
+// endpoint the admin UI polls never blocks on a wedged SDRangel.
+func (c *sdrangelClient) waitReachable(out *sdrangelDeviceSetsResponse, maxWait time.Duration) error {
+	probe := &http.Client{Timeout: 10 * time.Second}
+	deadline := time.Now().Add(maxWait)
+	var lastErr error
+	for {
+		resp, err := probe.Get(c.apiURL("/devicesets"))
+		if err == nil {
+			lastErr = json.NewDecoder(resp.Body).Decode(out)
+			resp.Body.Close()
+			if lastErr == nil {
+				return nil
+			}
+		} else {
+			lastErr = err
+		}
+		if !time.Now().Before(deadline) {
+			return lastErr
+		}
+		time.Sleep(1 * time.Second)
+	}
+}
+
 // clearChannels removes every channel on a device set so re-provisioning is
 // idempotent. Channels reindex on delete, so we repeatedly delete index 0 and
 // stop when the API reports there is no channel 0 left (status >= 400).
@@ -262,8 +293,8 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 	copy(updated, channels)
 
 	var devResp sdrangelDeviceSetsResponse
-	if err := c.getJSON("/devicesets", &devResp); err != nil {
-		result.Messages = append(result.Messages, fmt.Sprintf("cannot reach SDRangel: %v", err))
+	if err := c.waitReachable(&devResp, 30*time.Second); err != nil {
+		result.Messages = append(result.Messages, fmt.Sprintf("cannot reach SDRangel after retrying for 30s (is it busy or stuck? check the sdrangelsrv logs): %v", err))
 		return result, updated
 	}
 
