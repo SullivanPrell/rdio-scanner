@@ -231,13 +231,13 @@ const systemOptions = computed(() =>
   (props.systems ?? []).map(s => ({ label: s.label, value: s.systemRef })),
 )
 
-// Precompute talkgroup options per system once, as stable array references.
-// The per-row `:items="talkgroupOptions(ch.systemRef)"` binding is re-evaluated
-// on every render; returning a fresh array each time made the Reka select
-// re-diff all of its options repeatedly while opening, which is super-linear —
-// with a few hundred talkgroups, opening one dropdown blocked the main thread
-// for seconds (the "browser crash"). A computed Map keeps the reference stable
-// so the select only builds its list once.
+// Precompute talkgroup options per system once, as stable array references, so
+// the per-row `:items="talkgroupOptions(ch.systemRef)"` binding doesn't rebuild
+// a fresh array on every render. This alone was NOT enough: the picker is a
+// plain USelect that renders every option into the DOM when opened, so a system
+// with a few hundred+ talkgroups froze the tab for seconds on open ("Bridge tab
+// breaks the browser"). The real fix is the USelectMenu below — searchable +
+// `:virtualize`, so it only mounts the handful of rows actually on screen.
 const talkgroupOptionsBySystem = computed(() => {
   const map = new Map<number, { label: string; value: number }[]>()
   for (const s of (props.systems ?? [])) {
@@ -715,7 +715,16 @@ const trSystemOptions = computed(() => [
               <td class="px-2 py-1"><UInput v-model.number="ch.squelchDb" type="number" size="xs" /></td>
               <td class="px-2 py-1"><USelect v-model.number="ch.systemRef" :items="systemOptions" size="xs" /></td>
               <td class="px-2 py-1">
-                <USelect v-model.number="ch.talkgroupRef" :items="talkgroupOptions(ch.systemRef)" size="xs" />
+                <USelectMenu
+                  v-model="ch.talkgroupRef"
+                  :items="talkgroupOptions(ch.systemRef)"
+                  value-key="value"
+                  :virtualize="true"
+                  :search-input="{ placeholder: 'Search talkgroups…' }"
+                  size="xs"
+                  placeholder="—"
+                  class="w-44"
+                />
               </td>
               <td class="px-2 py-1"><UInput v-model.number="ch.udpPort" type="number" size="xs" /></td>
               <td class="px-2 py-1"><UInput v-model.number="ch.deviceSetIndex" type="number" size="xs" /></td>
