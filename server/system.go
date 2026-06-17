@@ -514,9 +514,14 @@ func (systems *Systems) Write(db *Database) error {
 		if err = rows.Scan(&systemId); err != nil {
 			break
 		}
+		// A DB system is dropped only when no incoming system carries its id.
+		// Newly-added systems have Id == 0; they're inserts and must NOT protect
+		// existing rows from deletion. The old `system.Id == 0` clause meant a
+		// single unsaved "New System" (or a just-inserted one the client hasn't
+		// reloaded ids for) silently blocked every system delete.
 		remove := true
 		for _, system := range systems.List {
-			if system.Id == 0 || system.Id == systemId {
+			if system.Id != 0 && system.Id == systemId {
 				remove = false
 				break
 			}
