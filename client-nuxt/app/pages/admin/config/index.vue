@@ -6,11 +6,11 @@ definePageMeta({ layout: 'admin' })
 const admin = useAdmin()
 const toast = useToast()
 const router = useRouter()
+const route = useRoute()
 
 const cfg = ref<AdminConfig | null>(null)
 const loading = ref(true)
 const saving = ref(false)
-const activeTab = ref('systems')
 
 const tabs = [
   { key: 'systems', label: 'Systems', icon: 'i-heroicons-radio' },
@@ -23,6 +23,22 @@ const tabs = [
   { key: 'tags', label: 'Tags', icon: 'i-heroicons-tag' },
   { key: 'options', label: 'Options', icon: 'i-heroicons-adjustments-horizontal' },
 ]
+
+// Keep the active tab in the URL (?tab=bridge) so config sub-pages are
+// deep-linkable and survive a refresh. This MUST reference the `route` from
+// `useRoute()` declared above — a bare `route` here throws "route is not
+// defined" and blanks the whole config page, including the Bridge submenu.
+const isTabKey = (v: unknown): v is string =>
+  typeof v === 'string' && tabs.some(t => t.key === v)
+
+const activeTab = ref(isTabKey(route.query.tab) ? route.query.tab : 'systems')
+
+watch(() => route.query.tab, (tab) => {
+  if (isTabKey(tab)) activeTab.value = tab
+})
+watch(activeTab, (tab) => {
+  if (route.query.tab !== tab) router.replace({ query: { ...route.query, tab } })
+})
 
 onMounted(async () => {
   cfg.value = await admin.getConfig()
