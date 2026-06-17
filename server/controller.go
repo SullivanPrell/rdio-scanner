@@ -623,7 +623,7 @@ func (controller *Controller) Terminate() {
 
 	// Stop any sdrangelsrv / trunk-recorder processes we spawned so they don't
 	// outlive us holding the SDR devices (which would block the next start).
-	controller.ServiceManager.Stop(controller.Options.SDRangelContainerName)
+	controller.ServiceManager.Stop(controller.Options.SDRangelContainerName, controller.Options.SDRangelBinaryPath)
 	controller.TRServiceManager.Stop(controller.Options.TrunkRecorderContainerName)
 
 	if err := controller.Database.Sql.Close(); err != nil {

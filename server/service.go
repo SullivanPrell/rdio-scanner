@@ -26,6 +26,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -273,6 +275,65 @@ func dockerLogs(containerName string, tail int) []string {
 
 // ── Native mode ────────────────────────────────────────────────────────────
 
+// reapOrphans stops any running sdrangelsrv processes that rdio-scanner isn't
+// tracking — e.g. an instance orphaned by a rdio-scanner restart, or a
+// half-started duplicate whose REST API never bound. Without this, clicking
+// Start after a restart spawned a *second* `sdrangelsrv -p <port>` that
+// collided with the orphan on the API port and left neither one listening.
+//
+// It signals SIGINT first, then force-kills any survivors after ~2s so the API
+// port is guaranteed free for a fresh launch. Returns the number of processes
+// reaped. Best-effort and Unix-only (pgrep); a no-op where pgrep is missing.
+func reapOrphans(binaryPath string) int {
+	name := "sdrangelsrv"
+	if binaryPath != "" {
+		name = filepath.Base(binaryPath)
+	}
+	out, err := exec.Command("pgrep", "-x", name).Output()
+	if err != nil {
+		return 0 // pgrep missing, or no matching process
+	}
+	self := os.Getpid()
+	var procs []*os.Process
+	for _, f := range strings.Fields(string(out)) {
+		pid, err := strconv.Atoi(f)
+		if err != nil || pid == self {
+			continue
+		}
+		if p, err := os.FindProcess(pid); err == nil {
+			procs = append(procs, p)
+		}
+	}
+	if len(procs) == 0 {
+		return 0
+	}
+	// Mirror nativeStatus's liveness probe: a nil-signal that returns no error
+	// means the process is still alive.
+	alive := func(p *os.Process) bool { return p.Signal(os.Signal(nil)) == nil }
+	for _, p := range procs {
+		p.Signal(os.Interrupt)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+		stillAlive := false
+		for _, p := range procs {
+			if alive(p) {
+				stillAlive = true
+			}
+		}
+		if !stillAlive {
+			break
+		}
+	}
+	for _, p := range procs {
+		if alive(p) {
+			p.Kill()
+		}
+	}
+	return len(procs)
+}
+
 func (m *SDRangelServiceManager) nativeStatus(binaryPath, host string, port uint) SDRangelServiceStatus {
 	m.mutex.Lock()
 	managed := m.nativeProcess
@@ -314,9 +375,38 @@ func (m *SDRangelServiceManager) nativeStatus(binaryPath, host string, port uint
 	return SDRangelServiceStatus{Mode: "native", Message: "not running"}
 }
 
-func (m *SDRangelServiceManager) nativeStart(binaryPath, extraArgs string) SDRangelServiceResult {
-	m.mutex.Lock()
+func (m *SDRangelServiceManager) nativeStart(binaryPath, extraArgs, host string, port uint) SDRangelServiceResult {
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	if port == 0 {
+		port = 8091
+	}
 
+	m.mutex.Lock()
+	if m.nativeProcess != nil && m.nativeProcess.Process != nil {
+		m.mutex.Unlock()
+		return SDRangelServiceResult{Success: true, Message: "already running"}
+	}
+	m.mutex.Unlock()
+
+	// Adopt a healthy instance rather than spawning a duplicate. After a
+	// rdio-scanner restart our process handle is gone, but an sdrangelsrv that
+	// is still serving the REST API can simply be reused. Spawning a second
+	// `sdrangelsrv -p <port>` here is exactly what previously collided on the
+	// API port and left neither instance listening.
+	if conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, port), 300*time.Millisecond); err == nil {
+		conn.Close()
+		return SDRangelServiceResult{Success: true, Message: fmt.Sprintf("already running on %s:%d (adopted existing instance)", host, port)}
+	}
+
+	// The API port is dead. Reap any orphaned sdrangelsrv (a prior instance
+	// whose API crashed, or a half-started duplicate) so the fresh launch can
+	// bind the port cleanly instead of racing a zombie.
+	reaped := reapOrphans(binaryPath)
+
+	m.mutex.Lock()
+	// Another caller may have won the race while we were probing/reaping.
 	if m.nativeProcess != nil && m.nativeProcess.Process != nil {
 		m.mutex.Unlock()
 		return SDRangelServiceResult{Success: true, Message: "already running"}
@@ -331,7 +421,7 @@ func (m *SDRangelServiceManager) nativeStart(binaryPath, extraArgs string) SDRan
 		}
 	}
 
-	args := []string{"-p", "8091"}
+	args := []string{"-p", strconv.Itoa(int(port))}
 	if extraArgs != "" {
 		args = append(args, strings.Fields(extraArgs)...)
 	}
@@ -367,20 +457,31 @@ func (m *SDRangelServiceManager) nativeStart(binaryPath, extraArgs string) SDRan
 	pid := cmd.Process.Pid
 	m.mutex.Unlock()
 
-	// Wait briefly to detect immediate crashes (e.g., port 8091 already in use)
+	started := fmt.Sprintf("sdrangelsrv started (pid %d)", pid)
+	if reaped > 0 {
+		started = fmt.Sprintf("reaped %d orphaned sdrangelsrv process(es); %s", reaped, started)
+	}
+
+	// Wait briefly to detect immediate crashes (e.g., port already in use)
 	select {
 	case <-exited:
-		return SDRangelServiceResult{Message: fmt.Sprintf("sdrangelsrv (pid %d) exited immediately — port 8091 may already be in use. Check Logs.", pid)}
+		return SDRangelServiceResult{Message: fmt.Sprintf("sdrangelsrv (pid %d) exited immediately — port %d may already be in use. Check Logs.", pid, port)}
 	case <-time.After(400 * time.Millisecond):
-		return SDRangelServiceResult{Success: true, Message: fmt.Sprintf("sdrangelsrv started (pid %d)", pid)}
+		return SDRangelServiceResult{Success: true, Message: started}
 	}
 }
 
-func (m *SDRangelServiceManager) nativeStop() SDRangelServiceResult {
+func (m *SDRangelServiceManager) nativeStop(binaryPath string) SDRangelServiceResult {
 	m.mutex.Lock()
 
 	if m.nativeProcess == nil || m.nativeProcess.Process == nil {
 		m.mutex.Unlock()
+		// We don't own a process, but an externally-started or orphaned
+		// sdrangelsrv may still be running (what the UI shows as "running
+		// (external)"). Reap it so Stop actually stops it.
+		if reaped := reapOrphans(binaryPath); reaped > 0 {
+			return SDRangelServiceResult{Success: true, Message: fmt.Sprintf("stopped %d external sdrangelsrv process(es)", reaped)}
+		}
 		return SDRangelServiceResult{Success: true, Message: "not running"}
 	}
 
@@ -414,27 +515,27 @@ func (m *SDRangelServiceManager) Status(containerName, binaryPath, host string, 
 	return m.nativeStatus(binaryPath, host, port)
 }
 
-func (m *SDRangelServiceManager) Start(containerName, binaryPath, extraArgs string) SDRangelServiceResult {
+func (m *SDRangelServiceManager) Start(containerName, binaryPath, extraArgs, host string, port uint) SDRangelServiceResult {
 	if m.mode(containerName) == "docker" {
 		return m.dockerStart(containerName)
 	}
-	return m.nativeStart(binaryPath, extraArgs)
+	return m.nativeStart(binaryPath, extraArgs, host, port)
 }
 
-func (m *SDRangelServiceManager) Stop(containerName string) SDRangelServiceResult {
+func (m *SDRangelServiceManager) Stop(containerName, binaryPath string) SDRangelServiceResult {
 	if m.mode(containerName) == "docker" {
 		return m.dockerStop(containerName)
 	}
-	return m.nativeStop()
+	return m.nativeStop(binaryPath)
 }
 
-func (m *SDRangelServiceManager) Restart(containerName, binaryPath, extraArgs string) SDRangelServiceResult {
-	stop := m.Stop(containerName)
+func (m *SDRangelServiceManager) Restart(containerName, binaryPath, extraArgs, host string, port uint) SDRangelServiceResult {
+	stop := m.Stop(containerName, binaryPath)
 	if !stop.Success {
 		return stop
 	}
 	// nativeStop waits for the process to fully exit, so no sleep needed here
-	return m.Start(containerName, binaryPath, extraArgs)
+	return m.Start(containerName, binaryPath, extraArgs, host, port)
 }
 
 func (m *SDRangelServiceManager) Logs(containerName string, tail int) []string {
@@ -493,15 +594,23 @@ func (admin *Admin) SDRangelServiceActionHandler(w http.ResponseWriter, r *http.
 	if binaryPath == "" {
 		binaryPath = opts.SDRangelBinaryPath
 	}
+	host := opts.BridgeHost
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	port := opts.BridgePort
+	if port == 0 {
+		port = 8091
+	}
 
 	var result SDRangelServiceResult
 	switch req.Action {
 	case "start":
-		result = admin.Controller.ServiceManager.Start(opts.SDRangelContainerName, binaryPath, req.Args)
+		result = admin.Controller.ServiceManager.Start(opts.SDRangelContainerName, binaryPath, req.Args, host, port)
 	case "stop":
-		result = admin.Controller.ServiceManager.Stop(opts.SDRangelContainerName)
+		result = admin.Controller.ServiceManager.Stop(opts.SDRangelContainerName, binaryPath)
 	case "restart":
-		result = admin.Controller.ServiceManager.Restart(opts.SDRangelContainerName, binaryPath, req.Args)
+		result = admin.Controller.ServiceManager.Restart(opts.SDRangelContainerName, binaryPath, req.Args, host, port)
 	default:
 		w.WriteHeader(http.StatusBadRequest)
 		return
