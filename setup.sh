@@ -202,7 +202,7 @@ install_trunk_recorder() {
         libuhd-dev \
         librtlsdr-dev libliquid-dev \
         libcurl4-openssl-dev libssl-dev \
-        libsndfile1-dev libgps-dev sox || true
+        libsndfile1-dev libgps-dev sox patchelf || true
 
     # GNURadio (required for digital signal processing)
     DEBIAN_FRONTEND=noninteractive apt-get install -y gnuradio-dev 2>/dev/null || \
@@ -286,15 +286,20 @@ install_trunk_recorder() {
     # load_config() — regardless of the config file. We don't build stat_socket (its
     # websocketpp dependency doesn't compile cleanly on current Debian), and its
     # absence makes trunk-recorder abort at startup with "libstat_socket.so: cannot
-    # open shared object file". Satisfy the loader by pointing that library name at a
-    # benign already-built plugin: loaded under the stat_socket name with no config,
-    # unit_script is a harmless no-op.
+    # open shared object file". Satisfy the loader with a copy of a benign built
+    # plugin (unit_script is a no-op without config). A symlink/plain copy keeps
+    # unit_script's SONAME, so dlopen("libstat_socket.so") can't resolve it via the
+    # linker cache — patchelf rewrites the SONAME so ldconfig indexes it correctly.
     local _unitlib
-    _unitlib="$(find /usr/local/lib /usr/lib -name 'libunit_script.so' 2>/dev/null | head -1)"
-    if [[ -n "$_unitlib" && ! -e "$(dirname "$_unitlib")/libstat_socket.so" ]]; then
-        ln -sf "$_unitlib" "$(dirname "$_unitlib")/libstat_socket.so"
+    _unitlib="$(find /usr -name 'libunit_script.so' 2>/dev/null | head -1)"
+    if [[ -n "$_unitlib" ]]; then
+        local _statlib
+        _statlib="$(dirname "$_unitlib")/libstat_socket.so"
+        cp -f "$_unitlib" "$_statlib"
+        patchelf --set-soname libstat_socket.so "$_statlib" 2>/dev/null \
+            || warn "patchelf unavailable — libstat_socket.so may not resolve."
         ldconfig
-        info "Linked libstat_socket.so → libunit_script.so (trunk-recorder loads it unconditionally)."
+        info "Provided libstat_socket.so (no-op) for trunk-recorder's unconditional plugin load."
     fi
     # The runnable config is generated later by write_trunk_recorder_config() into
     # rdio-scanner's base dir, once the server is up and an API key can be seeded.
