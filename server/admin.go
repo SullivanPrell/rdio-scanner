@@ -195,6 +195,26 @@ func (admin *Admin) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 
 			admin.Controller.Dirwatches.Stop()
 
+			// Snapshot the bridge-relevant option values so we can restart the
+			// bridge AT MOST ONCE per save, and only when one of them actually
+			// changed. A typical save payload carries both the "bridge" and
+			// "options" keys, and restarting on each (as the old inline calls did)
+			// tore the bridge down and rebuilt it twice — dropping any in-progress
+			// call even when nothing bridge-related was edited. BridgeChannels is a
+			// slice, so we compare a marshaled form (encoding/json is already in use
+			// throughout this package) rather than reaching for reflect.
+			bridgeFingerprint := func() string {
+				opts := admin.Controller.Options
+				b, _ := json.Marshal([]any{
+					opts.BridgeEnabled,
+					opts.BridgeHost,
+					opts.BridgePort,
+					opts.BridgeChannels,
+				})
+				return string(b)
+			}
+			bridgeBefore := bridgeFingerprint()
+
 			switch v := m["access"].(type) {
 			case []any:
 				admin.Controller.Accesses.FromMap(v)
@@ -272,7 +292,25 @@ func (admin *Admin) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					logError(err)
 				}
-				admin.Controller.Bridge.Restart()
+				// Proactively validate that every bridge channel's refs resolve to a
+				// configured system/talkgroup, and warn at save time for any that
+				// don't. Otherwise a typo'd ref looks like "audio works but nothing
+				// shows up" — the mismatch is only surfaced later, per dropped call,
+				// in IngestCall.
+				for _, ch := range admin.Controller.Options.BridgeChannels {
+					label := ch.Label
+					if label == "" {
+						label = fmt.Sprintf("channel %d", ch.ChannelIndex)
+					}
+					system, ok := admin.Controller.Systems.GetSystemByRef(ch.SystemRef)
+					if !ok {
+						admin.Controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("bridge channel %q: systemRef %d is not a configured system; its calls will be dropped", label, ch.SystemRef))
+						continue
+					}
+					if _, ok := system.Talkgroups.GetTalkgroupByRef(ch.TalkgroupRef); !ok {
+						admin.Controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("bridge channel %q: talkgroupRef %d is not a configured talkgroup in system %q (systemRef %d); its calls will be dropped", label, ch.TalkgroupRef, system.Label, ch.SystemRef))
+					}
+				}
 			}
 
 			switch v := m["options"].(type) {
@@ -282,6 +320,12 @@ func (admin *Admin) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					logError(err)
 				}
+			}
+
+			// Restart the bridge exactly once, after both the "bridge" and
+			// "options" sections have been applied and persisted, and only if a
+			// bridge-relevant value actually changed since the snapshot above.
+			if bridgeFingerprint() != bridgeBefore {
 				admin.Controller.Bridge.Restart()
 			}
 
