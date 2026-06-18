@@ -170,6 +170,7 @@ async function provision() {
       title: result.success ? `Provisioned with ${problems.length} problem(s)` : 'SDRangel provision failed',
       description: problems[0] ?? 'See the provision output below.',
       color: result.success ? 'warning' : 'error',
+      duration: 0, // persist — a provision problem shouldn't auto-dismiss before it's read
     })
   } else {
     toast.add({ title: 'SDRangel provisioned', color: 'success' })

@@ -257,7 +257,9 @@ export const useAdmin = () => {
 
   const handleError = (err: unknown, context: string) => {
     const msg = err instanceof Error ? err.message : String(err)
-    toast.add({ title: `${context} failed`, description: msg, color: 'error' })
+    // duration: 0 keeps error toasts open until dismissed (reka-ui disables the
+    // auto-close timer for duration <= 0) so a failure can't scroll past unseen.
+    toast.add({ title: `${context} failed`, description: msg, color: 'error', duration: 0 })
     console.error(`[admin] ${context}:`, err)
   }
 
