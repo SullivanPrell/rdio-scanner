@@ -494,6 +494,19 @@ if [[ "$SKIP_BUILD" == false ]]; then
     )
     info "Nuxt client built → server/webapp/"
 
+    # setup.sh runs as root, so building the client leaves root-owned artifacts in
+    # the user's repo (node_modules, .nuxt, .output, .yarn, server/webapp). Hand them
+    # back to the repo owner so a later `git pull` or a manual `yarn` run as the
+    # normal user doesn't fail with EACCES on root-owned files.
+    if [[ -n "${SUDO_USER:-}" ]] && id "$SUDO_USER" &>/dev/null; then
+        chown -R "$SUDO_USER:$(id -gn "$SUDO_USER")" \
+            "${REPO_ROOT}/client-nuxt/node_modules" \
+            "${REPO_ROOT}/client-nuxt/.nuxt" \
+            "${REPO_ROOT}/client-nuxt/.output" \
+            "${REPO_ROOT}/client-nuxt/.yarn" \
+            "${REPO_ROOT}/server/webapp" 2>/dev/null || true
+    fi
+
     step "Compiling rdio-scanner server binary"
     (
         cd "${REPO_ROOT}/server"
