@@ -141,6 +141,12 @@ async function provision() {
     freqsByDevice.set(ch.deviceSetIndex, arr)
   }
 
+  // Pin each device set to a specific dongle assigned to SDRangel (by serial), so
+  // SDRangel uses only its dongles and leaves the trunk-recorder ones alone.
+  const sdrangelSerials = bridge.value.sdrDeviceAssignments
+    .filter(a => a.assignTo === 'sdrangel')
+    .map(a => a.serialNumber)
+
   const deviceSets = [...freqsByDevice.entries()].map(([index, freqs]) => {
     const min = Math.min(...freqs)
     const max = Math.max(...freqs)
@@ -155,7 +161,7 @@ async function provision() {
         color: 'warning',
       })
     }
-    return { index, hwType: 'RTLSDR', sequence: index, centerFrequencyHz: center, sampleRateHz: SDR_SAMPLE_RATE }
+    return { index, hwType: 'RTLSDR', sequence: index, serial: sdrangelSerials[index] ?? '', centerFrequencyHz: center, sampleRateHz: SDR_SAMPLE_RATE }
   })
 
   const result = await admin.provisionSDRangel({ deviceSets, channels: bridge.value.channels.filter(c => c.deviceSetIndex >= 0) })
@@ -540,7 +546,11 @@ function autoAssignDevices() {
     }
   }
   const needed = windowStarts.length
-  const available = dongles.value.length || 4
+  // Only the dongles assigned to SDRangel are available to the bridge — the rest
+  // are reserved for trunk-recorder. Fall back to all detected dongles when no
+  // assignment has been made yet.
+  const sdrangelCount = bridge.value.sdrDeviceAssignments.filter(a => a.assignTo === 'sdrangel').length
+  const available = sdrangelCount || dongles.value.length || 4
 
   // Map a frequency to its ~2 MHz window index (the highest window start ≤ freq).
   const windowForFreq = (hz: number) => {

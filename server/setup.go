@@ -64,6 +64,7 @@ type SDRangelDeviceSetConfig struct {
 	Index             int    `json:"index"`
 	HwType            string `json:"hwType"`
 	Sequence          int    `json:"sequence"`
+	Serial            string `json:"serial,omitempty"` // pin to a specific dongle by serial
 	CenterFrequencyHz uint   `json:"centerFrequencyHz"`
 	SampleRateHz      uint   `json:"sampleRateHz"`
 }
@@ -115,6 +116,33 @@ func (c *sdrangelClient) getJSON(path string, out interface{}) error {
 	}
 	defer resp.Body.Close()
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// sdrangelDevicesResponse is GET /sdrangel/devices — the physical devices
+// available to SDRangel with their enumeration sequence and serial number.
+type sdrangelDevicesResponse struct {
+	Devices []struct {
+		HwType   string `json:"hwType"`
+		Serial   string `json:"serial"`
+		Sequence int    `json:"sequence"`
+	} `json:"devices"`
+}
+
+// devicesBySerial maps each available device's serial to its SDRangel sequence,
+// so a caller that knows a dongle by serial (from the SDR Devices assignment) can
+// target that exact physical dongle instead of relying on enumeration order.
+func (c *sdrangelClient) devicesBySerial(direction int) (map[string]int, error) {
+	var resp sdrangelDevicesResponse
+	if err := c.getJSON(fmt.Sprintf("/devices?direction=%d", direction), &resp); err != nil {
+		return nil, err
+	}
+	m := map[string]int{}
+	for _, d := range resp.Devices {
+		if d.Serial != "" {
+			m[d.Serial] = d.Sequence
+		}
+	}
+	return m, nil
 }
 
 func (c *sdrangelClient) postJSON(path string, body interface{}, out interface{}) error {
@@ -346,6 +374,22 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 		centerFreq[d.Index] = d.CenterFrequencyHz
 	}
 
+	// If device sets are pinned to specific dongles by serial (the SDR Devices
+	// assignment), resolve each serial to its SDRangel sequence so we assign those
+	// exact physical dongles — not whatever enumeration order sequence 0,1,… happen
+	// to be, which could be a dongle reserved for trunk-recorder.
+	serialSeq := map[string]int{}
+	for _, d := range dsCfgs {
+		if d.Serial != "" {
+			if m, err := c.devicesBySerial(0); err == nil {
+				serialSeq = m
+			} else {
+				result.Messages = append(result.Messages, fmt.Sprintf("warning: could not list SDRangel devices to honor dongle assignment: %v", err))
+			}
+			break
+		}
+	}
+
 	// Ensure required device sets exist and are configured
 	for _, dsCfg := range dsCfgs {
 		createdSet := false
@@ -372,8 +416,17 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 			settle("device-set construction", 90*time.Second)
 		}
 
-		// Assign the sampling device and confirm it took (see setDevice).
-		if err := c.setDevice(dsCfg.Index, dsCfg.HwType, dsCfg.Sequence); err != nil {
+		// Assign the sampling device and confirm it took (see setDevice). When the
+		// device set is pinned to a serial, use that dongle's resolved sequence.
+		seq := dsCfg.Sequence
+		if dsCfg.Serial != "" {
+			if s, ok := serialSeq[dsCfg.Serial]; ok {
+				seq = s
+			} else {
+				result.Messages = append(result.Messages, fmt.Sprintf("warning: dongle serial %s not found in SDRangel — using sequence %d", dsCfg.Serial, dsCfg.Sequence))
+			}
+		}
+		if err := c.setDevice(dsCfg.Index, dsCfg.HwType, seq); err != nil {
 			result.Messages = append(result.Messages, fmt.Sprintf("failed to assign device %d (%s): %v", dsCfg.Index, dsCfg.HwType, err))
 			continue
 		}
@@ -400,7 +453,7 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 			result.Messages = append(result.Messages, fmt.Sprintf("device set %d: cleared %d existing channel(s)", dsCfg.Index, n))
 		}
 
-		result.Messages = append(result.Messages, fmt.Sprintf("device set %d: %s seq=%d center=%d Hz SR=%d", dsCfg.Index, dsCfg.HwType, dsCfg.Sequence, dsCfg.CenterFrequencyHz, sr))
+		result.Messages = append(result.Messages, fmt.Sprintf("device set %d: %s seq=%d serial=%q center=%d Hz SR=%d", dsCfg.Index, dsCfg.HwType, seq, dsCfg.Serial, dsCfg.CenterFrequencyHz, sr))
 
 		// The device settings/clear spin up FFT work; blind-wait it out before the
 		// next step (no probing — a concurrent request would race and crash it).
