@@ -787,11 +787,15 @@ fi
 # ── Start services now ─────────────────────────────────────────────────────
 
 step "Starting services"
+# Use `restart`, not `start`: on a re-run the service is already active, and
+# `start` is a no-op there — it would keep serving the OLD binary (with the old
+# embedded webapp), so freshly-built changes never take effect. restart starts a
+# stopped service and reloads a running one with the just-built binary.
 if [[ "$SKIP_SDRANGEL" == false ]] && [[ -x /usr/bin/sdrangelsrv ]]; then
-    systemctl start sdrangelsrv || warn "sdrangelsrv did not start — run: journalctl -u sdrangelsrv"
+    systemctl restart sdrangelsrv || warn "sdrangelsrv did not start — run: journalctl -u sdrangelsrv"
     sleep 1
 fi
-systemctl start rdio-scanner || warn "rdio-scanner did not start — run: journalctl -u rdio-scanner"
+systemctl restart rdio-scanner || warn "rdio-scanner did not start — run: journalctl -u rdio-scanner"
 
 # ── Wire trunk-recorder into the now-running server ────────────────────────
 # Needs rdio-scanner up so we can register the upload API key over its admin API.
