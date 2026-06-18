@@ -33,7 +33,7 @@ const importLoading = ref(false)
 const importResult = ref<unknown>(null)
 
 const standardProtocolOptions = [
-  { label: 'Auto-detect from CSV', value: '' },
+  { label: 'Auto-detect from CSV', value: 'auto' },
   { label: 'NFM (narrowband FM)', value: 'nfm' },
   { label: 'AM', value: 'am' },
   { label: 'P25', value: 'p25' },
@@ -49,6 +49,14 @@ const trunkKindOptions = [
 const typeOptions = computed(() =>
   importUsage.value === 'trunk' ? trunkKindOptions : standardProtocolOptions,
 )
+
+// Reka rejects a select item whose value is the empty string, so "auto-detect"
+// is the 'auto' sentinel in the dropdown while importProtocol stays '' on the
+// wire (what the import endpoints expect for auto-detect).
+const importProtocolModel = computed({
+  get: () => importProtocol.value || 'auto',
+  set: (v: string) => { importProtocol.value = v === 'auto' ? '' : v },
+})
 
 watch(importFormat, fmt => {
   if (fmt === 'chirp') importUsage.value = 'standard'
@@ -250,7 +258,7 @@ useHead({ title: 'Tools – Admin – Rdio Scanner' })
               ? 'Trunking protocol of this system'
               : 'Channel modulation — Auto-detect reads the mode from the CSV'"
           >
-            <USelect v-model="importProtocol" :items="typeOptions" class="max-w-xs" />
+            <USelect v-model="importProtocolModel" :items="typeOptions" class="max-w-xs" />
           </UFormField>
 
           <!-- System label & ref -->

@@ -889,14 +889,14 @@ const trSystemOptions = computed(() => [
               <td class="px-3 py-2 font-mono text-neutral-400">{{ dongle.serialNumber }}</td>
               <td class="px-3 py-2">
                 <USelect
-                  :model-value="dongleAssignment(dongle.index)"
+                  :model-value="dongleAssignment(dongle.index) || 'unassigned'"
                   size="xs"
                   :items="[
-                    { label: 'Unassigned', value: '' },
+                    { label: 'Unassigned', value: 'unassigned' },
                     { label: 'SDRangel', value: 'sdrangel' },
                     { label: 'Trunk-Recorder', value: 'trunk-recorder' },
                   ]"
-                  @update:model-value="v => setDongleAssignment(dongle, v as '' | 'sdrangel' | 'trunk-recorder')"
+                  @update:model-value="v => setDongleAssignment(dongle, (v === 'unassigned' ? '' : v) as '' | 'sdrangel' | 'trunk-recorder')"
                 />
               </td>
             </tr>
