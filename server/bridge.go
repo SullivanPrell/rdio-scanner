@@ -34,8 +34,8 @@ type BridgeChannelConfig struct {
 	DeviceSetIndex int    `json:"deviceSetIndex"`
 	FrequencyHz    uint   `json:"frequencyHz"`
 	Label          string `json:"label"`
-	Protocol       string `json:"protocol"`   // demod: "nfm" (default), "am", "usb", "lsb"
-	SquelchDB      int    `json:"squelchDb"`  // SDRangel squelch threshold, dB (0 ⇒ default -50)
+	Protocol       string `json:"protocol"`  // demod: "nfm" (default), "am", "usb", "lsb"
+	SquelchDB      int    `json:"squelchDb"` // SDRangel squelch threshold, dB (0 ⇒ default -50)
 	SampleRate     int    `json:"sampleRate"`
 	SystemRef      uint   `json:"systemRef"`
 	TalkgroupRef   uint   `json:"talkgroupRef"`
@@ -198,6 +198,7 @@ type BridgeStatus struct {
 type Bridge struct {
 	Controller *Controller
 	cancel     context.CancelFunc
+	wg         sync.WaitGroup
 	mutex      sync.Mutex
 }
 
@@ -222,6 +223,7 @@ func (b *Bridge) Start() {
 	b.cancel = cancel
 
 	for _, cfg := range channels {
+		b.wg.Add(1)
 		go b.monitorChannel(ctx, cfg)
 	}
 
@@ -230,14 +232,22 @@ func (b *Bridge) Start() {
 
 func (b *Bridge) Stop() {
 	b.mutex.Lock()
-	defer b.mutex.Unlock()
 
 	if b.cancel == nil {
+		b.mutex.Unlock()
 		return
 	}
 
 	b.cancel()
 	b.cancel = nil
+
+	b.mutex.Unlock()
+
+	// Wait outside the lock for every monitorChannel goroutine (and the UDP
+	// readers they own) to exit and close their sockets. This guarantees a
+	// subsequent Start() can rebind the same ports without racing the old
+	// listeners (EADDRINUSE).
+	b.wg.Wait()
 
 	b.Controller.Logs.LogEvent(LogLevelInfo, "sdrangel bridge stopped")
 }
@@ -315,6 +325,10 @@ func rtpPayloadOffset(pkt []byte) int {
 }
 
 func (b *Bridge) monitorChannel(ctx context.Context, cfg BridgeChannelConfig) {
+	// Signal Stop()'s WaitGroup last, once this goroutine and everything it
+	// owns (the UDP reader, the socket) are fully done.
+	defer b.wg.Done()
+
 	sampleRate := cfg.SampleRate
 	if sampleRate <= 0 {
 		sampleRate = 8000
@@ -332,11 +346,14 @@ func (b *Bridge) monitorChannel(ctx context.Context, cfg BridgeChannelConfig) {
 		return
 	}
 
-	// Close the UDP connection when the bridge is stopped.
-	go func() {
-		<-ctx.Done()
-		conn.Close()
-	}()
+	// This goroutine OWNS the socket: it is closed here, deterministically,
+	// only after the reader goroutine has been joined (readerWG.Wait below) so
+	// conn is never used after Close. Deferred LIFO order matters — readerWG is
+	// declared after conn so its Wait runs before conn.Close().
+	defer conn.Close()
+
+	var readerWG sync.WaitGroup
+	defer readerWG.Wait()
 
 	seg := &callSegmenter{hangTime: bridgeHangTime, maxDur: bridgeMaxCallDur}
 
@@ -364,7 +381,9 @@ func (b *Bridge) monitorChannel(ctx context.Context, cfg BridgeChannelConfig) {
 	// stream and stick with it: RTP framing is only confirmed after two
 	// consecutive datagrams share an SSRC and carry a monotonic sequence number,
 	// so genuine PCM (which can briefly look RTP-shaped) is never mis-stripped.
+	readerWG.Add(1)
 	go func() {
+		defer readerWG.Done()
 		defer close(audioCh)
 		var (
 			rtpDecided bool
@@ -394,10 +413,15 @@ func (b *Bridge) monitorChannel(ctx context.Context, cfg BridgeChannelConfig) {
 				}
 
 				payload := data
-				if rtpFramed {
-					if off := rtpPayloadOffset(data); off >= 0 {
-						payload = data[off:]
-					}
+				// Once framing is decided, RTP packets are always stripped.
+				// Before that, optimistically strip the header of any RTP-
+				// shaped datagram too: this avoids leaking the first packet's
+				// RTP header on a genuinely RTP-framed stream, and for raw L16
+				// PCM that merely looks RTP-shaped it costs only ~12 bytes once
+				// at stream start. Non-RTP-shaped packets are always forwarded
+				// whole (raw PCM).
+				if off := rtpPayloadOffset(data); off >= 0 && (rtpFramed || !rtpDecided) {
+					payload = data[off:]
 				}
 
 				chunk := make([]byte, len(payload))
