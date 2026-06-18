@@ -192,14 +192,11 @@ func GenerateTrunkRecorderConfig(req TrunkRecorderGenRequest, systems []*System,
 		}}
 	}
 
-	// Guardrail: a single system's control channels must all fall within one source's
-	// bandwidth, or trunk-recorder SEGVs at startup when it tries to retune the
-	// control-channel decoder across a dongle boundary. Validate before we hand the
-	// config back so the operator gets a clear error instead of a status=11/SEGV.
-	if err := validateControlChannelCoverage(req.ControlChannels, sources); err != nil {
-		return nil, err
-	}
-
+	// The cross-source control-channel hazard (control channels that span more than
+	// one source's bandwidth) is NOT a hard failure here: generation always returns
+	// a saved config so the operator can review and tune it. It's surfaced as a
+	// warning by the handler and re-checked — and refused — only at trunk-recorder
+	// start, where a genuinely-unsafe config would actually crash (status=11/SEGV).
 	cfg := &TrunkRecorderConfig{
 		Ver:     2,
 		Sources: sources,
@@ -570,6 +567,13 @@ func (admin *Admin) TrunkRecorderConfigHandler(w http.ResponseWriter, r *http.Re
 		} else {
 			saveMsg = fmt.Sprintf("config saved to %s", savePath)
 		}
+	}
+
+	// Surface the cross-source control-channel hazard as a non-fatal warning so the
+	// operator sees it but still gets a saved config. It is enforced (refused) only
+	// at trunk-recorder start, where a genuinely-unsafe config would actually SEGV.
+	if covErr := validateControlChannelCoverage(req.ControlChannels, cfg.Sources); covErr != nil {
+		saveMsg = appendMsg(saveMsg, "warning: "+covErr.Error())
 	}
 
 	// Make rdio-scanner actually ingest what trunk-recorder records. trunk-recorder
