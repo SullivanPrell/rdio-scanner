@@ -138,23 +138,50 @@ func (c *sdrangelClient) postJSON(path string, body interface{}, out interface{}
 	return nil
 }
 
-func (c *sdrangelClient) putJSON(path string, body interface{}) error {
-	b, err := json.Marshal(body)
+// setDevice assigns a sampling device (e.g. RTLSDR) to a device set and confirms
+// it actually stuck. SDRangel creates a device set asynchronously; a device PUT
+// fired before the new set is ready is silently dropped, leaving the default
+// FileInput in place — and "device run" then starts FileInput with no RF, so no
+// audio ever flows. The PUT echoes the assigned device's hwType on success (or
+// {"message": ...} on failure), so retry until the echoed hwType matches what we
+// asked for, waiting for the set to settle between attempts.
+func (c *sdrangelClient) setDevice(dsIndex int, hwType string, sequence int) error {
+	body, err := json.Marshal(map[string]interface{}{
+		"hwType":    hwType,
+		"sequence":  sequence,
+		"direction": 0,
+	})
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPut, c.apiURL(path), bytes.NewReader(b))
-	if err != nil {
-		return err
+	last := "no response"
+	for try := 0; try < 5; try++ {
+		req, err := http.NewRequest(http.MethodPut, c.apiURL(fmt.Sprintf("/deviceset/%d/device", dsIndex)), bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		var ack struct {
+			HwType  string `json:"hwType"`
+			Message string `json:"message"`
+		}
+		if resp, err := c.http.Do(req); err != nil {
+			last = err.Error()
+		} else {
+			json.NewDecoder(resp.Body).Decode(&ack)
+			resp.Body.Close()
+			if ack.HwType == hwType {
+				return nil // the set echoed the device back → assignment took
+			}
+			if ack.Message != "" {
+				last = ack.Message
+			} else if ack.HwType != "" {
+				last = fmt.Sprintf("device set still on %q", ack.HwType)
+			}
+		}
+		c.waitReady(20 * time.Second) // let the set settle, then retry
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	io.ReadAll(resp.Body)
-	return nil
+	return fmt.Errorf("not assigned after retries: %s", last)
 }
 
 func (c *sdrangelClient) patchJSON(path string, body interface{}) error {
@@ -307,6 +334,7 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 
 	// Ensure required device sets exist and are configured
 	for _, dsCfg := range dsCfgs {
+		createdSet := false
 		for devResp.DevicesetCount <= dsCfg.Index {
 			var created struct {
 				DevicesetIndex int `json:"devicesetIndex"`
@@ -316,16 +344,19 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 				return result, updated
 			}
 			devResp.DevicesetCount++
+			createdSet = true
 			result.Messages = append(result.Messages, fmt.Sprintf("created device set %d", created.DevicesetIndex))
 		}
 
-		// Set device (RTL-SDR or other)
-		if err := c.putJSON(fmt.Sprintf("/deviceset/%d/device", dsCfg.Index), map[string]interface{}{
-			"hwType":    dsCfg.HwType,
-			"sequence":  dsCfg.Sequence,
-			"direction": 0,
-		}); err != nil {
-			result.Messages = append(result.Messages, fmt.Sprintf("failed to set device %d: %v", dsCfg.Index, err))
+		// A freshly-created device set needs a moment before it will accept a
+		// device assignment; assigning too early is dropped (leaving FileInput).
+		if createdSet {
+			c.waitReady(30 * time.Second)
+		}
+
+		// Assign the sampling device and confirm it took (see setDevice).
+		if err := c.setDevice(dsCfg.Index, dsCfg.HwType, dsCfg.Sequence); err != nil {
+			result.Messages = append(result.Messages, fmt.Sprintf("failed to assign device %d (%s): %v", dsCfg.Index, dsCfg.HwType, err))
 			continue
 		}
 
