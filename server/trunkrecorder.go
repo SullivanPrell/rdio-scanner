@@ -455,18 +455,94 @@ func NewTrunkRecorderServiceManager() *TrunkRecorderServiceManager {
 	}
 }
 
-// mode returns "docker" only when a container name is explicitly configured
-// AND the Docker socket is reachable. Native is the default.
+// mode picks the control plane. Docker when a container name is configured AND the
+// socket is reachable; otherwise systemd when the trunk-recorder.service unit is
+// installed (setup.sh installs it) so Start/Stop/Restart go through systemctl and
+// logs through journalctl — one robust control plane that also survives reboots
+// and rdio-scanner restarts. Native (a child process of rdio-scanner) is the
+// fallback only when no unit is present.
 func (m *TrunkRecorderServiceManager) mode(containerName string) string {
-	if containerName == "" {
-		return "native"
+	if containerName != "" {
+		conn, err := net.Dial("unix", "/var/run/docker.sock")
+		if err == nil {
+			conn.Close()
+			return "docker"
+		}
 	}
-	conn, err := net.Dial("unix", "/var/run/docker.sock")
-	if err == nil {
-		conn.Close()
-		return "docker"
+	if trunkRecorderSystemdInstalled() {
+		return "systemd"
 	}
 	return "native"
+}
+
+// trunkRecorderUnit is the systemd unit setup.sh installs.
+const trunkRecorderUnit = "trunk-recorder.service"
+
+// trunkRecorderSystemdInstalled reports whether the systemd unit file is present.
+func trunkRecorderSystemdInstalled() bool {
+	for _, p := range []string{
+		"/etc/systemd/system/" + trunkRecorderUnit,
+		"/lib/systemd/system/" + trunkRecorderUnit,
+		"/usr/lib/systemd/system/" + trunkRecorderUnit,
+	} {
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// systemdStatus reads the unit's active state and main PID (no privileges needed).
+func (m *TrunkRecorderServiceManager) systemdStatus() TrunkRecorderServiceStatus {
+	st := TrunkRecorderServiceStatus{Mode: "systemd"}
+	active, _ := exec.Command("systemctl", "is-active", trunkRecorderUnit).Output()
+	state := strings.TrimSpace(string(active))
+	st.Running = state == "active"
+	if st.Running {
+		st.Message = "running (systemd)"
+		if out, err := exec.Command("systemctl", "show", "-p", "MainPID", "--value", trunkRecorderUnit).Output(); err == nil {
+			if pid, e := strconv.Atoi(strings.TrimSpace(string(out))); e == nil {
+				st.PID = pid
+			}
+		}
+	} else {
+		if state == "" {
+			state = "unknown"
+		}
+		st.Message = state // inactive | failed | activating | ...
+	}
+	return st
+}
+
+// systemdAction runs systemctl start/stop/restart on the unit. The service user
+// needs polkit authorization (setup.sh installs a rule); surface that if missing.
+func (m *TrunkRecorderServiceManager) systemdAction(action string) TrunkRecorderServiceResult {
+	out, err := exec.Command("systemctl", action, trunkRecorderUnit).CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		low := strings.ToLower(msg)
+		if strings.Contains(low, "interactive authentication required") || strings.Contains(low, "access denied") {
+			msg += " — the service user can't manage the unit; re-run setup.sh to install the polkit rule"
+		}
+		return TrunkRecorderServiceResult{Message: fmt.Sprintf("systemctl %s failed: %s", action, msg)}
+	}
+	return TrunkRecorderServiceResult{Success: true, Message: fmt.Sprintf("trunk-recorder %sed (systemd)", action)}
+}
+
+// systemdLogs returns the unit's recent journal lines (needs systemd-journal group).
+func systemdLogs(tail int) []string {
+	out, err := exec.Command("journalctl", "-u", trunkRecorderUnit, "-n", strconv.Itoa(tail), "--no-pager", "-o", "short-iso").CombinedOutput()
+	if err != nil {
+		return []string{"journalctl unavailable (service user may need the systemd-journal group): " + strings.TrimSpace(string(out))}
+	}
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	if len(lines) == 0 || (len(lines) == 1 && lines[0] == "") {
+		return []string{"No journal output yet. Start trunk-recorder to see logs here."}
+	}
+	return lines
 }
 
 func (m *TrunkRecorderServiceManager) dockerStatus(containerName string) TrunkRecorderServiceStatus {
@@ -675,44 +751,63 @@ func (m *TrunkRecorderServiceManager) nativeStop() TrunkRecorderServiceResult {
 }
 
 func (m *TrunkRecorderServiceManager) Status(containerName, binaryPath string) TrunkRecorderServiceStatus {
-	if m.mode(containerName) == "docker" {
+	switch m.mode(containerName) {
+	case "docker":
 		return m.dockerStatus(containerName)
+	case "systemd":
+		return m.systemdStatus()
+	default:
+		return m.nativeStatus(binaryPath)
 	}
-	return m.nativeStatus(binaryPath)
 }
 
 func (m *TrunkRecorderServiceManager) Start(containerName, binaryPath, configPath string) TrunkRecorderServiceResult {
-	if m.mode(containerName) == "docker" {
+	switch m.mode(containerName) {
+	case "docker":
 		return m.dockerStart(containerName)
+	case "systemd":
+		return m.systemdAction("start")
+	default:
+		return m.nativeStart(binaryPath, configPath)
 	}
-	return m.nativeStart(binaryPath, configPath)
 }
 
 func (m *TrunkRecorderServiceManager) Stop(containerName string) TrunkRecorderServiceResult {
-	if m.mode(containerName) == "docker" {
+	switch m.mode(containerName) {
+	case "docker":
 		return m.dockerStop(containerName)
+	case "systemd":
+		return m.systemdAction("stop")
+	default:
+		return m.nativeStop()
 	}
-	return m.nativeStop()
 }
 
 func (m *TrunkRecorderServiceManager) Restart(containerName, binaryPath, configPath string) TrunkRecorderServiceResult {
+	// systemd restarts atomically; native must stop (and wait) before starting.
+	if m.mode(containerName) == "systemd" {
+		return m.systemdAction("restart")
+	}
 	stop := m.Stop(containerName)
 	if !stop.Success {
 		return stop
 	}
-	// nativeStop waits for the process to fully exit, so no sleep needed here
 	return m.Start(containerName, binaryPath, configPath)
 }
 
 func (m *TrunkRecorderServiceManager) Logs(containerName string, tail int) []string {
-	if m.mode(containerName) == "docker" {
+	switch m.mode(containerName) {
+	case "docker":
 		return dockerLogs(containerName, tail)
+	case "systemd":
+		return systemdLogs(tail)
+	default:
+		lines := m.nativeLogs.Lines(tail)
+		if len(lines) == 0 {
+			return []string{"No output captured yet. Start trunk-recorder to see logs here."}
+		}
+		return lines
 	}
-	lines := m.nativeLogs.Lines(tail)
-	if len(lines) == 0 {
-		return []string{"No output captured yet. Start trunk-recorder to see logs here."}
-	}
-	return lines
 }
 
 // ── Admin HTTP handlers ────────────────────────────────────────────────────

@@ -772,6 +772,36 @@ if [[ "$SKIP_SDRANGEL" == false ]] && [[ -x /usr/bin/sdrangelsrv ]]; then
     info "sdrangelsrv.service enabled (auto-start on boot)."
 fi
 
+# ── Admin-UI control of the SDR services ───────────────────────────────────
+# rdio-scanner runs as the unprivileged service user but its admin UI drives the
+# trunk-recorder (and sdrangelsrv) systemd units for Start/Stop/Restart and reads
+# their journals. Grant exactly that: a polkit rule for managing those two units,
+# and journal read access — so the UI is the single control plane with no sudo.
+step "Granting the admin UI control of the SDR services"
+
+usermod -aG systemd-journal "$RDIO_USER" 2>/dev/null \
+    && info "Added ${RDIO_USER} to systemd-journal (Live Logs can read the journal)." \
+    || warn "Could not add ${RDIO_USER} to systemd-journal — UI Live Logs may be empty."
+
+install -d -m 0755 /etc/polkit-1/rules.d
+cat > /etc/polkit-1/rules.d/49-rdio-scanner.rules <<POLKIT
+// Allow the rdio-scanner service user to Start/Stop/Restart the SDR services from
+// the admin UI without a password. Scoped to just these two units.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        subject.user == "${RDIO_USER}") {
+        var unit = action.lookup("unit");
+        if (unit == "trunk-recorder.service" || unit == "sdrangelsrv.service") {
+            return polkit.Result.YES;
+        }
+    }
+});
+POLKIT
+systemctl restart polkit 2>/dev/null || systemctl reload polkit 2>/dev/null || true
+info "polkit rule installed — admin UI can manage trunk-recorder/sdrangelsrv."
+# The journal-group membership applies to rdio-scanner the next time it starts —
+# the "Starting services" step below restarts it, so the UI picks it up this run.
+
 # ── Journal size limit ─────────────────────────────────────────────────────
 
 mkdir -p /etc/systemd/journald.conf.d
