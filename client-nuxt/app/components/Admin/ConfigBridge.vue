@@ -184,11 +184,9 @@ async function provision() {
 // ── Trunk-recorder actions ────────────────────────────────────────────────────
 async function trAction(action: 'start' | 'stop' | 'restart') {
   trActioning.value = true
-  const result = await admin.trServiceAction(
-    action,
-    bridge.value.trunkRecorderBinaryPath || undefined,
-    bridge.value.trunkRecorderConfigPath || undefined,
-  )
+  // Paths are managed server-side (default to the install location and the
+  // server's base dir), so we don't pass them — nothing for the operator to set.
+  const result = await admin.trServiceAction(action)
   trActioning.value = false
   toast.add({
     title: result.success ? `trunk-recorder ${action}ed` : `Failed to ${action} trunk-recorder`,
@@ -223,12 +221,11 @@ async function generateTRConfig() {
     systemRef: trGenSystemRef.value,
     controlChannels: freqs,
     systemType: trGenSystemType.value,
-    configPath: bridge.value.trunkRecorderConfigPath || undefined,
   })
   trGenerating.value = false
 
   if (result) {
-    trGenMessage.value = result.saveMessage ?? 'Config generated (no save path set — configure Config File Path to save on server)'
+    trGenMessage.value = result.saveMessage ?? 'Config generated and saved.'
     toast.add({ title: 'Config generated', description: trGenMessage.value, color: 'success' })
   }
 }
@@ -669,23 +666,12 @@ const trSystemOptions = computed(() => [
         <p v-if="trSvc.message" class="text-xs text-neutral-500">{{ trSvc.message }}</p>
       </div>
 
-      <!-- Process settings -->
-      <div>
-        <p class="text-xs font-semibold text-neutral-400 uppercase tracking-wide mb-2">Process</p>
-        <div class="grid grid-cols-2 gap-3">
-          <UFormField label="Binary Path" description="Path to trunk-recorder binary (native, recommended)">
-            <UInput v-model="bridge.trunkRecorderBinaryPath" placeholder="/usr/local/bin/trunk-recorder" />
-          </UFormField>
-          <UFormField label="Container Name" description="Docker container name (if using Docker)">
-            <UInput v-model="bridge.trunkRecorderContainerName" placeholder="trunk-recorder" />
-          </UFormField>
-        </div>
-        <div class="mt-3">
-          <UFormField label="Config File Path" description="Where trunk-recorder.json lives on this Pi (used for Start and Generate)">
-            <UInput v-model="bridge.trunkRecorderConfigPath" placeholder="/etc/trunk-recorder/trunk-recorder.json" class="font-mono text-sm" />
-          </UFormField>
-        </div>
-      </div>
+      <!-- Paths are managed automatically (binary at the install location, config
+           in the server's data dir) so there's nothing to configure or get wrong. -->
+      <p class="text-xs text-neutral-500">
+        trunk-recorder runs from its default install location and its config is
+        generated and stored automatically — no paths to configure.
+      </p>
 
       <!-- Config generator -->
       <div class="rounded-lg border border-neutral-800 p-4 space-y-3">

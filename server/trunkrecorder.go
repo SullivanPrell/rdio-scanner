@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -255,6 +256,33 @@ func DetectRTLDongles() ([]RTLDongle, error) {
 	return dongles, nil
 }
 
+// ── Default paths ──────────────────────────────────────────────────────────
+
+// defaultTrunkRecorderBinary is used when no binary path is configured. The
+// binary install location is fixed (setup.sh installs it here), so there's
+// nothing for an operator to configure.
+const defaultTrunkRecorderBinary = "/usr/local/bin/trunk-recorder"
+
+// trConfigPath is where trunk-recorder.json is read and written. It defaults to
+// the server's base dir, which rdio-scanner is guaranteed to own and be able to
+// write (config.go fatals at startup otherwise) — so generating the config never
+// fails with a permission error, regardless of which user runs the server. An
+// explicit option override still wins for advanced setups.
+func (admin *Admin) trConfigPath() string {
+	if p := admin.Controller.Options.TrunkRecorderConfigPath; p != "" {
+		return p
+	}
+	return filepath.Join(admin.Controller.Config.BaseDir, "trunk-recorder.json")
+}
+
+// trBinaryPath returns the configured binary path or the default install location.
+func (admin *Admin) trBinaryPath() string {
+	if p := admin.Controller.Options.TrunkRecorderBinaryPath; p != "" {
+		return p
+	}
+	return defaultTrunkRecorderBinary
+}
+
 // ── Admin HTTP handlers ────────────────────────────────────────────────────
 
 // TrunkRecorderConfigHandler handles POST /api/admin/trunk-recorder/config.
@@ -296,7 +324,7 @@ func (admin *Admin) TrunkRecorderConfigHandler(w http.ResponseWriter, r *http.Re
 	// If configPath is set, also save to disk so trunk-recorder can use it directly.
 	savePath := req.ConfigPath
 	if savePath == "" {
-		savePath = admin.Controller.Options.TrunkRecorderConfigPath
+		savePath = admin.trConfigPath()
 	}
 	var saveMsg string
 	if savePath != "" {
@@ -632,7 +660,7 @@ func (admin *Admin) TrunkRecorderServiceStatusHandler(w http.ResponseWriter, r *
 		return
 	}
 	opts := admin.Controller.Options
-	status := admin.Controller.TRServiceManager.Status(opts.TrunkRecorderContainerName, opts.TrunkRecorderBinaryPath)
+	status := admin.Controller.TRServiceManager.Status(opts.TrunkRecorderContainerName, admin.trBinaryPath())
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(status)
 }
@@ -655,11 +683,11 @@ func (admin *Admin) TrunkRecorderServiceActionHandler(w http.ResponseWriter, r *
 	opts := admin.Controller.Options
 	binaryPath := req.BinaryPath
 	if binaryPath == "" {
-		binaryPath = opts.TrunkRecorderBinaryPath
+		binaryPath = admin.trBinaryPath()
 	}
 	configPath := req.ConfigPath
 	if configPath == "" {
-		configPath = opts.TrunkRecorderConfigPath
+		configPath = admin.trConfigPath()
 	}
 
 	var result TrunkRecorderServiceResult

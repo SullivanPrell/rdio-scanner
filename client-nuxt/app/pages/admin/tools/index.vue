@@ -405,8 +405,9 @@ useHead({ title: 'Tools – Admin – Rdio Scanner' })
 
         <template #footer>
           <div class="text-xs text-neutral-500">
-            After downloading, place <code class="bg-neutral-800 px-1 rounded">trunk-recorder.json</code>
-            in <code class="bg-neutral-800 px-1 rounded">/etc/trunk-recorder/</code> and restart the service.
+            This downloads a copy for inspection. To generate and start trunk-recorder
+            on this Pi, use Config → Bridge → Trunk Recorder — it saves the config
+            automatically, no path needed.
           </div>
         </template>
       </UCard>

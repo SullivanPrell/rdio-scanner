@@ -29,9 +29,11 @@ RDIO_CONF_DIR="/etc/rdio-scanner"
 RDIO_BIN="/usr/local/bin/rdio-scanner"
 
 TR_BIN="/usr/local/bin/trunk-recorder"
-TR_CONF_DIR="/etc/trunk-recorder"
 TR_DATA_DIR="/var/lib/trunk-recorder"
-TR_CONFIG="${TR_CONF_DIR}/config.json"
+# trunk-recorder's config lives in rdio-scanner's base dir — which the server is
+# guaranteed to own and able to write (so the admin UI "Generate" never hits a
+# permission error), not in root-owned /etc. Matches the server default path.
+TR_CONFIG="${RDIO_DATA_DIR}/trunk-recorder.json"
 
 # rdio-scanner API key used by trunk-recorder for call uploads. Generated and
 # seeded into rdio-scanner automatically after the server starts (see
@@ -272,11 +274,8 @@ install_trunk_recorder() {
     fi
     rm -rf "$tr_src"
     info "trunk-recorder ${tr_version} installed to ${TR_BIN}"
-
-    # Config directory only; the runnable config.json is generated later by
-    # configure_trunk_recorder() once the server is up and an API key can be
-    # seeded into rdio-scanner and embedded in the config.
-    install -d -m 0755 "$TR_CONF_DIR"
+    # The runnable config is generated later by write_trunk_recorder_config() into
+    # rdio-scanner's base dir, once the server is up and an API key can be seeded.
 }
 
 # ── trunk-recorder ↔ rdio-scanner wiring (post-startup) ────────────────────
@@ -334,15 +333,17 @@ configure_trunk_recorder() {
         info "Reusing existing 'trunk-recorder' API key."
     else
         local newkey; newkey="$(cat /proc/sys/kernel/random/uuid)"
-        if jq --arg key "$newkey" --arg bin "$TR_BIN" --arg path "$TR_CONFIG" '
+        # Seed the key and clear any stale path options so the server falls back to
+        # its defaults (binary at the install location, config in its base dir).
+        if jq --arg key "$newkey" '
                 .apikeys = ((.apikeys // []) +
                     [{disabled:false, ident:"trunk-recorder", key:$key, systems:"*"}])
-                | .options.trunkRecorderBinaryPath = $bin
-                | .options.trunkRecorderConfigPath = $path
+                | .options.trunkRecorderBinaryPath = ""
+                | .options.trunkRecorderConfigPath = ""
             ' "$cfg" > "${cfg}.new" 2>/dev/null \
            && "$RDIO_BIN" -cmd config-set +url "$url" +token "$token" +in "${cfg}.new" >/dev/null 2>&1; then
             RDIO_API_KEY="$newkey"
-            info "API key 'trunk-recorder' registered; admin UI wired to ${TR_BIN}."
+            info "API key 'trunk-recorder' registered (using default paths)."
         else
             warn "Could not register the key automatically."
             warn "  Add it manually in Admin → Config → API Keys."
@@ -582,12 +583,9 @@ fi
 
 if [[ "$SKIP_TRUNK_RECORDER" == false ]]; then
     install_trunk_recorder
-    # Config + data dirs owned by the rdio service user. rdio-scanner runs as this
-    # user and writes config.json into the config dir (the admin UI "Generate"
-    # button); a root-owned dir there makes that save fail with "permission denied".
-    # trunk-recorder, also running as rdio, then reads the same config. (install -d
-    # re-applies ownership to the dir even if it already exists.)
-    install -d -m 0755 -o "$RDIO_USER" -g "$RDIO_USER" "$TR_CONF_DIR"
+    # Capture dir owned by the rdio service user (trunk-recorder writes audio here).
+    # The config file lives in rdio-scanner's base dir (already created, rdio-owned),
+    # so there's no /etc permission setup to do.
     install -d -m 0750 -o "$RDIO_USER" -g "$RDIO_USER" "$TR_DATA_DIR"
 fi
 
@@ -717,7 +715,7 @@ User=${RDIO_USER}
 Group=plugdev
 SupplementaryGroups=plugdev dialout audio
 WorkingDirectory=${TR_DATA_DIR}
-ExecStart=${TR_BIN} --config ${TR_CONF_DIR}/config.json
+ExecStart=${TR_BIN} --config ${TR_CONFIG}
 Restart=on-failure
 RestartSec=15
 StandardOutput=journal
