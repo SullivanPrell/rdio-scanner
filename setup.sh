@@ -385,6 +385,8 @@ write_trunk_recorder_config() {
 }
 TRCFG
     chmod 0644 "$TR_CONFIG"
+    # Owned by the service user so the admin UI (running as rdio) can regenerate it.
+    chown "$RDIO_USER:$RDIO_USER" "$TR_CONFIG" 2>/dev/null || true
     info "Wrote ${TR_CONFIG} (API key + upload URL embedded)."
 
     # Ready to run only when we have both a real key and a control channel.
@@ -564,7 +566,12 @@ fi
 
 if [[ "$SKIP_TRUNK_RECORDER" == false ]]; then
     install_trunk_recorder
-    # Data dir (writable by rdio service user for captured audio)
+    # Config + data dirs owned by the rdio service user. rdio-scanner runs as this
+    # user and writes config.json into the config dir (the admin UI "Generate"
+    # button); a root-owned dir there makes that save fail with "permission denied".
+    # trunk-recorder, also running as rdio, then reads the same config. (install -d
+    # re-applies ownership to the dir even if it already exists.)
+    install -d -m 0755 -o "$RDIO_USER" -g "$RDIO_USER" "$TR_CONF_DIR"
     install -d -m 0750 -o "$RDIO_USER" -g "$RDIO_USER" "$TR_DATA_DIR"
 fi
 
