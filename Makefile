@@ -76,6 +76,8 @@ run: ## Stop any running instance (service or direct), rebuild everything, and r
 	@cd client-nuxt && yarn build
 	@echo "Building $(app) for $(LOCAL_OS)/$(LOCAL_ARCH)..."
 	@cd server && GOOS=$(LOCAL_OS) GOARCH=$(LOCAL_ARCH) go build -o ../$(LOCAL_BIN)
+	@echo "Releasing RTL-SDR dongles from the DVB kernel driver..."
+	@bash scripts/sdr-dvb-prep.sh || true
 	@echo "Preparing headless audio sink (SDRangel)..."
 	@bash scripts/sdr-audio-prep.sh || true
 	@echo "Starting $(app)..."

@@ -431,7 +431,13 @@ cat > /etc/modprobe.d/rtlsdr-blacklist.conf <<'EOF'
 blacklist dvb_usb_rtl28xxu
 blacklist dvb_usb_v2
 blacklist dvb_core
+blacklist rtl2832
+blacklist rtl2830
 EOF
+
+# The blacklist only stops auto-load on boot; free any dongle the DVB driver has
+# already claimed (e.g. one plugged in before this ran) so a reboot isn't needed.
+bash "${REPO_ROOT}/scripts/sdr-dvb-prep.sh" || true
 
 # udev rules (grant plugdev access to common RTL-SDR VIDs/PIDs)
 cat > /etc/udev/rules.d/49-rtlsdr.rules <<'EOF'
