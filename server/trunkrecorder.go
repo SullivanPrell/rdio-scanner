@@ -630,6 +630,23 @@ func (admin *Admin) ensureTrunkRecorderDirwatch(directory string, systemId uint6
 	dw := admin.Controller.Dirwatches
 	db := admin.Controller.Database
 
+	// trunk-recorder discovers talkgroups live from the control channel's grant
+	// messages, so the rdio-scanner system its calls land on MUST auto-populate —
+	// otherwise every not-yet-known talkgroup is dropped at ingest and the system
+	// shows nothing. Binding a curated system that has AutoPopulate off is exactly
+	// what silently swallows trunk-recorder calls. Turn it on for the bound system
+	// so the integration just works (this is the whole point of binding a system to
+	// a live TR feed).
+	if systemId > 0 {
+		if sys, ok := admin.Controller.Systems.GetSystemById(systemId); ok && !sys.AutoPopulate {
+			sys.AutoPopulate = true
+			if werr := admin.Controller.Systems.Write(db); werr == nil {
+				_ = admin.Controller.Systems.Read(db)
+				admin.Controller.EmitConfig()
+			}
+		}
+	}
+
 	// Reload the live set from the DB so we don't clobber concurrent edits. Read()
 	// stops the watchers; we must Start() again on every exit path below.
 	if err := dw.Read(db); err != nil {
