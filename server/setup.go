@@ -530,7 +530,7 @@ func (admin *Admin) SDRangelProvisionHandler(w http.ResponseWriter, r *http.Requ
 	// Extend the write deadline for this one long-running handler; the global
 	// timeout stays 30s for every other endpoint.
 	rc := http.NewResponseController(w)
-	if err := rc.SetWriteDeadline(time.Now().Add(5 * time.Minute)); err != nil {
+	if err := rc.SetWriteDeadline(time.Now().Add(10 * time.Minute)); err != nil {
 		log.Printf("provision: could not extend write deadline: %v", err)
 	}
 
@@ -541,6 +541,12 @@ func (admin *Admin) SDRangelProvisionHandler(w http.ResponseWriter, r *http.Requ
 	}
 	opts := admin.Controller.Options
 	client := newSDRangelClient(opts.BridgeHost, opts.BridgePort)
+	// Each device/channel REST call blocks on FFTW plan-building on the Pi and
+	// routinely takes longer than the 5s default, so the channel POSTs time out
+	// ("awaiting headers") even though they succeed server-side. Give the provision
+	// client a generous per-call timeout; the short 5s default stays on the client
+	// the status endpoint uses, so UI polling never blocks on a wedged SDRangel.
+	client.http.Timeout = 60 * time.Second
 	result, updatedChannels := client.provision(req.DeviceSets, opts.BridgeChannels)
 
 	// Write the SDRangel-assigned channel indices back to the bridge config so the
