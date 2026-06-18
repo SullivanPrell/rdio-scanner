@@ -171,8 +171,8 @@ func (c *sdrangelClient) setDevice(dsIndex int, hwType string, sequence int) err
 			json.NewDecoder(resp.Body).Decode(&ack)
 			resp.Body.Close()
 			if ack.HwType == hwType {
-				c.waitReady(60 * time.Second) // let the assignment's re-plan settle before the next call
-				return nil                    // the set echoed the device back → assignment took
+				settle("device assignment", 45*time.Second) // blind-wait the re-plan, don't probe
+				return nil                                  // the set echoed the device back → assignment took
 			}
 			if ack.Message != "" {
 				last = ack.Message
@@ -180,7 +180,7 @@ func (c *sdrangelClient) setDevice(dsIndex int, hwType string, sequence int) err
 				last = fmt.Sprintf("device set still on %q", ack.HwType)
 			}
 		}
-		c.waitReady(20 * time.Second) // let the set settle, then retry
+		settle("device set", 20*time.Second) // blind-wait, then retry the assignment
 	}
 	return fmt.Errorf("not assigned after retries: %s", last)
 }
@@ -216,6 +216,19 @@ func (c *sdrangelClient) deleteReq(path string) (int, error) {
 	defer resp.Body.Close()
 	io.ReadAll(resp.Body)
 	return resp.StatusCode, nil
+}
+
+// settle blocks for d with ZERO HTTP traffic to SDRangel, giving it time to
+// finish an asynchronous construction step (creating a device set, assigning a
+// device, building a channel). SDRangel's REST/main-thread state access is not
+// thread-safe while it is constructing — any concurrent request, even a GET
+// probe, races the main thread and kills the REST listener (the "connection
+// refused" seen mid-provision). make_planner_thread_safe() doesn't help because
+// the race is general state, not just the FFTW planner. So we deliberately do
+// NOT poll for readiness here; we wait a fixed, generous interval instead.
+func settle(what string, d time.Duration) {
+	log.Printf("provision: settling %s for %s (no probing)", what, d)
+	time.Sleep(d)
 }
 
 // waitReady blocks until SDRangel's main thread is free to accept the next
@@ -351,13 +364,12 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 
 		// A freshly-created device set builds a SpectrumVis FFTW plan that blocks
 		// SDRangel's main thread for many seconds (longer on the Pi) — the REST API
-		// goes unresponsive until it finishes, then recovers. Firing the next call
-		// during that window races the thread-unsafe FFTW planner and takes down
-		// SDRangel's REST listener ("connection refused"). Let the plan actually
-		// begin, then wait generously for the main thread to go idle again.
+		// goes unresponsive until it finishes, then recovers. Crucially we must NOT
+		// probe during that window: a concurrent request races SDRangel's
+		// thread-unsafe construction and takes down the REST listener ("connection
+		// refused"). Blind-wait a generous fixed interval instead.
 		if createdSet {
-			time.Sleep(2 * time.Second)
-			c.waitReady(180 * time.Second)
+			settle("device-set construction", 90*time.Second)
 		}
 
 		// Assign the sampling device and confirm it took (see setDevice).
@@ -390,9 +402,9 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 
 		result.Messages = append(result.Messages, fmt.Sprintf("device set %d: %s seq=%d center=%d Hz SR=%d", dsCfg.Index, dsCfg.HwType, dsCfg.Sequence, dsCfg.CenterFrequencyHz, sr))
 
-		// The device set spins up a SpectrumVis FFT plan; wait it out before the
-		// next step so its planner call can't race the next one (segfault guard).
-		c.waitReady(90 * time.Second)
+		// The device settings/clear spin up FFT work; blind-wait it out before the
+		// next step (no probing — a concurrent request would race and crash it).
+		settle("device settings", 20*time.Second)
 	}
 
 	// Create one UDPSink channel per bridge channel.
@@ -432,9 +444,9 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 			ch.Label, added.Index, protocolToSampleFormat(ch.Protocol), ch.UdpPort, freqOffset,
 		))
 
-		// Each UDPSink also builds an FFT plan; pace channel creation so two
-		// plans never build concurrently (the FFTW-planner race / segfault).
-		c.waitReady(90 * time.Second)
+		// Each UDPSink also builds an FFT plan; blind-wait it out before the next
+		// channel (no probing — a concurrent request races and crashes the API).
+		settle("channel construction", 10*time.Second)
 	}
 
 	// Start all configured devices
