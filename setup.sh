@@ -280,6 +280,22 @@ install_trunk_recorder() {
     fi
     rm -rf "$tr_src"
     info "trunk-recorder ${tr_version} installed to ${TR_BIN}"
+
+    # trunk-recorder ALWAYS loads a fixed set of internal plugins (openmhz_uploader,
+    # broadcastify_uploader, unit_script, stat_socket) via add_internal_plugin() in
+    # load_config() — regardless of the config file. We don't build stat_socket (its
+    # websocketpp dependency doesn't compile cleanly on current Debian), and its
+    # absence makes trunk-recorder abort at startup with "libstat_socket.so: cannot
+    # open shared object file". Satisfy the loader by pointing that library name at a
+    # benign already-built plugin: loaded under the stat_socket name with no config,
+    # unit_script is a harmless no-op.
+    local _unitlib
+    _unitlib="$(find /usr/local/lib /usr/lib -name 'libunit_script.so' 2>/dev/null | head -1)"
+    if [[ -n "$_unitlib" && ! -e "$(dirname "$_unitlib")/libstat_socket.so" ]]; then
+        ln -sf "$_unitlib" "$(dirname "$_unitlib")/libstat_socket.so"
+        ldconfig
+        info "Linked libstat_socket.so → libunit_script.so (trunk-recorder loads it unconditionally)."
+    fi
     # The runnable config is generated later by write_trunk_recorder_config() into
     # rdio-scanner's base dir, once the server is up and an API key can be seeded.
 }
