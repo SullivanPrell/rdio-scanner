@@ -38,14 +38,17 @@ import (
 
 // TrunkRecorderSource describes one SDR source (RTL-SDR dongle or HackRF, etc.)
 type TrunkRecorderSource struct {
-	Driver       string  `json:"driver"`
-	Device       string  `json:"device"`
-	Center       uint64  `json:"center"`
-	Rate         uint64  `json:"rate"`
-	Gain         float64 `json:"gain"`
-	Error        int     `json:"error,omitempty"`
-	PPM          int     `json:"ppm,omitempty"`
-	AntennaLevel float64 `json:"antennaLevel,omitempty"`
+	Driver string  `json:"driver"`
+	Device string  `json:"device"`
+	Center uint64  `json:"center"`
+	Rate   uint64  `json:"rate"`
+	Gain   float64 `json:"gain"`
+	// DigitalRecorders is how many simultaneous P25/digital calls this source can
+	// record. Without at least one, trunk-recorder records nothing.
+	DigitalRecorders int     `json:"digitalRecorders,omitempty"`
+	Error            int     `json:"error,omitempty"`
+	PPM              int     `json:"ppm,omitempty"`
+	AntennaLevel     float64 `json:"antennaLevel,omitempty"`
 }
 
 // TrunkRecorderTalkgroup is one row in the talkgroups CSV embedded in the config.
@@ -72,6 +75,9 @@ type TrunkRecorderSystem struct {
 
 // TrunkRecorderConfig is the top-level trunk-recorder.json structure.
 type TrunkRecorderConfig struct {
+	// Ver must be 2 for the current trunk-recorder config format; without it
+	// trunk-recorder treats the file as legacy and warns to "add ver: 2".
+	Ver     int                   `json:"ver"`
 	Sources []TrunkRecorderSource `json:"sources"`
 	Systems []TrunkRecorderSystem `json:"systems"`
 	// Common global options with sensible defaults
@@ -171,19 +177,23 @@ func GenerateTrunkRecorderConfig(req TrunkRecorderGenRequest, systems []*System,
 		shortName = shortName[:20]
 	}
 
-	// Default sources: one RTL-SDR centred on first control channel if none supplied
+	// Default sources: one RTL-SDR centred on first control channel if none supplied.
+	// Gain 0 would leave the tuner near-deaf, and 0 digital recorders means nothing
+	// gets recorded — give both usable defaults the operator can tune later.
 	sources := req.Sources
 	if len(sources) == 0 && len(req.ControlChannels) > 0 {
 		sources = []TrunkRecorderSource{{
-			Driver: "rtlsdr",
-			Device: "0",
-			Center: req.ControlChannels[0],
-			Rate:   2400000,
-			Gain:   0,
+			Driver:           "rtlsdr",
+			Device:           "0",
+			Center:           req.ControlChannels[0],
+			Rate:             2400000,
+			Gain:             40,
+			DigitalRecorders: 4,
 		}}
 	}
 
 	cfg := &TrunkRecorderConfig{
+		Ver:     2,
 		Sources: sources,
 		Systems: []TrunkRecorderSystem{{
 			ShortName:       shortName,
