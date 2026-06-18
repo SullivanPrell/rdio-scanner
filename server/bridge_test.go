@@ -9,6 +9,8 @@ package main
 
 import (
 	"encoding/binary"
+	"fmt"
+	"net"
 	"testing"
 	"time"
 )
@@ -195,5 +197,68 @@ func TestSegmenterCapsLongCall(t *testing.T) {
 	}
 	if calls < 1 {
 		t.Fatalf("max-duration cap never fired: got %d calls", calls)
+	}
+}
+
+// freeUDPPort grabs an OS-assigned free UDP port and releases it for the bridge.
+func freeUDPPort(t *testing.T) int {
+	t.Helper()
+	addr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:0")
+	c, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		t.Fatalf("freeUDPPort: %v", err)
+	}
+	defer c.Close()
+	return c.LocalAddr().(*net.UDPAddr).Port
+}
+
+// TestBridgeRestartRebindsPort guards the UDP rebind race: Stop() must fully
+// release every channel's socket BEFORE returning, so the very next Start() (i.e.
+// a Restart) can rebind the same port without EADDRINUSE. With the old
+// fire-and-forget Stop() the socket closed asynchronously, so a re-bind raced the
+// lingering listener and the channel silently died.
+//
+// We never probe-bind the port while the bridge is binding (that would itself race
+// the bridge); instead each cycle we (1) let Start settle, (2) assert the bridge
+// holds the port, (3) Stop, and (4) assert the port is immediately re-bindable —
+// standing in for the next Start. Across cycles the bridge itself rebinds the same
+// port, which is the regression under test.
+func TestBridgeRestartRebindsPort(t *testing.T) {
+	port := freeUDPPort(t)
+	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctrl := &Controller{
+		Options: &Options{
+			BridgeEnabled:  true,
+			BridgeChannels: []BridgeChannelConfig{{Label: "test", UdpPort: port, SampleRate: 8000}},
+		},
+		Logs:   &Logs{},
+		Ingest: make(chan *Call, 8),
+	}
+	b := NewBridge(ctrl)
+
+	for i := 0; i < 8; i++ {
+		b.Start()
+		time.Sleep(100 * time.Millisecond) // let monitorChannel bind
+
+		// Bridge must hold the port now (so it actually rebound this cycle). This
+		// bind runs after the bridge has settled, so it cleanly fails without
+		// disturbing the bridge; we only close on the unexpected success path.
+		if c, err := net.ListenUDP("udp", addr); err == nil {
+			c.Close()
+			t.Fatalf("cycle %d: bridge did not bind port %d (rebind failed)", i, port)
+		}
+
+		b.Stop()
+
+		// Stop() must have released the socket before returning.
+		c, err := net.ListenUDP("udp", addr)
+		if err != nil {
+			t.Fatalf("cycle %d: port %d not released after Stop() returned (rebind race): %v", i, port, err)
+		}
+		c.Close()
 	}
 }
