@@ -569,6 +569,24 @@ func (m *TrunkRecorderServiceManager) nativeStart(binaryPath, configPath string)
 		return TrunkRecorderServiceResult{Success: true, Message: "already running"}
 	}
 
+	// Refuse to spawn a second instance if trunk-recorder is already running outside
+	// this manager — typically the systemd trunk-recorder.service. Two instances
+	// fight over the same dongles ("usb_claim_interface error -6"), which looks like
+	// the start just failing. Point the operator at a single control plane.
+	procName := "trunk-recorder"
+	if binaryPath != "" {
+		procName = binaryPath[strings.LastIndex(binaryPath, "/")+1:]
+	}
+	if out, err := exec.Command("pgrep", "-x", "-n", procName).Output(); err == nil {
+		if pid := strings.TrimSpace(string(out)); pid != "" {
+			m.mutex.Unlock()
+			return TrunkRecorderServiceResult{Message: fmt.Sprintf(
+				"trunk-recorder is already running (PID %s) outside this manager — most likely the systemd service. "+
+					"Manage it in one place: either 'sudo systemctl stop trunk-recorder' and use this button, "+
+					"or leave systemd in charge and use 'systemctl'. Two instances collide on the same dongles.", pid)}
+		}
+	}
+
 	bin := binaryPath
 	if bin == "" {
 		var err error
