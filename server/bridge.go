@@ -42,6 +42,50 @@ type BridgeChannelConfig struct {
 	UdpPort        int    `json:"udpPort"`
 }
 
+// Bridge UDP ports are auto-assigned from this pool so every channel always has a
+// VALID port (≤ the 16-bit UDP ceiling of 65535) and never collides. 15000 ports
+// is far more than any realistic channel count, so exhaustion is effectively
+// impossible — and a bad import base (e.g. 70000) or manual typo can't produce an
+// unusable port.
+const (
+	bridgeUDPPortMin = 50000
+	bridgeUDPPortMax = 65000
+)
+
+// nextFreeBridgePort returns the lowest pool port not in used, marking it used.
+// Returns 0 only if the entire pool is taken (never happens in practice).
+func nextFreeBridgePort(used map[int]bool) int {
+	for p := bridgeUDPPortMin; p <= bridgeUDPPortMax; p++ {
+		if !used[p] {
+			used[p] = true
+			return p
+		}
+	}
+	return 0
+}
+
+// normalizeBridgePorts guarantees every channel has a unique UDP port inside the
+// valid pool. Ports that are already valid and unique are kept; any that are zero,
+// out of range (e.g. an import base > 65535), or duplicated are reassigned to the
+// next free pool port. This makes invalid or colliding ports impossible no matter
+// how a channel was added (import base, CSV, manual entry), and self-heals
+// existing bad ports the next time the bridge config is saved.
+func normalizeBridgePorts(channels []BridgeChannelConfig) {
+	used := map[int]bool{}
+	for i := range channels {
+		if p := channels[i].UdpPort; p >= bridgeUDPPortMin && p <= bridgeUDPPortMax && !used[p] {
+			used[p] = true
+		} else {
+			channels[i].UdpPort = 0 // flag for reassignment
+		}
+	}
+	for i := range channels {
+		if channels[i].UdpPort == 0 {
+			channels[i].UdpPort = nextFreeBridgePort(used)
+		}
+	}
+}
+
 // Call segmentation parameters. SDRangel's UDPSink keeps the per-channel UDP
 // stream flowing continuously and writes *exact-zero* PCM whenever its squelch
 // is closed (confirmed in SDRangel's udpsinksink.cpp: every demod path emits

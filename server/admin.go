@@ -709,18 +709,21 @@ func (admin *Admin) mergeImportResult(result *ImportResult) error {
 		}
 	}
 
-	// ── Bridge channels: append, deduplicating by UDP port ─────────────────
+	// ── Bridge channels: append new ones (by label), then normalize ports ──
 	if len(result.Channels) > 0 {
-		existingPorts := map[int]bool{}
+		existing := map[string]bool{}
 		for _, ch := range admin.Controller.Options.BridgeChannels {
-			existingPorts[ch.UdpPort] = true
+			existing[ch.Label] = true
 		}
 		for _, ch := range result.Channels {
-			if !existingPorts[ch.UdpPort] {
+			if !existing[ch.Label] {
 				admin.Controller.Options.BridgeChannels = append(admin.Controller.Options.BridgeChannels, ch)
-				existingPorts[ch.UdpPort] = true
+				existing[ch.Label] = true
 			}
 		}
+		// Auto-assign valid, unique UDP ports across all channels — fixes any
+		// out-of-range import-base ports (e.g. 70000) and self-heals existing ones.
+		normalizeBridgePorts(admin.Controller.Options.BridgeChannels)
 		if err := admin.Controller.Options.Write(admin.Controller.Database); err != nil {
 			return fmt.Errorf("options write: %w", err)
 		}

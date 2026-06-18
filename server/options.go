@@ -221,6 +221,9 @@ func (options *Options) BridgeFromMap(m map[string]any) {
 		if b, err := json.Marshal(v); err == nil {
 			json.Unmarshal(b, &options.BridgeChannels)
 		}
+		// Pull every channel's UDP port into the valid auto-assigned pool, so a bad
+		// import base (>65535) or manual typo can never leave a channel unusable.
+		normalizeBridgePorts(options.BridgeChannels)
 	}
 	if v, ok := m["sdrangelBinaryPath"].(string); ok {
 		options.SDRangelBinaryPath = v
