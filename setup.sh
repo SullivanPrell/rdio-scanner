@@ -477,6 +477,9 @@ if [[ "$SKIP_BUILD" == false ]]; then
     # (bundled with Node 22) reads that field and fetches the exact version on first
     # use, so `corepack enable` is all that's needed — no global yarn install, and no
     # risk of classic yarn 1.x rewriting the Berry lockfile.
+    # Suppress corepack's interactive "about to download … continue? [Y/n]" prompt so
+    # the first fetch of the pinned Yarn doesn't block an unattended run.
+    export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
     if command -v corepack &>/dev/null; then
         corepack enable 2>/dev/null || true
     fi
