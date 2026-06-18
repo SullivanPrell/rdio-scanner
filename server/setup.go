@@ -259,26 +259,6 @@ func settle(what string, d time.Duration) {
 	time.Sleep(d)
 }
 
-// waitReady blocks until SDRangel's main thread is free to accept the next
-// provisioning step. SDRangel handles device/channel creation asynchronously
-// (addSourceDevice → SpectrumVis → FFTW plan), and FFTW's planner is NOT
-// thread-safe — firing the next request while a plan is still building races on
-// the planner and segfaults sdrangelsrv (reproducible on a Pi 5 / arm64). While
-// the main thread is planning it stops answering the REST API, so a GET that
-// returns promptly means it has drained its queue and the next step is safe.
-func (c *sdrangelClient) waitReady(maxWait time.Duration) {
-	time.Sleep(500 * time.Millisecond) // let the just-queued work actually start before probing
-	probe := &http.Client{Timeout: 2 * time.Second}
-	deadline := time.Now().Add(maxWait)
-	for time.Now().Before(deadline) {
-		if resp, err := probe.Get(c.apiURL("/devicesets")); err == nil {
-			resp.Body.Close()
-			return // answered within 2s → main thread is idle, safe to proceed
-		}
-		time.Sleep(150 * time.Millisecond)
-	}
-}
-
 // waitReachable polls GET /devicesets until SDRangel answers (decoding the
 // result into out) or maxWait elapses. A provision is usually triggered exactly
 // when SDRangel is busy — running the existing channels, planning FFTW, or stuck
@@ -351,8 +331,10 @@ func (c *sdrangelClient) getStatus() (*SDRangelStatus, error) {
 // config. For each bridge channel it creates a single UDPSink channel: SDRangel's
 // "UDP Sink" RX channel demodulates the signal (NFM/AM/SSB per the channel's
 // protocol) and streams S16LE mono audio straight to a per-channel UDP port that
-// the rdio-scanner bridge listens on. UDPSinkReport exposes a squelch flag the
-// bridge polls to segment calls.
+// the rdio-scanner bridge listens on. The bridge segments calls from that UDP
+// audio stream itself: SDRangel's squelch decision is encoded directly in the
+// stream as exact-zero PCM (emitted while squelch is closed), so the bridge never
+// polls SDRangel for squelch state.
 //
 // Existing channels on each device set are removed first so re-provisioning is
 // idempotent. It returns the result and a copy of channels with ChannelIndex set
@@ -370,8 +352,17 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 
 	// Build center-freq lookup: device set index → center frequency
 	centerFreq := map[int]uint{}
+	// And the effective sample rate per device set (applying the same 2400000
+	// default used below), so the channel loop can warn when a channel's frequency
+	// offset falls outside the dongle's sampled span.
+	sampleRate := map[int]uint{}
 	for _, d := range dsCfgs {
 		centerFreq[d.Index] = d.CenterFrequencyHz
+		sr := d.SampleRateHz
+		if sr == 0 {
+			sr = 2400000
+		}
+		sampleRate[d.Index] = sr
 	}
 
 	// If device sets are pinned to specific dongles by serial (the SDR Devices
@@ -473,6 +464,18 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 		var freqOffset int64
 		if cf > 0 {
 			freqOffset = int64(ch.FrequencyHz) - int64(cf)
+		}
+
+		// A channel whose offset exceeds half the device sample rate sits outside the
+		// dongle's sampled span and will silently produce no audio. Provision it
+		// anyway, but warn so the misconfiguration is visible.
+		if cf > 0 {
+			if span := int64(sampleRate[ch.DeviceSetIndex]) / 2; freqOffset > span || freqOffset < -span {
+				result.Messages = append(result.Messages, fmt.Sprintf(
+					"warning: channel %q at %d Hz is %+d Hz from center %d Hz, outside the ±%d Hz sampled span — it will produce no audio",
+					ch.Label, ch.FrequencyHz, freqOffset, cf, span,
+				))
+			}
 		}
 
 		if err := c.postJSON(fmt.Sprintf("/deviceset/%d/channel", ch.DeviceSetIndex), map[string]interface{}{
@@ -650,23 +653,34 @@ func (admin *Admin) SDRangelProvisionHandler(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// provision() paces each device-set and channel step (FFTW-settle waits, up to
-	// 90s each) and routinely runs well past the server's 30s WriteTimeout, which
-	// would close the connection mid-request — the browser sees that as
-	// "NetworkError <no response>" even though provisioning completes server-side.
-	// Extend the write deadline for this one long-running handler; the global
-	// timeout stays 30s for every other endpoint.
-	rc := http.NewResponseController(w)
-	if err := rc.SetWriteDeadline(time.Now().Add(10 * time.Minute)); err != nil {
-		log.Printf("provision: could not extend write deadline: %v", err)
-	}
-
 	var req SDRangelProvisionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 	opts := admin.Controller.Options
+
+	// provision() paces each device-set and channel step (FFTW-settle blind-waits,
+	// up to 90s each) and routinely runs well past the server's 30s WriteTimeout,
+	// which would close the connection mid-request — the browser sees that as
+	// "NetworkError <no response>" even though provisioning completes server-side.
+	// A flat 10-minute deadline still cuts off large multi-dongle / many-channel
+	// configs, so budget the deadline from the actual settle costs in provision():
+	// a fixed base (waitReachable up to 30s + device run + slack), ~3 min per device
+	// set (set construction + device-assign retries + device-settings settles), and
+	// ~30s per channel (creation + settings settles + slack). Floor it at 10 min so
+	// small configs are unaffected. The global timeout stays 30s for every other
+	// endpoint.
+	budget := 1*time.Minute +
+		time.Duration(len(req.DeviceSets))*3*time.Minute +
+		time.Duration(len(opts.BridgeChannels))*30*time.Second
+	if budget < 10*time.Minute {
+		budget = 10 * time.Minute
+	}
+	rc := http.NewResponseController(w)
+	if err := rc.SetWriteDeadline(time.Now().Add(budget)); err != nil {
+		log.Printf("provision: could not extend write deadline: %v", err)
+	}
 	client := newSDRangelClient(opts.BridgeHost, opts.BridgePort)
 	// Each device/channel REST call blocks on FFTW plan-building on the Pi and
 	// routinely takes longer than the 5s default, so the channel POSTs time out
@@ -676,8 +690,11 @@ func (admin *Admin) SDRangelProvisionHandler(w http.ResponseWriter, r *http.Requ
 	client.http.Timeout = 60 * time.Second
 	result, updatedChannels := client.provision(req.DeviceSets, opts.BridgeChannels)
 
-	// Write the SDRangel-assigned channel indices back to the bridge config so the
-	// bridge polls the correct per-channel squelch endpoint (not all at index 0).
+	// Write the SDRangel-assigned channel indices back to the bridge config. The
+	// bridge keys channels off UdpPort (not ChannelIndex) and segments calls from
+	// the UDP audio stream itself, so ChannelIndex is now vestigial bookkeeping —
+	// but persist it anyway, then restart the bridge to (re)start it against the
+	// freshly-provisioned channels.
 	if result.Success {
 		admin.Controller.Options.BridgeChannels = updatedChannels
 		if err := admin.Controller.Options.Write(admin.Controller.Database); err != nil {
