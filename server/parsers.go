@@ -558,7 +558,6 @@ func ParseTrunkRecorderMeta(call *Call, b []byte) error {
 	switch v := m["start_time"].(type) {
 	case float64:
 		call.Timestamp = time.Unix(int64(v), 0)
-		call.Timestamp = time.Now() // DBEUG
 	}
 
 	switch v := m["short_name"].(type) {
