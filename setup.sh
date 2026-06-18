@@ -596,7 +596,13 @@ if [[ -f "$BOOT_CFG" ]]; then
       | grep -v '^gpu_mem=' \
       | grep -v '^dtoverlay=disable-bt' \
       | grep -v '^max_usb_current=' \
+      | grep -v '^usb_max_current_enable=' \
       > /tmp/config.txt.tmp && mv /tmp/config.txt.tmp "$BOOT_CFG"
+    # Raise the downstream USB current budget so several RTL-SDR dongles can run
+    # at once. The key is board-specific: Pi 4 uses max_usb_current=1, Pi 5 uses
+    # usb_max_current_enable=1 (default cap is 600 mA total → ~2 dongles; this
+    # lifts it to 1.6 A → ~4). Each board ignores the other's key, so set both.
+    # Needs a PSU that can actually supply it (the official 27 W/5 A on a Pi 5).
     cat >> "$BOOT_CFG" <<'BOOTCFG'
 
 # sdr-stack additions (setup.sh)
@@ -604,8 +610,9 @@ if [[ -f "$BOOT_CFG" ]]; then
 gpu_mem=16
 dtoverlay=disable-bt
 max_usb_current=1
+usb_max_current_enable=1
 BOOTCFG
-    info "config.txt updated."
+    info "config.txt updated (USB current budget raised — needs an adequate PSU)."
 else
     warn "/boot/firmware/config.txt not found — skipping boot config."
 fi
