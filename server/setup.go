@@ -383,7 +383,6 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 
 	// Ensure required device sets exist and are configured
 	for _, dsCfg := range dsCfgs {
-		createdSet := false
 		for devResp.DevicesetCount <= dsCfg.Index {
 			var created struct {
 				DevicesetIndex int `json:"devicesetIndex"`
@@ -393,17 +392,16 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 				return result, updated
 			}
 			devResp.DevicesetCount++
-			createdSet = true
 			result.Messages = append(result.Messages, fmt.Sprintf("created device set %d", created.DevicesetIndex))
-		}
 
-		// A freshly-created device set builds a SpectrumVis FFTW plan that blocks
-		// SDRangel's main thread for many seconds (longer on the Pi) — the REST API
-		// goes unresponsive until it finishes, then recovers. Crucially we must NOT
-		// probe during that window: a concurrent request races SDRangel's
-		// thread-unsafe construction and takes down the REST listener ("connection
-		// refused"). Blind-wait a generous fixed interval instead.
-		if createdSet {
+			// A freshly-created device set builds a SpectrumVis FFTW plan that blocks
+			// SDRangel's main thread for many seconds (longer on the Pi) — the REST API
+			// goes unresponsive until it finishes, then recovers. Crucially we must NOT
+			// probe during that window: a concurrent request races SDRangel's
+			// thread-unsafe construction and takes down the REST listener ("connection
+			// refused"). Blind-wait a generous fixed interval after EACH creation —
+			// creating several sets back-to-back (a gap in device-set indices) without
+			// settling between them would race that same construction and crash it.
 			settle("device-set construction", 90*time.Second)
 		}
 
