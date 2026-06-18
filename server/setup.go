@@ -171,7 +171,8 @@ func (c *sdrangelClient) setDevice(dsIndex int, hwType string, sequence int) err
 			json.NewDecoder(resp.Body).Decode(&ack)
 			resp.Body.Close()
 			if ack.HwType == hwType {
-				return nil // the set echoed the device back → assignment took
+				c.waitReady(60 * time.Second) // let the assignment's re-plan settle before the next call
+				return nil                    // the set echoed the device back → assignment took
 			}
 			if ack.Message != "" {
 				last = ack.Message
@@ -225,7 +226,7 @@ func (c *sdrangelClient) deleteReq(path string) (int, error) {
 // the main thread is planning it stops answering the REST API, so a GET that
 // returns promptly means it has drained its queue and the next step is safe.
 func (c *sdrangelClient) waitReady(maxWait time.Duration) {
-	time.Sleep(150 * time.Millisecond) // let the just-queued work actually start
+	time.Sleep(500 * time.Millisecond) // let the just-queued work actually start before probing
 	probe := &http.Client{Timeout: 2 * time.Second}
 	deadline := time.Now().Add(maxWait)
 	for time.Now().Before(deadline) {
@@ -348,10 +349,15 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 			result.Messages = append(result.Messages, fmt.Sprintf("created device set %d", created.DevicesetIndex))
 		}
 
-		// A freshly-created device set needs a moment before it will accept a
-		// device assignment; assigning too early is dropped (leaving FileInput).
+		// A freshly-created device set builds a SpectrumVis FFTW plan that blocks
+		// SDRangel's main thread for many seconds (longer on the Pi) — the REST API
+		// goes unresponsive until it finishes, then recovers. Firing the next call
+		// during that window races the thread-unsafe FFTW planner and takes down
+		// SDRangel's REST listener ("connection refused"). Let the plan actually
+		// begin, then wait generously for the main thread to go idle again.
 		if createdSet {
-			c.waitReady(30 * time.Second)
+			time.Sleep(2 * time.Second)
+			c.waitReady(180 * time.Second)
 		}
 
 		// Assign the sampling device and confirm it took (see setDevice).
