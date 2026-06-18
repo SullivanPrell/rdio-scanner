@@ -233,7 +233,7 @@ install_trunk_recorder() {
     mkdir -p "${tr_src}/build"
     (
         cd "${tr_src}/build"
-        cmake .. -DCMAKE_BUILD_TYPE=Release
+        cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local
     ) || {
         warn "trunk-recorder cmake configuration failed."
         rm -rf "$tr_src"
@@ -243,17 +243,33 @@ install_trunk_recorder() {
     # in case a future plugin version introduces another incompatibility.
     (cd "${tr_src}/build" && (make -j"$(nproc)" || make -j1 || true))
 
-    # Binary may land in build/ or build/src/ depending on version
-    local tr_built
-    tr_built="$(find "${tr_src}/build" -maxdepth 2 -name 'trunk-recorder' -type f 2>/dev/null | head -1)"
-    if [[ -z "$tr_built" ]]; then
-        warn "trunk-recorder build failed — main binary not produced."
+    # Use `make install`, not a hand-copy of the executable: trunk-recorder builds
+    # its own GNU Radio blocks (libgnuradio-op25_repeater.so for P25 decode, etc.)
+    # that the binary links at runtime. Copying only the executable left it failing
+    # with "libgnuradio-op25_repeater.so: cannot open shared object file". make
+    # install puts the binary in /usr/local/bin and the libs in /usr/local/lib;
+    # ldconfig then refreshes the linker cache so they resolve.
+    if (cd "${tr_src}/build" && make install); then
+        ldconfig
+    else
+        warn "trunk-recorder 'make install' did not complete cleanly."
+    fi
+
+    # Some versions don't install the executable itself (only its libs). If make
+    # install didn't place the binary, copy it out of the build tree — the libs are
+    # already installed regardless. It may land in build/ or build/src/.
+    if [[ ! -x "$TR_BIN" ]]; then
+        local tr_built
+        tr_built="$(find "${tr_src}/build" -maxdepth 2 -name 'trunk-recorder' -type f 2>/dev/null | head -1)"
+        [[ -n "$tr_built" ]] && install -m 0755 "$tr_built" "$TR_BIN"
+    fi
+
+    if [[ ! -x "$TR_BIN" ]]; then
+        warn "trunk-recorder build failed — ${TR_BIN} not produced."
         warn "  apt-get install gnuradio-dev gr-osmosdr libboost-all-dev libliquid-dev libsndfile1-dev libgps-dev libuhd-dev"
         rm -rf "$tr_src"
         return
     fi
-
-    install -m 0755 "$tr_built" "$TR_BIN"
     rm -rf "$tr_src"
     info "trunk-recorder ${tr_version} installed to ${TR_BIN}"
 
