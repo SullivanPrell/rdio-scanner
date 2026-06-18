@@ -498,6 +498,18 @@ func udpSinkSettings(ch BridgeChannelConfig, freqOffset int64) map[string]interf
 	case "usb", "lsb":
 		rfBandwidth = 3000
 	}
+	// SDRangel's UDPSink also binds an internal audio-feedback socket on audioPort
+	// (default 9998). We never set it, so every channel kept 9998 and only the first
+	// could bind it — the rest logged "cannot bind audio port" on construction and
+	// again on each settings apply, repeating per channel and stalling provisioning.
+	// We don't use SDRangel's local audio (the bridge consumes the UDP output
+	// stream), so turn it off and give each channel a unique, free audioPort derived
+	// from its already-unique output port (50000-65000 → 30000-45000, disjoint from
+	// the udpPort pool the bridge binds).
+	audioPort := ch.UdpPort - 20000
+	if audioPort < 1024 {
+		audioPort = ch.UdpPort + 1
+	}
 	return map[string]interface{}{
 		"sampleFormat":         protocolToSampleFormat(ch.Protocol),
 		"inputFrequencyOffset": freqOffset,
@@ -510,6 +522,8 @@ func udpSinkSettings(ch BridgeChannelConfig, freqOffset int64) map[string]interf
 		"agc":                  1,
 		"gain":                 1.0,
 		"channelMute":          0,
+		"audioActive":          0,
+		"audioPort":            audioPort,
 		"udpAddress":           "127.0.0.1",
 		"udpPort":              ch.UdpPort,
 		"title":                ch.Label,
