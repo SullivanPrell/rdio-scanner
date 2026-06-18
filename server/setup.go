@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"time"
 )
@@ -521,6 +522,18 @@ func (admin *Admin) SDRangelProvisionHandler(w http.ResponseWriter, r *http.Requ
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
+
+	// provision() paces each device-set and channel step (FFTW-settle waits, up to
+	// 90s each) and routinely runs well past the server's 30s WriteTimeout, which
+	// would close the connection mid-request — the browser sees that as
+	// "NetworkError <no response>" even though provisioning completes server-side.
+	// Extend the write deadline for this one long-running handler; the global
+	// timeout stays 30s for every other endpoint.
+	rc := http.NewResponseController(w)
+	if err := rc.SetWriteDeadline(time.Now().Add(5 * time.Minute)); err != nil {
+		log.Printf("provision: could not extend write deadline: %v", err)
+	}
+
 	var req SDRangelProvisionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
