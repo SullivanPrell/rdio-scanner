@@ -2,6 +2,7 @@
   "name": "rdio-scanner-client",
   "private": true,
   "type": "module",
+  "packageManager": "yarn@4.4.1",
   "scripts": {
     "build": "nuxt generate && rm -rf ../server/webapp && cp -r .output/public ../server/webapp",
     "dev": "nuxt dev --port 4200",

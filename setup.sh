@@ -473,27 +473,21 @@ fi
 if [[ "$SKIP_BUILD" == false ]]; then
 
     step "Enabling Yarn (corepack)"
-    # client-nuxt uses Yarn Berry — the lockfile is Berry-format and config lives in
-    # .yarnrc.yml. corepack (bundled with Node 22) provides a Berry yarn; classic
-    # yarn 1.x would rewrite the lockfile, so prefer corepack and only fall back to a
-    # global npm install if corepack is somehow unavailable.
+    # client-nuxt pins Yarn 4 via the package.json "packageManager" field. corepack
+    # (bundled with Node 22) reads that field and fetches the exact version on first
+    # use, so `corepack enable` is all that's needed — no global yarn install, and no
+    # risk of classic yarn 1.x rewriting the Berry lockfile.
     if command -v corepack &>/dev/null; then
         corepack enable 2>/dev/null || true
-        corepack prepare yarn@stable --activate 2>/dev/null || true
-    fi
-    if ! command -v yarn &>/dev/null; then
-        warn "corepack unavailable — installing Yarn via npm as a fallback."
-        npm install -g yarn 2>/dev/null || true
     fi
     command -v yarn &>/dev/null \
-        && info "Yarn $(yarn --version 2>/dev/null) ready." \
-        || fatal "Yarn is required to build the client but could not be installed."
+        || fatal "Yarn unavailable. corepack ships with Node 22 — ensure Node installed correctly."
 
     step "Building Nuxt client"
     (
         cd "${REPO_ROOT}/client-nuxt"
-        yarn install 2>&1 | tail -5
-        yarn build 2>&1 | tail -5
+        yarn install 2>&1 | tail -8
+        yarn build 2>&1 | tail -8
     )
     info "Nuxt client built → server/webapp/"
 
