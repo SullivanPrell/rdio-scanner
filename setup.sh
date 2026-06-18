@@ -426,7 +426,7 @@ write_trunk_recorder_config() {
       "rate": 2400000,
       "driver": "osmosdr",
       "device": "rtl=0",
-      "gain": 30,
+      "gain": 49,
       "digitalRecorders": 8
     }
   ],

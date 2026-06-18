@@ -187,7 +187,7 @@ func GenerateTrunkRecorderConfig(req TrunkRecorderGenRequest, systems []*System,
 			Device:           "rtl=0",
 			Center:           req.ControlChannels[0],
 			Rate:             2400000,
-			Gain:             40,
+			Gain:             49,
 			DigitalRecorders: 4,
 		}}
 	}

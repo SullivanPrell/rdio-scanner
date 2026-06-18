@@ -529,7 +529,7 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 // bridgeDefaultSquelchDB is the squelch threshold used when a channel doesn't
 // specify one (SquelchDB == 0). Squelch values are negative dBFS, so 0 reliably
 // means "unset" rather than a threshold anyone would pick.
-const bridgeDefaultSquelchDB = -50
+const bridgeDefaultSquelchDB = -55
 
 // udpSinkSettings builds the UDPSinkSettings payload for one bridge channel.
 // sampleFormat selects the demodulator; the squelch produces the exact-zero PCM

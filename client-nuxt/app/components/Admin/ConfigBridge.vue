@@ -307,7 +307,7 @@ function buildTRSources(coverHz: number[], controlHz: number[], dongleIndices: n
     device: `rtl=${indices[i]}`,
     center: Math.round((w.min + w.max) / 2),
     rate: SDR_SAMPLE_RATE,
-    gain: 40,
+    gain: 49,
     digitalRecorders: 4,
   }))
   return { sources, uncovered: windows.length - nCover }
@@ -417,7 +417,7 @@ function addChannel() {
       frequencyHz: 0,
       label: '',
       protocol: 'nfm',
-      squelchDb: -50,
+      squelchDb: -55,
       sampleRate: 8000,
       systemRef: 0,
       talkgroupRef: 0,
@@ -481,7 +481,7 @@ function addSystemChannels() {
       frequencyHz: freq,
       label: tg.name || tg.label || `TG ${tg.talkgroupRef}`,
       protocol: 'nfm',
-      squelchDb: -50,
+      squelchDb: -55,
       sampleRate: 8000,
       systemRef: sys.systemRef,
       talkgroupRef: tg.talkgroupRef,
