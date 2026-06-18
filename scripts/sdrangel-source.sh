@@ -47,11 +47,13 @@
 # early as possible, before any plan is created.
 #
 # Important properties that make this the correct, low-risk fix here:
-#   * The symbol lives in the BASE library (libfftw3f / libfftw3), compiled from
-#     FFTW's api/ subdir — NOT in libfftw3f_threads. Confirmed in FFTW's build:
-#     top-level Makefile.am builds `libfftw3${PREC}.la` from `SUBDIRS=... api ...`.
-#     => No `-lfftw3f_threads`, no `fftwf_init_threads()` required. SDRangel
-#        already links -lfftw3f / -lfftw3, so the symbol resolves as-is.
+#   * The symbol lives in FFTW's THREADS library (libfftw3f_threads /
+#     libfftw3_threads), NOT the base libfftw3f — verified the hard way: linking
+#     without it fails at the sdrangelsrv link step with "undefined reference to
+#     fftwf_make_planner_thread_safe". Both threads libs ship in libfftw3-dev
+#     (already a dep), so the configure step below adds them to the link via
+#     CMAKE_CXX_STANDARD_LIBRARIES. No fftwf_init_threads() call is required —
+#     make_planner_thread_safe just installs a global lock hook.
 #   * The prototype is in the standard <fftw3.h> (generated via FFTW_DEFINE_API,
 #     `X(make_planner_thread_safe)`), shipped by libfftw3-dev — already a dep.
 #   * The FFTW OpenMP caveat ("does not work with OpenMP as threading substrate")
@@ -410,13 +412,19 @@ if [[ "${SKIP_COMPILE:-false}" == false ]]; then
     mkdir -p "${SRC_DIR}/build"
     (
         cd "${SRC_DIR}/build"
-        # Note: no extra FFTW flag is needed. fftwf_make_planner_thread_safe lives
-        # in the base libfftw3f that SDRangel already links via find_package(FFTW3f).
+        # fftwf_make_planner_thread_safe() / fftw_make_planner_thread_safe() live in
+        # FFTW's THREADS libraries (libfftw3f_threads / libfftw3_threads, both from
+        # libfftw3-dev) — NOT the base libfftw3f — so the patched main.cpp won't link
+        # without them (undefined reference at the sdrangelsrv link step otherwise).
+        # CMAKE_CXX_STANDARD_LIBRARIES appends them at the END of every link command,
+        # after the objects that reference the symbols, which is the order ld needs.
+        # (-lpthread is a harmless no-op on Trixie's glibc but keeps it portable.)
         cmake .. \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=/usr \
             -DBUILD_GUI=OFF \
             -DBUILD_SERVER=ON \
+            -DCMAKE_CXX_STANDARD_LIBRARIES="-lfftw3f_threads -lfftw3_threads -lpthread" \
             ${EXTRA_CMAKE_FLAGS}
     ) || fatal "CMake configure failed."
 
