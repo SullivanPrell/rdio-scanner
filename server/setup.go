@@ -434,6 +434,12 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 		chIdx := chIdxByDS[ch.DeviceSetIndex]
 		chIdxByDS[ch.DeviceSetIndex]++
 
+		// The new channel is constructing (default settings); a settings PATCH
+		// fired now is overwritten back to defaults when construction completes.
+		// Blind-wait for it to go idle, THEN apply the real settings — verified on
+		// the Pi: the same PATCH applies cleanly to an idle channel.
+		settle("channel creation", 10*time.Second)
+
 		if err := c.patchJSON(fmt.Sprintf("/deviceset/%d/channel/%d/settings", ch.DeviceSetIndex, chIdx), map[string]interface{}{
 			"channelType":     "UDPSink",
 			"direction":       0,
@@ -450,9 +456,8 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 			ch.Label, chIdx, protocolToSampleFormat(ch.Protocol), ch.UdpPort, freqOffset,
 		))
 
-		// Each UDPSink also builds an FFT plan; blind-wait it out before the next
-		// channel (no probing — a concurrent request races and crashes the API).
-		settle("channel construction", 10*time.Second)
+		// Let the settings change re-construct before the next channel's POST.
+		settle("channel settings", 8*time.Second)
 	}
 
 	// Start all configured devices
