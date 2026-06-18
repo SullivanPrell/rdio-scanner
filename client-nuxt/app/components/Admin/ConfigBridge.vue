@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type {
   BridgeConfig,
+  BridgeChannel,
   AdminSystem,
   RTLDongle,
   SDRangelServiceStatus,
@@ -308,6 +309,87 @@ function addChannel() {
       udpPort: maxPort + 1,
     }],
   }
+}
+
+// ── Quick-add an existing system ──────────────────────────────────────────────
+// Bridging a conventional system one row at a time (re-selecting the same system
+// + each talkgroup) is tedious. quickAddSystemRef + addSystemChannels() appends
+// one bridge channel per talkgroup of the chosen system, prefilling label,
+// frequency, system, and talkgroup, and skipping talkgroups already bridged.
+const quickAddSystemRef = ref<number>(0)
+
+const quickAddOptions = computed(() => [
+  { label: '— add a system —', value: 0 },
+  ...systemOptions.value,
+])
+
+// Lowest free UDP port in the bridge pool [50000, 65000]; tracks `used` so a
+// bulk add hands out distinct ports. 0 if exhausted — the server's
+// normalizeBridgePorts() reassigns any 0/out-of-range/duplicate port on save.
+function nextFreePort(used: Set<number>): number {
+  for (let p = 50000; p <= 65000; p++) {
+    if (!used.has(p)) { used.add(p); return p }
+  }
+  return 0
+}
+
+function addSystemChannels() {
+  const sys = (props.systems ?? []).find(s => s.systemRef === quickAddSystemRef.value)
+  if (!sys) {
+    toast.add({ title: 'Select a system to add', color: 'warning' })
+    return
+  }
+  const talkgroups = sys.talkgroups ?? []
+  if (!talkgroups.length) {
+    toast.add({ title: `${sys.label} has no talkgroups`, color: 'warning' })
+    return
+  }
+
+  // Don't re-add a talkgroup that already has a bridge channel.
+  const existing = new Set(bridge.value.channels.map(c => `${c.systemRef}:${c.talkgroupRef}`))
+  const used = new Set(
+    bridge.value.channels.map(c => c.udpPort).filter(p => p >= 50000 && p <= 65000),
+  )
+
+  const added: BridgeChannel[] = []
+  let skipped = 0
+  let noFreq = 0
+  for (const tg of talkgroups) {
+    const key = `${sys.systemRef}:${tg.talkgroupRef}`
+    if (existing.has(key)) { skipped++; continue }
+    existing.add(key)
+    const freq = tg.frequency ?? 0
+    if (!freq) noFreq++
+    added.push({
+      channelIndex: 0,
+      deviceSetIndex: 0,
+      frequencyHz: freq,
+      label: tg.name || tg.label || `TG ${tg.talkgroupRef}`,
+      protocol: 'nfm',
+      squelchDb: -50,
+      sampleRate: 8000,
+      systemRef: sys.systemRef,
+      talkgroupRef: tg.talkgroupRef,
+      udpPort: nextFreePort(used),
+    })
+  }
+
+  if (!added.length) {
+    toast.add({ title: `All ${talkgroups.length} talkgroup(s) from ${sys.label} are already bridged`, color: 'info' })
+    return
+  }
+  bridge.value = { ...bridge.value, channels: [...bridge.value.channels, ...added] }
+
+  const title = skipped
+    ? `Added ${added.length} channel(s) from ${sys.label} · ${skipped} already present`
+    : `Added ${added.length} channel(s) from ${sys.label}`
+  toast.add({
+    title,
+    description: noFreq
+      ? `${noFreq} talkgroup(s) had no frequency — fill in Freq (Hz) before provisioning. Then Auto-assign SDRs, Save, Provision.`
+      : 'Review, Auto-assign SDRs, Save, then Provision.',
+    color: noFreq ? 'warning' : 'success',
+  })
 }
 
 function removeChannel(i: number) {
@@ -729,7 +811,25 @@ const trSystemOptions = computed(() => [
 
       <div class="flex items-center justify-between">
         <span class="text-sm font-semibold text-neutral-300">Channels ({{ bridge.channels.length }})</span>
-        <div class="flex gap-2">
+        <div class="flex flex-wrap items-center gap-2">
+          <div class="flex items-center gap-1">
+            <USelect
+              v-model.number="quickAddSystemRef"
+              :items="quickAddOptions"
+              size="xs"
+              class="w-44"
+            />
+            <UButton
+              icon="i-heroicons-rectangle-stack"
+              size="xs"
+              variant="ghost"
+              :disabled="!quickAddSystemRef"
+              @click="addSystemChannels"
+            >
+              Add System
+            </UButton>
+          </div>
+          <span class="text-neutral-700">|</span>
           <UButton icon="i-heroicons-plus" size="xs" variant="ghost" @click="addChannel">
             Add Channel
           </UButton>
