@@ -385,6 +385,21 @@ func (admin *Admin) TrunkRecorderConfigHandler(w http.ResponseWriter, r *http.Re
 		}
 	}
 
+	// Make rdio-scanner actually ingest what trunk-recorder records. trunk-recorder
+	// writes WAV+JSON pairs into captureDir but has no built-in rdio-scanner uploader
+	// for a same-host install (its `uploadServer` field targets OpenMHz, not us), so
+	// without a dir watch on that directory the calls pile up on disk and never reach
+	// the scanner. Provision it automatically; idempotent on re-generation.
+	var trSystemId uint64
+	if sys, ok := admin.Controller.Systems.GetSystemByRef(req.SystemRef); ok {
+		trSystemId = sys.Id
+	}
+	if added, derr := admin.ensureTrunkRecorderDirwatch(cfg.CaptureDir, trSystemId); derr != nil {
+		saveMsg = appendMsg(saveMsg, fmt.Sprintf("warning: could not set up auto-ingest dir watch on %s: %v", cfg.CaptureDir, derr))
+	} else if added {
+		saveMsg = appendMsg(saveMsg, fmt.Sprintf("auto-ingest dir watch added for %s — recorded calls will now appear in the scanner", cfg.CaptureDir))
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	resp := map[string]any{"config": cfg}
 	if saveMsg != "" {
@@ -393,6 +408,80 @@ func (admin *Admin) TrunkRecorderConfigHandler(w http.ResponseWriter, r *http.Re
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	enc.Encode(resp)
+}
+
+// appendMsg joins two status lines with a newline, tolerating an empty first line.
+func appendMsg(a, b string) string {
+	if a == "" {
+		return b
+	}
+	if b == "" {
+		return a
+	}
+	return a + "\n" + b
+}
+
+// ensureTrunkRecorderDirwatch makes sure rdio-scanner watches the directory
+// trunk-recorder records into, so the WAV+JSON call pairs it drops there are
+// ingested automatically. It's the rdio-scanner-recommended same-host integration
+// (no upload script, no API key in trunk-recorder). Idempotent: if a trunk-recorder
+// dir watch already covers this directory it does nothing. Returns whether one was
+// added. Mirrors the admin config-set sequence (stop → write → reload → start) and
+// serializes against it on admin.mutex.
+func (admin *Admin) ensureTrunkRecorderDirwatch(directory string, systemId uint64) (bool, error) {
+	if strings.TrimSpace(directory) == "" {
+		return false, nil
+	}
+
+	admin.mutex.Lock()
+	defer admin.mutex.Unlock()
+
+	dw := admin.Controller.Dirwatches
+	db := admin.Controller.Database
+
+	// Reload the live set from the DB so we don't clobber concurrent edits. Read()
+	// stops the watchers; we must Start() again on every exit path below.
+	if err := dw.Read(db); err != nil {
+		dw.Start(admin.Controller)
+		return false, err
+	}
+
+	for _, d := range dw.List {
+		if d.Kind == DirwatchTypeTrunkRecorder &&
+			filepath.Clean(d.Directory) == filepath.Clean(directory) {
+			// Already present. If we now know the exact target system (e.g. a fresh
+			// install seeded a label-routed watch, and the operator is generating
+			// config for a specific system), bind it so calls can't miss on a
+			// shortName/label casing mismatch.
+			if systemId > 0 && d.SystemId != systemId {
+				d.SystemId = systemId
+				werr := dw.Write(db)
+				if werr == nil {
+					werr = dw.Read(db)
+				}
+				dw.Start(admin.Controller)
+				return false, werr
+			}
+			dw.Start(admin.Controller)
+			return false, nil
+		}
+	}
+
+	nd := NewDirwatch()
+	nd.Kind = DirwatchTypeTrunkRecorder
+	nd.Directory = directory
+	nd.DeleteAfter = true // trunk-recorder keeps no archive of its own; ingest then remove
+	// Bind to the generated system so calls land there regardless of trunk-recorder's
+	// shortName casing (rdio-scanner's label match is exact/case-sensitive).
+	nd.SystemId = systemId
+	dw.List = append(dw.List, nd)
+
+	err := dw.Write(db)
+	if err == nil {
+		err = dw.Read(db) // pull back the DB-assigned id
+	}
+	dw.Start(admin.Controller)
+	return err == nil, err
 }
 
 // DonglesHandler handles GET /api/admin/dongles.

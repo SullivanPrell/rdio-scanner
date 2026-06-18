@@ -377,6 +377,22 @@ func (dirwatch *Dirwatch) ingestTrunkRecorder(p string) error {
 		return err
 	}
 
+	// An explicit dir-watch System binds these calls to a specific rdio-scanner
+	// system, overriding the short_name → label match (IngestCall prefers SystemId).
+	// This is how the auto-provisioned trunk-recorder dir watch keeps calls on the
+	// configured system even when trunk-recorder's shortName doesn't equal its label.
+	if dirwatch.SystemId > 0 {
+		call.Meta.SystemId = dirwatch.SystemId
+	}
+
+	if dirwatch.SiteId > 0 {
+		call.Meta.SiteId = dirwatch.SiteId
+	}
+
+	if dirwatch.TalkgroupId > 0 {
+		call.Meta.TalkgroupId = dirwatch.TalkgroupId
+	}
+
 	if ok, err := call.IsValid(); ok {
 		dirwatch.controller.Ingest <- call
 

@@ -352,29 +352,44 @@ configure_trunk_recorder() {
         return
     fi
 
-    # Reuse an already-seeded key (idempotent), else mint and register a new one.
+    # Reuse an already-seeded key (idempotent), else mint a fresh one.
     local existing
     existing="$(jq -r '[.apikeys[]? | select(.ident=="trunk-recorder") | .key][0] // empty' "$cfg" 2>/dev/null)"
     if [[ -n "$existing" ]]; then
         RDIO_API_KEY="$existing"
         info "Reusing existing 'trunk-recorder' API key."
     else
-        local newkey; newkey="$(cat /proc/sys/kernel/random/uuid)"
-        # Seed the key and clear any stale path options so the server falls back to
-        # its defaults (binary at the install location, config in its base dir).
-        if jq --arg key "$newkey" '
-                .apikeys = ((.apikeys // []) +
+        RDIO_API_KEY="$(cat /proc/sys/kernel/random/uuid)"
+    fi
+
+    # In one config-set, ensure (a) the trunk-recorder API key, (b) a dir watch on
+    # the capture dir, and (c) cleared path options. The dir watch is the crucial
+    # bit: trunk-recorder records WAV+JSON pairs into ${TR_DATA_DIR} but has no
+    # rdio-scanner uploader for a same-host install (its `uploadServer` targets
+    # OpenMHz, not us), so without rdio-scanner watching that directory the calls
+    # never show up in the scanner. All three steps are idempotent on re-runs.
+    if jq --arg key "$RDIO_API_KEY" --arg dir "$TR_DATA_DIR" '
+            .apikeys = (
+                if ([.apikeys[]? | select(.ident=="trunk-recorder")] | length) > 0
+                then .apikeys
+                else ((.apikeys // []) +
                     [{disabled:false, ident:"trunk-recorder", key:$key, systems:"*"}])
-                | .options.trunkRecorderBinaryPath = ""
-                | .options.trunkRecorderConfigPath = ""
-            ' "$cfg" > "${cfg}.new" 2>/dev/null \
-           && "$RDIO_BIN" -cmd config-set +url "$url" +token "$token" +in "${cfg}.new" >/dev/null 2>&1; then
-            RDIO_API_KEY="$newkey"
-            info "API key 'trunk-recorder' registered (using default paths)."
-        else
-            warn "Could not register the key automatically."
-            warn "  Add it manually in Admin → Config → API Keys."
-        fi
+                end)
+            | .dirwatch = (
+                if ([.dirwatch[]? | select(.type=="trunk-recorder" and .directory==$dir)] | length) > 0
+                then .dirwatch
+                else ((.dirwatch // []) +
+                    [{deleteAfter:true, directory:$dir, disabled:false, type:"trunk-recorder"}])
+                end)
+            | .options.trunkRecorderBinaryPath = ""
+            | .options.trunkRecorderConfigPath = ""
+        ' "$cfg" > "${cfg}.new" 2>/dev/null \
+       && "$RDIO_BIN" -cmd config-set +url "$url" +token "$token" +in "${cfg}.new" >/dev/null 2>&1; then
+        info "API key registered + auto-ingest dir watch on ${TR_DATA_DIR}."
+    else
+        warn "Could not register the key / dir watch automatically."
+        warn "  Add an API key in Admin → Config → API Keys, and a 'Trunk Recorder'"
+        warn "  dir watch on ${TR_DATA_DIR} (delete-after on) in Admin → Config → Dir Watch."
     fi
 
     "$RDIO_BIN" -cmd logout +url "$url" +token "$token" >/dev/null 2>&1 || true
