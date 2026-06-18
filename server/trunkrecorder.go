@@ -192,6 +192,14 @@ func GenerateTrunkRecorderConfig(req TrunkRecorderGenRequest, systems []*System,
 		}}
 	}
 
+	// Guardrail: a single system's control channels must all fall within one source's
+	// bandwidth, or trunk-recorder SEGVs at startup when it tries to retune the
+	// control-channel decoder across a dongle boundary. Validate before we hand the
+	// config back so the operator gets a clear error instead of a status=11/SEGV.
+	if err := validateControlChannelCoverage(req.ControlChannels, sources); err != nil {
+		return nil, err
+	}
+
 	cfg := &TrunkRecorderConfig{
 		Ver:     2,
 		Sources: sources,
@@ -224,6 +232,185 @@ func normalizeTRSystemType(t string) string {
 	default:
 		return strings.ToLower(strings.TrimSpace(t))
 	}
+}
+
+// ── Control-channel coverage validation ────────────────────────────────────
+
+// trSourceCovers reports whether a control channel frequency falls within a
+// source's tunable bandwidth (center ± rate/2). A source with no sample rate
+// covers nothing.
+func trSourceCovers(src TrunkRecorderSource, cc uint64) bool {
+	if src.Rate == 0 {
+		return false
+	}
+	half := src.Rate / 2
+	if cc >= src.Center {
+		return cc-src.Center <= half
+	}
+	return src.Center-cc <= half
+}
+
+// formatFreqMHz renders a frequency in Hz as a trimmed MHz string (e.g.
+// 154810000 -> "154.81 MHz"), working from the integer Hz to avoid float drift.
+func formatFreqMHz(hz uint64) string {
+	whole := hz / 1_000_000
+	frac := hz % 1_000_000
+	if frac == 0 {
+		return fmt.Sprintf("%d MHz", whole)
+	}
+	s := strings.TrimRight(fmt.Sprintf("%06d", frac), "0")
+	return fmt.Sprintf("%d.%s MHz", whole, s)
+}
+
+// describeTRSource labels a source by its device and the band it can cover, for
+// use in coverage error messages.
+func describeTRSource(src TrunkRecorderSource) string {
+	dev := src.Device
+	if dev == "" {
+		dev = src.Driver
+	}
+	if dev == "" {
+		dev = "source"
+	}
+	half := src.Rate / 2
+	low := uint64(0)
+	if src.Center > half {
+		low = src.Center - half
+	}
+	high := src.Center + half
+	return fmt.Sprintf("%s (center %s, band %s–%s)", dev, formatFreqMHz(src.Center), formatFreqMHz(low), formatFreqMHz(high))
+}
+
+// validateControlChannelCoverage enforces that every control channel of a single
+// trunk-recorder system lies within ONE source's bandwidth. trunk-recorder
+// discovers voice channels from the control channel's grant messages, so voice
+// grants legitimately span multiple sources — but the control channels themselves
+// must not: trunk-recorder can't rebuild the control-channel decoder when it has to
+// retune across a dongle/source boundary and SEGVs at startup (systemd
+// status=11/SEGV) if asked to. Returns a clear error naming the offending
+// frequencies and the source bands they fall in; only control channels are checked.
+func validateControlChannelCoverage(controlChannels []uint64, sources []TrunkRecorderSource) error {
+	if len(controlChannels) == 0 {
+		return nil
+	}
+	if len(sources) == 0 {
+		return fmt.Errorf("no SDR source is configured to cover the control channel(s) %s — add a source whose center ± rate/2 spans them", formatFreqMHz(controlChannels[0]))
+	}
+
+	// 1) Every control channel must fall within at least one source's bandwidth.
+	var uncovered []uint64
+	for _, cc := range controlChannels {
+		covered := false
+		for _, src := range sources {
+			if trSourceCovers(src, cc) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			uncovered = append(uncovered, cc)
+		}
+	}
+	if len(uncovered) > 0 {
+		return fmt.Errorf(
+			"control channel(s) %s fall outside every configured SDR source's bandwidth — each control channel must lie within some source's center ± rate/2. Configured sources: %s. Add a source covering these frequencies, or remove them: only control channels belong in control_channels (trunk-recorder discovers voice channels from the control channel's grant messages, so voice channels must not be listed here)",
+			joinFreqsMHz(uncovered), joinSourceBands(sources))
+	}
+
+	// 2) All control channels are covered, but they must be served by a SINGLE source.
+	// If any one source covers them all, we're safe (this also tolerates overlapping
+	// source bands).
+	for _, src := range sources {
+		coversAll := true
+		for _, cc := range controlChannels {
+			if !trSourceCovers(src, cc) {
+				coversAll = false
+				break
+			}
+		}
+		if coversAll {
+			return nil
+		}
+	}
+
+	// 3) No single source covers them all: the control channels span multiple sources,
+	// which is the cross-source-retune crash condition. Group each control channel
+	// under the first source that covers it for a clear, named report.
+	type group struct {
+		src TrunkRecorderSource
+		ccs []uint64
+	}
+	var groups []group
+	groupOf := map[int]int{} // source index -> groups index
+	for _, cc := range controlChannels {
+		for i, src := range sources {
+			if !trSourceCovers(src, cc) {
+				continue
+			}
+			gi, ok := groupOf[i]
+			if !ok {
+				groups = append(groups, group{src: src})
+				gi = len(groups) - 1
+				groupOf[i] = gi
+			}
+			groups[gi].ccs = append(groups[gi].ccs, cc)
+			break
+		}
+	}
+	parts := make([]string, len(groups))
+	for i, g := range groups {
+		parts[i] = fmt.Sprintf("%s covers %s", describeTRSource(g.src), joinFreqsMHz(g.ccs))
+	}
+	return fmt.Errorf(
+		"a single trunk-recorder system's control channels must all fall within ONE SDR source's bandwidth, but these span %d sources: %s. trunk-recorder can't retune the control-channel decoder across a dongle boundary and crashes (SEGV) at startup. List only the control channels within one source (split the rest into a separate system), and make sure voice/grant channels are NOT listed as control channels — trunk-recorder discovers voice channels from the control channel's grant messages",
+		len(groups), strings.Join(parts, "; "))
+}
+
+// joinFreqsMHz formats a list of Hz frequencies as a comma-separated MHz string.
+func joinFreqsMHz(freqs []uint64) string {
+	out := make([]string, len(freqs))
+	for i, f := range freqs {
+		out[i] = formatFreqMHz(f)
+	}
+	return strings.Join(out, ", ")
+}
+
+// joinSourceBands formats a list of sources as a semicolon-separated band summary.
+func joinSourceBands(sources []TrunkRecorderSource) string {
+	out := make([]string, len(sources))
+	for i, s := range sources {
+		out[i] = describeTRSource(s)
+	}
+	return strings.Join(out, "; ")
+}
+
+// validateTrunkRecorderConfigFile re-checks an on-disk trunk-recorder.json for the
+// cross-source control-channel hazard before we launch the recorder, catching
+// hand-edited configs too. It is deliberately lenient about read/parse errors —
+// trunk-recorder will report those itself; we only block the one condition we know
+// crashes it.
+func validateTrunkRecorderConfigFile(configPath string) error {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil
+	}
+	var cfg TrunkRecorderConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil
+	}
+	for _, sys := range cfg.Systems {
+		if len(sys.ControlChannels) == 0 {
+			continue
+		}
+		if err := validateControlChannelCoverage(sys.ControlChannels, cfg.Sources); err != nil {
+			name := sys.ShortName
+			if name == "" {
+				name = "(unnamed)"
+			}
+			return fmt.Errorf("system %s: %w", name, err)
+		}
+	}
+	return nil
 }
 
 // ── RTL-SDR dongle detection ───────────────────────────────────────────────
@@ -768,6 +955,13 @@ func (m *TrunkRecorderServiceManager) nativeStart(binaryPath, configPath string)
 	if _, err := os.Stat(configPath); err != nil {
 		m.mutex.Unlock()
 		return TrunkRecorderServiceResult{Message: "config file not found at: " + configPath}
+	}
+
+	// Catch the cross-source control-channel hazard before spawning, so a bad config
+	// surfaces as a clear message instead of an immediate status=11/SEGV exit.
+	if err := validateTrunkRecorderConfigFile(configPath); err != nil {
+		m.mutex.Unlock()
+		return TrunkRecorderServiceResult{Message: "refusing to start trunk-recorder — " + err.Error()}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
