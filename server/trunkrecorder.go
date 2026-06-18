@@ -180,8 +180,11 @@ func GenerateTrunkRecorderConfig(req TrunkRecorderGenRequest, systems []*System,
 	sources := req.Sources
 	if len(sources) == 0 && len(req.ControlChannels) > 0 {
 		sources = []TrunkRecorderSource{{
-			Driver:           "rtlsdr",
-			Device:           "0",
+			// trunk-recorder reaches RTL-SDR dongles through gr-osmosdr: the driver
+			// is "osmosdr" and the device is an osmocom arg string ("rtl=0" = first
+			// RTL-SDR), NOT "rtlsdr"/"0" (rejected as an unrecognized driver).
+			Driver:           "osmosdr",
+			Device:           "rtl=0",
 			Center:           req.ControlChannels[0],
 			Rate:             2400000,
 			Gain:             40,
