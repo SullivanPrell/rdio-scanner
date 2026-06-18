@@ -308,6 +308,24 @@ func (admin *Admin) trBinaryPath() string {
 	return defaultTrunkRecorderBinary
 }
 
+// pickTrunkRecorderApiKey returns the rdio-scanner API key trunk-recorder should
+// upload calls with: the dedicated "trunk-recorder" key (seeded by setup.sh) if
+// present, else the first enabled key. Lets the generated config authenticate
+// uploads without the operator pasting a key.
+func (admin *Admin) pickTrunkRecorderApiKey() string {
+	for _, k := range admin.Controller.Apikeys.List {
+		if !k.Disabled && strings.EqualFold(k.Ident, "trunk-recorder") {
+			return k.Key
+		}
+	}
+	for _, k := range admin.Controller.Apikeys.List {
+		if !k.Disabled {
+			return k.Key
+		}
+	}
+	return ""
+}
+
 // ── Admin HTTP handlers ────────────────────────────────────────────────────
 
 // TrunkRecorderConfigHandler handles POST /api/admin/trunk-recorder/config.
@@ -326,6 +344,12 @@ func (admin *Admin) TrunkRecorderConfigHandler(w http.ResponseWriter, r *http.Re
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
 		return
+	}
+
+	// Embed the rdio-scanner API key trunk-recorder uploads with, unless the caller
+	// supplied one — so the generated config can authenticate uploads out of the box.
+	if req.APIKey == "" {
+		req.APIKey = admin.pickTrunkRecorderApiKey()
 	}
 
 	// Use in-memory state — already loaded by the controller at startup
