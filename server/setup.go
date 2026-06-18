@@ -407,7 +407,14 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 		settle("device settings", 20*time.Second)
 	}
 
-	// Create one UDPSink channel per bridge channel.
+	// Create one UDPSink channel per bridge channel. The POST /channel response
+	// doesn't carry the new channel's index (it came back 0 for every channel),
+	// which made every settings PATCH target channel 0 — so only one channel got
+	// its real udpPort and the other nine kept SDRangel's default output port
+	// (9998), sending nowhere the bridge listens. Channels are created in order on
+	// a freshly-cleared device set, so the Nth channel created lands at index N;
+	// track that ourselves, per device set.
+	chIdxByDS := map[int]int{}
 	for i, ch := range channels {
 		cf := centerFreq[ch.DeviceSetIndex]
 		var freqOffset int64
@@ -415,19 +422,19 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 			freqOffset = int64(ch.FrequencyHz) - int64(cf)
 		}
 
-		var added struct {
-			Index int `json:"index"`
-		}
 		if err := c.postJSON(fmt.Sprintf("/deviceset/%d/channel", ch.DeviceSetIndex), map[string]interface{}{
 			"channelType":              "UDPSink",
 			"direction":                0,
 			"originatorDeviceSetIndex": ch.DeviceSetIndex,
-		}, &added); err != nil {
+		}, nil); err != nil {
 			result.Messages = append(result.Messages, fmt.Sprintf("failed to add UDPSink for %s: %v", ch.Label, err))
 			continue
 		}
 
-		if err := c.patchJSON(fmt.Sprintf("/deviceset/%d/channel/%d/settings", ch.DeviceSetIndex, added.Index), map[string]interface{}{
+		chIdx := chIdxByDS[ch.DeviceSetIndex]
+		chIdxByDS[ch.DeviceSetIndex]++
+
+		if err := c.patchJSON(fmt.Sprintf("/deviceset/%d/channel/%d/settings", ch.DeviceSetIndex, chIdx), map[string]interface{}{
 			"channelType":     "UDPSink",
 			"direction":       0,
 			"UDPSinkSettings": udpSinkSettings(ch, freqOffset),
@@ -435,13 +442,12 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 			result.Messages = append(result.Messages, fmt.Sprintf("warning: failed to configure UDPSink for %s: %v", ch.Label, err))
 		}
 
-		// Persist the SDRangel-assigned channel index so the bridge polls the
-		// correct per-channel squelch report.
-		updated[i].ChannelIndex = added.Index
+		// Persist the channel index so the bridge can address the right channel.
+		updated[i].ChannelIndex = chIdx
 
 		result.Messages = append(result.Messages, fmt.Sprintf(
 			"channel %q: UDPSink idx=%d fmt=%d → UDP %d (offset %+d Hz)",
-			ch.Label, added.Index, protocolToSampleFormat(ch.Protocol), ch.UdpPort, freqOffset,
+			ch.Label, chIdx, protocolToSampleFormat(ch.Protocol), ch.UdpPort, freqOffset,
 		))
 
 		// Each UDPSink also builds an FFT plan; blind-wait it out before the next
