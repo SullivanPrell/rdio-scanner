@@ -31,6 +31,14 @@ RDIO_BIN="/usr/local/bin/rdio-scanner"
 TR_BIN="/usr/local/bin/trunk-recorder"
 TR_CONF_DIR="/etc/trunk-recorder"
 TR_DATA_DIR="/var/lib/trunk-recorder"
+TR_CONFIG="${TR_CONF_DIR}/config.json"
+
+# rdio-scanner API key used by trunk-recorder for call uploads. Generated and
+# seeded into rdio-scanner automatically after the server starts (see
+# configure_trunk_recorder). The admin password used to seed it defaults to the
+# server's built-in default; override by exporting RDIO_ADMIN_PASSWORD.
+RDIO_API_KEY=""
+RDIO_ADMIN_PASSWORD="${RDIO_ADMIN_PASSWORD:-rdio-scanner}"
 
 GO_MIN_MINOR=23            # minimum Go 1.x we'll accept from apt before downloading
 GO_DOWNLOAD_VERSION="1.24" # version to download if apt's Go is too old
@@ -91,6 +99,8 @@ if [[ "$YES" == false ]]; then
     echo "   • Install: rtl-sdr, ffmpeg$([ "$SKIP_SDRANGEL" = false ] && echo ", sdrangelsrv")"
     [ "$SKIP_TRUNK_RECORDER" = false ] && \
     echo "   • Build trunk-recorder (P25 trunked decoder, ~15 min)"
+    [ "$SKIP_TRUNK_RECORDER" = false ] && \
+    echo "   • Auto-register its rdio-scanner API key + write its config.json"
     echo "   • Create service account '${RDIO_USER}'"
     echo "   • Install systemd services (auto-start on boot)"
     echo "   • Configure RTL-SDR udev rules and kernel driver blacklist"
@@ -247,16 +257,113 @@ install_trunk_recorder() {
     rm -rf "$tr_src"
     info "trunk-recorder ${tr_version} installed to ${TR_BIN}"
 
-    # Config directory and example config
+    # Config directory only; the runnable config.json is generated later by
+    # configure_trunk_recorder() once the server is up and an API key can be
+    # seeded into rdio-scanner and embedded in the config.
     install -d -m 0755 "$TR_CONF_DIR"
+}
 
-    if [[ ! -f "${TR_CONF_DIR}/config.json" ]]; then
-        cat > "${TR_CONF_DIR}/config.json.example" <<'TRCFG'
+# ── trunk-recorder ↔ rdio-scanner wiring (post-startup) ────────────────────
+
+# Wait until the rdio-scanner HTTP server answers on its port.
+wait_for_rdio() {
+    local _
+    for _ in $(seq 1 30); do
+        curl -fsS -o /dev/null "http://localhost:${RDIO_PORT}/" 2>/dev/null && return 0
+        sleep 1
+    done
+    return 1
+}
+
+# Seed an rdio-scanner API key for trunk-recorder's uploads and point the admin
+# UI's trunk-recorder manager at our binary/config paths. Uses the supported
+# `-cmd config-get | edit | config-set` round-trip (the same admin API the UI
+# uses). Idempotent: reuses an existing "trunk-recorder" key on re-runs.
+# Best-effort — on any failure it falls back to a placeholder key and prints
+# manual instructions, and never aborts setup.
+configure_trunk_recorder() {
+    local url="http://localhost:${RDIO_PORT}/"
+    local token="/tmp/rdio-setup-$$.token"
+    local cfg="/tmp/rdio-config-$$.json"
+
+    step "Registering trunk-recorder API key with rdio-scanner"
+    RDIO_API_KEY="REPLACE_WITH_YOUR_RDIO_SCANNER_API_KEY"
+
+    if ! wait_for_rdio; then
+        warn "rdio-scanner not reachable on :${RDIO_PORT} — cannot auto-register a key."
+        warn "  Add one in Admin → Config → API Keys, then set it in ${TR_CONFIG}."
+        return
+    fi
+
+    if ! RDIO_ADMIN_PASSWORD="$RDIO_ADMIN_PASSWORD" "$RDIO_BIN" \
+            -cmd login +url "$url" +token "$token" >/dev/null 2>&1; then
+        warn "Admin login failed (password changed?). Re-run with RDIO_ADMIN_PASSWORD=<pass>"
+        warn "  or add an API key manually in Admin → Config → API Keys."
+        rm -f "$token"
+        return
+    fi
+
+    if ! "$RDIO_BIN" -cmd config-get +url "$url" +token "$token" +out "$cfg" >/dev/null 2>&1; then
+        warn "Could not read rdio-scanner config — skipping key registration."
+        "$RDIO_BIN" -cmd logout +url "$url" +token "$token" >/dev/null 2>&1 || true
+        rm -f "$token" "$cfg"
+        return
+    fi
+
+    # Reuse an already-seeded key (idempotent), else mint and register a new one.
+    local existing
+    existing="$(jq -r '[.apikeys[]? | select(.ident=="trunk-recorder") | .key][0] // empty' "$cfg" 2>/dev/null)"
+    if [[ -n "$existing" ]]; then
+        RDIO_API_KEY="$existing"
+        info "Reusing existing 'trunk-recorder' API key."
+    else
+        local newkey; newkey="$(cat /proc/sys/kernel/random/uuid)"
+        if jq --arg key "$newkey" --arg bin "$TR_BIN" --arg path "$TR_CONFIG" '
+                .apikeys = ((.apikeys // []) +
+                    [{disabled:false, ident:"trunk-recorder", key:$key, systems:"*"}])
+                | .options.trunkRecorderBinaryPath = $bin
+                | .options.trunkRecorderConfigPath = $path
+            ' "$cfg" > "${cfg}.new" 2>/dev/null \
+           && "$RDIO_BIN" -cmd config-set +url "$url" +token "$token" +in "${cfg}.new" >/dev/null 2>&1; then
+            RDIO_API_KEY="$newkey"
+            info "API key 'trunk-recorder' registered; admin UI wired to ${TR_BIN}."
+        else
+            warn "Could not register the key automatically."
+            warn "  Add it manually in Admin → Config → API Keys."
+        fi
+    fi
+
+    "$RDIO_BIN" -cmd logout +url "$url" +token "$token" >/dev/null 2>&1 || true
+    rm -f "$token" "$cfg" "${cfg}.new"
+}
+
+# Write a runnable /etc/trunk-recorder/config.json with the seeded API key and
+# the local upload URL baked in. Prompts for the P25 control-channel frequency
+# (the one thing that can't be auto-detected) unless running with --yes, and
+# offers to start the service when the config is complete.
+write_trunk_recorder_config() {
+    if [[ -f "$TR_CONFIG" ]]; then
+        info "Existing ${TR_CONFIG} left untouched."
+        return
+    fi
+
+    local ctrl="" ctrl_json="[]" center="0"
+    if [[ "$YES" == false ]]; then
+        ask "Enter your P25 control-channel frequency in Hz (e.g. 770506250),"
+        ask "or leave blank to fill in later:"
+        read -r ctrl
+    fi
+    if [[ "$ctrl" =~ ^[0-9]+$ ]]; then
+        ctrl_json="[ ${ctrl} ]"
+        center="$ctrl"   # centre the SDR on the control channel, like the UI generator
+    fi
+
+    cat > "$TR_CONFIG" <<TRCFG
 {
   "ver": 2,
   "sources": [
     {
-      "center": 0,
+      "center": ${center},
       "rate": 2400000,
       "squelch": -50,
       "device": "rtl=0",
@@ -266,19 +373,31 @@ install_trunk_recorder() {
   ],
   "systems": [
     {
-      "control_channels": [],
+      "control_channels": ${ctrl_json},
       "type": "p25",
-      "talkgroupsFile": "/etc/trunk-recorder/talkgroups.csv",
-      "uploadServer": "http://localhost:3000",
-      "apiKey": "REPLACE_WITH_YOUR_RDIO_SCANNER_API_KEY",
+      "uploadServer": "http://localhost:${RDIO_PORT}",
+      "apiKey": "${RDIO_API_KEY}",
       "shortName": "p25system",
-      "recordUnknown": false
+      "recordUnknown": true
     }
   ],
-  "captureDir": "/var/lib/trunk-recorder"
+  "captureDir": "${TR_DATA_DIR}"
 }
 TRCFG
-        info "Config example written to ${TR_CONF_DIR}/config.json.example"
+    chmod 0644 "$TR_CONFIG"
+    info "Wrote ${TR_CONFIG} (API key + upload URL embedded)."
+
+    # Ready to run only when we have both a real key and a control channel.
+    if [[ "$ctrl_json" != "[]" && "$RDIO_API_KEY" != "REPLACE_WITH_YOUR_RDIO_SCANNER_API_KEY" ]]; then
+        if [[ "$YES" == false ]]; then
+            ask "Enable and start trunk-recorder now? [y/N]"
+            read -r reply
+            if [[ "$reply" =~ ^[Yy]$ ]]; then
+                systemctl enable --now trunk-recorder \
+                    && info "trunk-recorder enabled and started." \
+                    || warn "trunk-recorder failed to start — check: journalctl -u trunk-recorder"
+            fi
+        fi
     fi
 }
 
@@ -289,7 +408,7 @@ step "Installing system packages"
 rm -f /etc/apt/sources.list.d/debian-qt5-tmp.list
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    curl ca-certificates xz-utils git \
+    curl ca-certificates xz-utils git jq \
     rtl-sdr ffmpeg usbutils
 
 if [[ "$SKIP_SDRANGEL" == false ]]; then
@@ -643,6 +762,13 @@ if [[ "$SKIP_SDRANGEL" == false ]] && [[ -x /usr/bin/sdrangelsrv ]]; then
 fi
 systemctl start rdio-scanner || warn "rdio-scanner did not start — run: journalctl -u rdio-scanner"
 
+# ── Wire trunk-recorder into the now-running server ────────────────────────
+# Needs rdio-scanner up so we can register the upload API key over its admin API.
+if [[ "$SKIP_TRUNK_RECORDER" == false ]] && [[ -x "$TR_BIN" ]]; then
+    configure_trunk_recorder || true
+    write_trunk_recorder_config || true
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────
 
 PI_IP="$(ip route get 1.1.1.1 2>/dev/null | awk '/src/{print $7}' | head -1)"
@@ -668,12 +794,16 @@ if [[ "$SKIP_SDRANGEL" == false ]]; then
         || echo -e "   ${Y}●${NC} sdrangelsrv    not running  (journalctl -u sdrangelsrv)"
 fi
 if [[ "$SKIP_TRUNK_RECORDER" == false ]] && [[ -x "$TR_BIN" ]]; then
-    echo -e "   ${Y}●${NC} trunk-recorder not started — configure first:"
-    echo "       1. Get an API key from Admin → Config → API Keys"
-    echo "       2. Edit ${TR_CONF_DIR}/config.json (copy from .example)"
-    echo "          Set: center freq, control_channels, apiKey"
-    echo "       3. Copy talkgroups CSV to ${TR_CONF_DIR}/talkgroups.csv"
-    echo "       4. systemctl enable --now trunk-recorder"
+    if systemctl is-active trunk-recorder >/dev/null 2>&1; then
+        echo -e "   ${G}●${NC} trunk-recorder running  (API key auto-registered)"
+    else
+        echo -e "   ${Y}●${NC} trunk-recorder installed, not started:"
+        echo "       • API key registered and ${TR_CONFIG} generated for you."
+        echo "       • Set control_channels (control-channel freq in Hz) in ${TR_CONFIG},"
+        echo "         then: systemctl enable --now trunk-recorder"
+        echo "       • Records all talkgroups by default; add a talkgroups CSV and set"
+        echo "         recordUnknown=false in ${TR_CONFIG} to filter."
+    fi
 fi
 echo ""
 echo "  Plug in any RTL-SDR dongle — it will be available immediately."
