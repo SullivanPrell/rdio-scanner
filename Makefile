@@ -32,6 +32,7 @@ pandoc = @test -d dist/$(1)-$(2) || mkdir -p dist/$(1)-$(2) && pandoc -f markdow
 zip    = @cd dist/$(1)-$(2) && zip -q ../$(app)-$(1)-$(2)-v$(ver).zip * && cd ..
 
 .PHONY: all help clean run webapp container dist sed
+.PHONY: sdrangel sdrangel-source sdrangel-snap
 .PHONY: freebsd freebsd-amd64
 .PHONY: linux linux-386 linux-amd64 linux-arm linux-arm64
 .PHONY: macos macos-amd64 macos-arm64
@@ -49,6 +50,10 @@ help: ## Show available targets
 	@grep -E '^(all|dist|container|sed)[^:]*:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36mmake %-20s\033[0m %s\n", $$1, $$2}'
 	@grep -E '^(linux|macos|windows|freebsd)[^:]*:.*?## .*$$' $(MAKEFILE_LIST) \
+		| awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36mmake %-20s\033[0m %s\n", $$1, $$2}'
+	@echo ""
+	@echo "  SDRangel install (run on the Raspberry Pi)"
+	@grep -E '^sdrangel[^:]*:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36mmake %-20s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "  Variables"
@@ -78,6 +83,18 @@ run: ## Stop any running instance (service or direct), rebuild everything, and r
 
 clean: ## Remove build artefacts (node_modules, dist, server/webapp, local binary)
 	@rm -fr client-nuxt/node_modules client-nuxt/.nuxt client-nuxt/.output dist server/webapp $(LOCAL_BIN) server/$(LOCAL_BIN)
+
+# ── SDRangel install (two interchangeable paths; run ON the Pi) ───────────────
+# The provisioning REST flow needs an sdrangelsrv whose FFTW planner is
+# thread-safe, or creating a device set races the planner and crashes its API.
+
+sdrangel: sdrangel-source ## Install sdrangelsrv (default: thread-safe source build)
+
+sdrangel-source: ## Build & install a thread-safe sdrangelsrv from source (Pi5/arm64, ~30 min)
+	sudo bash scripts/sdrangel-source.sh
+
+sdrangel-snap: ## Install sdrangelsrv from the prebuilt snap (NOTE: snap is amd64-only, not the arm64 Pi)
+	@bash scripts/sdrangel-snap.sh
 
 container: webapp linux-amd64 ## Build and push multi-arch container image (requires Podman)
 	@podman login docker.io
