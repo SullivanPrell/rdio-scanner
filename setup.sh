@@ -363,11 +363,15 @@ configure_trunk_recorder() {
     fi
 
     # In one config-set, ensure (a) the trunk-recorder API key, (b) a dir watch on
-    # the capture dir, and (c) cleared path options. The dir watch is the crucial
-    # bit: trunk-recorder records WAV+JSON pairs into ${TR_DATA_DIR} but has no
-    # rdio-scanner uploader for a same-host install (its `uploadServer` targets
-    # OpenMHz, not us), so without rdio-scanner watching that directory the calls
-    # never show up in the scanner. All three steps are idempotent on re-runs.
+    # the capture dir, (c) cleared path options, and (d) global auto-populate ON.
+    # The dir watch is the crucial bit: trunk-recorder records WAV+JSON pairs into
+    # ${TR_DATA_DIR} but has no rdio-scanner uploader for a same-host install (its
+    # `uploadServer` targets OpenMHz, not us), so without rdio-scanner watching that
+    # directory the calls never show up in the scanner. Auto-populate is the other
+    # half: this dir watch isn't bound to a systemId, so calls route by short_name
+    # and rely on auto-populate to create the system + its talkgroups on the fly —
+    # trunk-recorder discovers talkgroups live, so without it every unknown talkgroup
+    # is dropped at ingest and nothing appears. All steps are idempotent on re-runs.
     if jq --arg key "$RDIO_API_KEY" --arg dir "$TR_DATA_DIR" '
             .apikeys = (
                 if ([.apikeys[]? | select(.ident=="trunk-recorder")] | length) > 0
@@ -383,6 +387,7 @@ configure_trunk_recorder() {
                 end)
             | .options.trunkRecorderBinaryPath = ""
             | .options.trunkRecorderConfigPath = ""
+            | .options.autoPopulate = true
         ' "$cfg" > "${cfg}.new" 2>/dev/null \
        && "$RDIO_BIN" -cmd config-set +url "$url" +token "$token" +in "${cfg}.new" >/dev/null 2>&1; then
         info "API key registered + auto-ingest dir watch on ${TR_DATA_DIR}."
