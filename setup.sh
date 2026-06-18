@@ -23,7 +23,13 @@ SKIP_TRUNK_RECORDER=false
 SKIP_BUILD=false
 YES=false
 
-RDIO_USER="rdio"
+# Service user = the user running the install (via sudo). Everything rdio-scanner
+# writes — base dir, DB, the generated trunk-recorder config — is then owned by that
+# real user, so there are no cross-user permission gaps. Falls back to a dedicated
+# 'rdio' system user only when run as root directly (no SUDO_USER). RDIO_GROUP is the
+# user's actual primary group (don't assume it equals the username).
+RDIO_USER="${SUDO_USER:-rdio}"
+RDIO_GROUP="$(id -gn "$RDIO_USER" 2>/dev/null || echo "$RDIO_USER")"
 RDIO_DATA_DIR="/var/lib/rdio-scanner"
 RDIO_CONF_DIR="/etc/rdio-scanner"
 RDIO_BIN="/usr/local/bin/rdio-scanner"
@@ -103,7 +109,7 @@ if [[ "$YES" == false ]]; then
     echo "   • Build trunk-recorder (P25 trunked decoder, ~15 min)"
     [ "$SKIP_TRUNK_RECORDER" = false ] && \
     echo "   • Auto-register its rdio-scanner API key + write its config.json"
-    echo "   • Create service account '${RDIO_USER}'"
+    echo "   • Run the services as user '${RDIO_USER}'"
     echo "   • Install systemd services (auto-start on boot)"
     echo "   • Configure RTL-SDR udev rules and kernel driver blacklist"
     echo "   • Patch /boot/firmware/config.txt (gpu_mem, disable-bt, USB power)"
@@ -402,8 +408,8 @@ write_trunk_recorder_config() {
 }
 TRCFG
     chmod 0644 "$TR_CONFIG"
-    # Owned by the service user so the admin UI (running as rdio) can regenerate it.
-    chown "$RDIO_USER:$RDIO_USER" "$TR_CONFIG" 2>/dev/null || true
+    # Owned by the service user so the admin UI (running as that user) can regenerate it.
+    chown "$RDIO_USER:$RDIO_GROUP" "$TR_CONFIG" 2>/dev/null || true
     info "Wrote ${TR_CONFIG} (API key + upload URL embedded)."
 
     # Ready to run only when we have both a real key and a control channel.
@@ -550,25 +556,31 @@ fi
 
 # ── Service account & directories ────────────────────────────────────────
 
-step "Creating 'rdio' service account and data directories"
+step "Setting up service user '${RDIO_USER}' and data directories"
 
 if ! id "$RDIO_USER" &>/dev/null; then
+    # Only reached in the no-SUDO_USER fallback: create a dedicated system user.
     useradd --system --no-create-home \
         --groups plugdev,dialout,audio \
         --shell /usr/sbin/nologin \
         "$RDIO_USER"
-    info "User '${RDIO_USER}' created."
+    RDIO_GROUP="$(id -gn "$RDIO_USER" 2>/dev/null || echo "$RDIO_USER")"
+    info "Service user '${RDIO_USER}' created."
 else
-    info "User '${RDIO_USER}' already exists."
+    info "Running services as existing user '${RDIO_USER}'."
 fi
 
+# SDR + audio access (plugdev for RTL-SDR udev, dialout/audio for devices).
 for grp in plugdev dialout audio; do
     getent group "$grp" &>/dev/null && usermod -aG "$grp" "$RDIO_USER" 2>/dev/null || true
 done
 
-install -d -m 0750 -o "$RDIO_USER" -g "$RDIO_USER" "$RDIO_DATA_DIR"
+install -d -m 0750 -o "$RDIO_USER" -g "$RDIO_GROUP" "$RDIO_DATA_DIR"
+# Re-own existing contents (DB, generated config) in case a prior install used a
+# different service user — otherwise the server couldn't open its own DB.
+chown -R "$RDIO_USER:$RDIO_GROUP" "$RDIO_DATA_DIR" 2>/dev/null || true
 install -d -m 0755 "$RDIO_CONF_DIR"
-info "Data dir: ${RDIO_DATA_DIR}"
+info "Data dir: ${RDIO_DATA_DIR} (owned by ${RDIO_USER}:${RDIO_GROUP})"
 
 # Default config (only if not already present)
 if [[ ! -f "${RDIO_CONF_DIR}/rdio-scanner.ini" ]]; then
@@ -583,10 +595,12 @@ fi
 
 if [[ "$SKIP_TRUNK_RECORDER" == false ]]; then
     install_trunk_recorder
-    # Capture dir owned by the rdio service user (trunk-recorder writes audio here).
+    # Capture dir owned by the service user (trunk-recorder writes audio here).
     # The config file lives in rdio-scanner's base dir (already created, rdio-owned),
     # so there's no /etc permission setup to do.
-    install -d -m 0750 -o "$RDIO_USER" -g "$RDIO_USER" "$TR_DATA_DIR"
+    install -d -m 0750 -o "$RDIO_USER" -g "$RDIO_GROUP" "$TR_DATA_DIR"
+    # Re-own contents too, in case a previous install ran them as a different user.
+    chown -R "$RDIO_USER:$RDIO_GROUP" "$TR_DATA_DIR" 2>/dev/null || true
 fi
 
 # ── RTL-SDR kernel driver blacklist ───────────────────────────────────────
@@ -665,7 +679,7 @@ Wants=network-online.target sdrangelsrv.service
 [Service]
 Type=simple
 User=${RDIO_USER}
-Group=${RDIO_USER}
+Group=${RDIO_GROUP}
 WorkingDirectory=${RDIO_DATA_DIR}
 ExecStart=${RDIO_BIN} \\
     -base_dir ${RDIO_DATA_DIR} \\
