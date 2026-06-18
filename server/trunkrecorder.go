@@ -162,10 +162,7 @@ func GenerateTrunkRecorderConfig(req TrunkRecorderGenRequest, systems []*System,
 		})
 	}
 
-	systemType := req.SystemType
-	if systemType == "" {
-		systemType = "P25"
-	}
+	systemType := normalizeTRSystemType(req.SystemType)
 
 	uploadURL := req.UploadURL
 	if uploadURL == "" {
@@ -209,6 +206,21 @@ func GenerateTrunkRecorderConfig(req TrunkRecorderGenRequest, systems []*System,
 	}
 
 	return cfg, nil
+}
+
+// normalizeTRSystemType maps a UI/system type to trunk-recorder's exact, lowercase
+// system-type strings — it rejects anything else with "System Type ... not
+// recognized". P25 Phase 1 and Phase 2 are both "p25"; trunk-recorder detects the
+// phase from the control channel, so there's no separate phase-2 type.
+func normalizeTRSystemType(t string) string {
+	switch strings.ToLower(strings.TrimSpace(t)) {
+	case "", "p25", "p25p1", "p25 phase 1", "p25phase1", "p25p2", "p25 phase 2", "p25phase2":
+		return "p25"
+	case "smartnet", "motorola", "type ii", "typeii":
+		return "smartnet"
+	default:
+		return strings.ToLower(strings.TrimSpace(t))
+	}
 }
 
 // ── RTL-SDR dongle detection ───────────────────────────────────────────────
