@@ -58,6 +58,14 @@ const trGenControlChannels = ref('')
 const trGenSystemType = ref('P25')
 const trGenerating = ref(false)
 const trGenMessage = ref('')
+const trFrequencies = ref<number[]>([]) // all site frequencies (Hz) from an imported sites CSV
+const trSitesFileName = ref('')
+// Dongles the operator assigned to trunk-recorder on the SDR Devices tab.
+const trDongleIndices = computed(() =>
+  bridge.value.sdrDeviceAssignments
+    .filter(a => a.assignTo === 'trunk-recorder')
+    .map(a => a.index)
+    .sort((a, b) => a - b))
 
 // ── Polling ───────────────────────────────────────────────────────────────────
 let pollTimer: ReturnType<typeof setInterval> | null = null
@@ -197,12 +205,9 @@ async function trAction(action: 'start' | 'stop' | 'restart') {
   await refreshTRLogs()
 }
 
-async function generateTRConfig() {
-  if (!trGenSystemRef.value) {
-    toast.add({ title: 'Select a system first', color: 'warning' })
-    return
-  }
-  const freqs = trGenControlChannels.value
+// Parse a "MHz or Hz, comma-separated" field into Hz. A value < 1e6 is read as MHz.
+function parseFreqField(value: string): number[] {
+  return value
     .split(',')
     .map(s => s.trim())
     .filter(Boolean)
@@ -210,23 +215,130 @@ async function generateTRConfig() {
       const n = parseFloat(s)
       return n < 1e6 ? Math.round(n * 1e6) : Math.round(n)
     })
-  if (!freqs.length) {
+    .filter(n => n > 0)
+}
+
+// Minimal CSV line splitter that respects double-quoted fields.
+function parseCsvLine(line: string): string[] {
+  const out: string[] = []
+  let cur = '', inQuotes = false
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]
+    if (inQuotes) {
+      if (c === '"') { if (line[i + 1] === '"') { cur += '"'; i++ } else inQuotes = false }
+      else cur += c
+    } else if (c === '"') inQuotes = true
+    else if (c === ',') { out.push(cur); cur = '' }
+    else cur += c
+  }
+  out.push(cur)
+  return out
+}
+
+// Import a RadioReference TRS *sites* CSV. Columns 0-8 are site metadata; every
+// column from 9 on is a frequency in MHz, optionally suffixed with 'c' (control
+// channel) / 'a' (alternate). Fills the control-channel field and records the full
+// frequency list used to plan SDR coverage windows.
+async function importSitesCSV(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  const lines = (await file.text()).split(/\r?\n/).filter(l => l.trim())
+  const controlHz: number[] = []
+  const allHz: number[] = []
+  for (const line of lines) {
+    const f = parseCsvLine(line)
+    if (!f.length || /^rfss$/i.test(f[0].trim())) continue // skip header
+    for (let i = 9; i < f.length; i++) {
+      const m = f[i].trim().match(/^(\d+(?:\.\d+)?)\s*([a-zA-Z]*)$/)
+      if (!m) continue
+      const hz = Math.round(parseFloat(m[1]) * 1e6) // sites CSV frequencies are MHz
+      if (!hz) continue
+      allHz.push(hz)
+      if (m[2].toLowerCase().includes('c')) controlHz.push(hz)
+    }
+  }
+  input.value = '' // allow re-uploading the same file
+  if (!allHz.length) {
+    toast.add({ title: 'No frequencies found in CSV', description: 'Expected a RadioReference TRS sites export.', color: 'error' })
+    return
+  }
+  const uniq = (a: number[]) => [...new Set(a)].sort((x, y) => x - y)
+  trFrequencies.value = uniq(allHz)
+  const ctrl = uniq(controlHz.length ? controlHz : allHz)
+  trGenControlChannels.value = ctrl.map(h => (h / 1e6).toString()).join(', ')
+  trSitesFileName.value = file.name
+  toast.add({
+    title: `Imported ${trFrequencies.value.length} frequencies`,
+    description: `${ctrl.length} control channel(s); ${trDongleIndices.value.length || 0} dongle(s) assigned to trunk-recorder.`,
+    color: 'success',
+  })
+}
+
+// Plan one trunk-recorder source per assigned dongle: greedily group the
+// frequencies into ≤~2.16 MHz windows (what a 2.4 MHz dongle can cover), then
+// centre each assigned dongle on a window. Windows containing a control channel
+// are covered first so the system can always lock when dongles are scarce.
+function buildTRSources(coverHz: number[], controlHz: number[], dongleIndices: number[]) {
+  const sorted = [...new Set(coverHz)].sort((a, b) => a - b)
+  if (!sorted.length) return { sources: [] as object[], uncovered: 0 }
+
+  const windows: { min: number; max: number }[] = []
+  let min = sorted[0]!, max = sorted[0]!
+  for (const f of sorted) {
+    if (f - min <= SDR_SAMPLE_RATE * 0.9) max = f
+    else { windows.push({ min, max }); min = f; max = f }
+  }
+  windows.push({ min, max })
+
+  const hasCtrl = (w: { min: number; max: number }) => controlHz.some(h => h >= w.min && h <= w.max)
+  windows.sort((a, b) => (hasCtrl(a) ? 0 : 1) - (hasCtrl(b) ? 0 : 1))
+
+  const indices = dongleIndices.length ? dongleIndices : [0]
+  const nCover = Math.min(windows.length, indices.length)
+  const sources = windows.slice(0, nCover).map((w, i) => ({
+    driver: 'osmosdr',
+    device: `rtl=${indices[i]}`,
+    center: Math.round((w.min + w.max) / 2),
+    rate: SDR_SAMPLE_RATE,
+    gain: 40,
+    digitalRecorders: 4,
+  }))
+  return { sources, uncovered: windows.length - nCover }
+}
+
+async function generateTRConfig() {
+  if (!trGenSystemRef.value) {
+    toast.add({ title: 'Select a system first', color: 'warning' })
+    return
+  }
+  const controlChannels = parseFreqField(trGenControlChannels.value)
+  if (!controlChannels.length) {
     toast.add({ title: 'Enter at least one control channel frequency', color: 'warning' })
     return
   }
+
+  // Cover the full imported frequency span if available, else just the control
+  // channels. Spread the coverage across the dongles assigned to trunk-recorder.
+  const coverHz = trFrequencies.value.length ? trFrequencies.value : controlChannels
+  const { sources, uncovered } = buildTRSources(coverHz, controlChannels, trDongleIndices.value)
 
   trGenerating.value = true
   trGenMessage.value = ''
   const result = await admin.generateTrunkRecorderConfig({
     systemRef: trGenSystemRef.value,
-    controlChannels: freqs,
+    controlChannels,
     systemType: trGenSystemType.value,
+    sources,
   })
   trGenerating.value = false
 
   if (result) {
-    trGenMessage.value = result.saveMessage ?? 'Config generated and saved.'
-    toast.add({ title: 'Config generated', description: trGenMessage.value, color: 'success' })
+    let msg = result.saveMessage ?? 'Config generated and saved.'
+    msg += ` ${sources.length} SDR source(s) from ${trDongleIndices.value.length || 1} dongle(s).`
+    if (uncovered > 0) msg += ` ⚠ ${uncovered} more frequency window(s) need ${uncovered} more dongle(s) assigned to trunk-recorder.`
+    trGenMessage.value = msg
+    toast.add({ title: 'Config generated', description: msg, color: uncovered > 0 ? 'warning' : 'success' })
   }
 }
 
@@ -689,6 +801,15 @@ const trSystemOptions = computed(() => [
             ]" />
           </UFormField>
         </div>
+        <UFormField label="Import RadioReference Sites CSV (optional)" description="Auto-fills control channels and plans multi-dongle SDR coverage from a trs_sites_*.csv export">
+          <input type="file" accept=".csv,.txt" class="text-xs text-neutral-400" @change="importSitesCSV" >
+        </UFormField>
+        <p v-if="trSitesFileName" class="text-xs text-neutral-500 -mt-1">
+          Loaded <span class="font-mono">{{ trSitesFileName }}</span> — {{ trFrequencies.length }} frequencies.
+          {{ trDongleIndices.length }} dongle(s) assigned to trunk-recorder
+          <span v-if="!trDongleIndices.length" class="text-yellow-500">(assign dongles on the SDR Devices tab for multi-SDR coverage)</span>.
+        </p>
+
         <UFormField label="Control Channels (MHz or Hz, comma-separated)" description="e.g. 851.0125, 851.5125 or 851012500, 851512500">
           <UInput v-model="trGenControlChannels" placeholder="851.0125, 851.5125" />
         </UFormField>
