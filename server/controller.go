@@ -326,7 +326,12 @@ func (controller *Controller) IngestCall(call *Call) {
 	}
 
 	if call.System == nil || call.Talkgroup == nil {
-		logCall(call, LogLevelWarn, "no matching system/talkgroup")
+		// Don't use logCall here: it dereferences call.System/call.Talkgroup,
+		// which are exactly the nil values that landed us in this branch. Report
+		// the unresolved refs straight from the call metadata so a misconfigured
+		// bridge channel (audio arrives but no system/talkgroup is configured for
+		// its refs) is actionable instead of silently dropped.
+		controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("newcall: dropped, no configured system/talkgroup for system=%v talkgroup=%v file=%v", call.Meta.SystemRef, call.Meta.TalkgroupRef, call.AudioFilename))
 		return
 	}
 
