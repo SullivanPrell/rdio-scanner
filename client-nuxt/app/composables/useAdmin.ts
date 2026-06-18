@@ -98,6 +98,16 @@ export interface SDRangelProvisionResult {
   messages: string[]
 }
 
+// Async provision job status, polled while a provision runs in the background.
+export interface SDRangelProvisionStatus {
+  running: boolean
+  done: boolean
+  success: boolean
+  messages: string[]
+  startedAt?: number
+  finishedAt?: number
+}
+
 export interface TrunkRecorderServiceStatus {
   running: boolean
   mode: string
@@ -514,15 +524,33 @@ export const useAdmin = () => {
     }
   }
 
-  const provisionSDRangel = async (body: unknown): Promise<SDRangelProvisionResult | null> => {
+  // Kick off an async provision. Returns the initial job status (running) — the
+  // provision then runs server-side; poll getSDRangelProvisionStatus for progress.
+  const provisionSDRangel = async (body: unknown): Promise<SDRangelProvisionStatus | null> => {
     try {
-      return await $fetch<SDRangelProvisionResult>('/api/admin/sdrangel/provision', {
+      return await $fetch<SDRangelProvisionStatus>('/api/admin/sdrangel/provision', {
         method: 'POST',
         headers: authHeader(),
         body,
       })
     } catch (err) {
+      // 409 = a provision is already running; just watch the in-flight one.
+      const status = (err as { statusCode?: number; response?: { status?: number } })
+      if (status?.statusCode === 409 || status?.response?.status === 409) {
+        return { running: true, done: false, success: false, messages: [] }
+      }
       handleError(err, 'SDRangel provision')
+      return null
+    }
+  }
+
+  const getSDRangelProvisionStatus = async (): Promise<SDRangelProvisionStatus | null> => {
+    try {
+      return await $fetch<SDRangelProvisionStatus>('/api/admin/sdrangel/provision/status', {
+        headers: authHeader(),
+      })
+    } catch (err) {
+      handleError(err, 'SDRangel provision status')
       return null
     }
   }
@@ -662,6 +690,7 @@ export const useAdmin = () => {
     sdrangelServiceAction,
     getSDRangelServiceLogs,
     provisionSDRangel,
+    getSDRangelProvisionStatus,
     getTRServiceStatus,
     trServiceAction,
     getTRServiceLogs,

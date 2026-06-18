@@ -69,6 +69,7 @@ const trDongleIndices = computed(() =>
 
 // ── Polling ───────────────────────────────────────────────────────────────────
 let pollTimer: ReturnType<typeof setInterval> | null = null
+let provisionPollTimer: ReturnType<typeof setTimeout> | null = null
 
 async function refreshAll() {
   const [svc, tr, br] = await Promise.all([
@@ -97,14 +98,21 @@ onMounted(async () => {
   await refreshAll()
   dongles.value = await admin.getDongles()
   pollTimer = setInterval(refreshAll, 8000)
+  // A provision started earlier may still be running server-side (it's async and
+  // survives a tab reload) — resume showing its progress.
+  await resumeProvisionIfRunning()
 })
 
 onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer)
+  if (provisionPollTimer) clearTimeout(provisionPollTimer)
 })
 
 watch(subTab, async (tab) => {
-  if (tab === 'sdrangel') await refreshSDRangelLogs()
+  if (tab === 'sdrangel') {
+    await refreshSDRangelLogs()
+    await resumeProvisionIfRunning()
+  }
   if (tab === 'trunk-recorder') await refreshTRLogs()
 })
 
@@ -164,35 +172,71 @@ async function provision() {
     return { index, hwType: 'RTLSDR', sequence: index, serial: sdrangelSerials[index] ?? '', centerFrequencyHz: center, sampleRateHz: SDR_SAMPLE_RATE }
   })
 
-  const result = await admin.provisionSDRangel({ deviceSets, channels: bridge.value.channels.filter(c => c.deviceSetIndex >= 0) })
-  provisioning.value = false
+  const kickoff = await admin.provisionSDRangel({ deviceSets, channels: bridge.value.channels.filter(c => c.deviceSetIndex >= 0) })
 
-  if (!result) {
-    // Network/HTTP failure — handleError already toasted the details.
-    provisionMessages.value = ['provision: request failed — see error toast (is the server reachable?)']
+  if (!kickoff) {
+    // Couldn't even start — handleError already toasted the details.
+    provisioning.value = false
+    provisionMessages.value = ['provision: could not start — see error toast (is the server reachable?)']
     return
   }
 
-  provisionMessages.value = result.messages?.length
-    ? result.messages
-    : ['provision: returned no messages']
+  // Provisioning now runs in the BACKGROUND on the server (minutes long); it keeps
+  // going even if this tab closes. Poll the job for live progress until it finishes.
+  provisionMessages.value = kickoff.messages?.length
+    ? kickoff.messages
+    : ['provision: started — running in the background (this can take a few minutes)…']
+  if (provisionPollTimer) clearTimeout(provisionPollTimer)
+  await pollProvision()
+}
 
-  // result.success is only false on early-exit errors (e.g. can't reach SDRangel);
-  // per-channel failures still return success=true, so scan the messages too.
-  const problems = (result.messages ?? []).filter(m => /failed|warning|cannot/i.test(m))
-  if (!result.success || problems.length) {
+// pollProvision pulls the async provision job's status, updates the live message
+// panel, and reschedules itself until the job finishes — then toasts the outcome.
+async function pollProvision() {
+  const status = await admin.getSDRangelProvisionStatus()
+  if (!status) {
+    provisioning.value = false
+    return
+  }
+  if (status.messages.length) provisionMessages.value = status.messages
+
+  if (!status.done) {
+    provisioning.value = true
+    provisionPollTimer = setTimeout(pollProvision, 2000)
+    return
+  }
+
+  // Finished.
+  provisioning.value = false
+  if (!status.messages.length) provisionMessages.value = ['provision: returned no messages']
+  // success is only false on early-exit errors; per-channel failures still report
+  // success=true, so scan the messages for problems too.
+  const problems = status.messages.filter(m => /failed|warning|cannot/i.test(m))
+  if (!status.success || problems.length) {
     toast.add({
-      title: result.success ? `Provisioned with ${problems.length} problem(s)` : 'SDRangel provision failed',
+      title: status.success ? `Provisioned with ${problems.length} problem(s)` : 'SDRangel provision failed',
       description: problems[0] ?? 'See the provision output below.',
-      color: result.success ? 'warning' : 'error',
+      color: status.success ? 'warning' : 'error',
       duration: 0, // persist — a provision problem shouldn't auto-dismiss before it's read
     })
   } else {
     toast.add({ title: 'SDRangel provisioned', color: 'success' })
   }
-
   // Pull any stdout from a managed sdrangelsrv (e.g. a crash during provisioning).
   await refreshSDRangelLogs()
+}
+
+// resumeProvisionIfRunning re-attaches the live poll to a provision still running
+// server-side (e.g. after a tab reload or switching back to the SDRangel sub-tab).
+async function resumeProvisionIfRunning() {
+  if (provisioning.value) return // already polling
+  const status = await admin.getSDRangelProvisionStatus()
+  if (status?.running) {
+    if (status.messages.length) provisionMessages.value = status.messages
+    provisioning.value = true
+    if (provisionPollTimer) clearTimeout(provisionPollTimer)
+    void pollProvision()
+  }
 }
 
 // ── Trunk-recorder actions ────────────────────────────────────────────────────

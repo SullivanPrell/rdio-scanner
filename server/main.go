@@ -132,6 +132,8 @@ func main() {
 
 	http.HandleFunc("/api/admin/sdrangel/provision", controller.Admin.SDRangelProvisionHandler)
 
+	http.HandleFunc("/api/admin/sdrangel/provision/status", controller.Admin.SDRangelProvisionStatusHandler)
+
 	http.HandleFunc("/api/admin/sdrangel/service", controller.Admin.SDRangelServiceStatusHandler)
 
 	http.HandleFunc("/api/admin/sdrangel/service/action", controller.Admin.SDRangelServiceActionHandler)

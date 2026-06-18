@@ -22,6 +22,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -339,14 +340,24 @@ func (c *sdrangelClient) getStatus() (*SDRangelStatus, error) {
 // Existing channels on each device set are removed first so re-provisioning is
 // idempotent. It returns the result and a copy of channels with ChannelIndex set
 // to the SDRangel-assigned channel index, which callers must persist.
-func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []BridgeChannelConfig) (*SDRangelProvisionResult, []BridgeChannelConfig) {
+func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []BridgeChannelConfig, emit func(string)) (*SDRangelProvisionResult, []BridgeChannelConfig) {
 	result := &SDRangelProvisionResult{Messages: []string{}}
 	updated := make([]BridgeChannelConfig, len(channels))
 	copy(updated, channels)
 
+	// add records a provisioning step in the returned result and, when running as an
+	// async job, streams it live via emit so the admin UI shows progress as each
+	// step completes rather than only at the end.
+	add := func(msg string) {
+		result.Messages = append(result.Messages, msg)
+		if emit != nil {
+			emit(msg)
+		}
+	}
+
 	var devResp sdrangelDeviceSetsResponse
 	if err := c.waitReachable(&devResp, 30*time.Second); err != nil {
-		result.Messages = append(result.Messages, fmt.Sprintf("cannot reach SDRangel after retrying for 30s (is it busy or stuck? check the sdrangelsrv logs): %v", err))
+		add(fmt.Sprintf("cannot reach SDRangel after retrying for 30s (is it busy or stuck? check the sdrangelsrv logs): %v", err))
 		return result, updated
 	}
 
@@ -375,7 +386,7 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 			if m, err := c.devicesBySerial(0); err == nil {
 				serialSeq = m
 			} else {
-				result.Messages = append(result.Messages, fmt.Sprintf("warning: could not list SDRangel devices to honor dongle assignment: %v", err))
+				add(fmt.Sprintf("warning: could not list SDRangel devices to honor dongle assignment: %v", err))
 			}
 			break
 		}
@@ -388,11 +399,11 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 				DevicesetIndex int `json:"devicesetIndex"`
 			}
 			if err := c.postJSON("/deviceset?tx=0", nil, &created); err != nil {
-				result.Messages = append(result.Messages, fmt.Sprintf("failed to create device set: %v", err))
+				add(fmt.Sprintf("failed to create device set: %v", err))
 				return result, updated
 			}
 			devResp.DevicesetCount++
-			result.Messages = append(result.Messages, fmt.Sprintf("created device set %d", created.DevicesetIndex))
+			add(fmt.Sprintf("created device set %d", created.DevicesetIndex))
 
 			// A freshly-created device set builds a SpectrumVis FFTW plan that blocks
 			// SDRangel's main thread for many seconds (longer on the Pi) — the REST API
@@ -412,11 +423,11 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 			if s, ok := serialSeq[dsCfg.Serial]; ok {
 				seq = s
 			} else {
-				result.Messages = append(result.Messages, fmt.Sprintf("warning: dongle serial %s not found in SDRangel — using sequence %d", dsCfg.Serial, dsCfg.Sequence))
+				add(fmt.Sprintf("warning: dongle serial %s not found in SDRangel — using sequence %d", dsCfg.Serial, dsCfg.Sequence))
 			}
 		}
 		if err := c.setDevice(dsCfg.Index, dsCfg.HwType, seq); err != nil {
-			result.Messages = append(result.Messages, fmt.Sprintf("failed to assign device %d (%s): %v", dsCfg.Index, dsCfg.HwType, err))
+			add(fmt.Sprintf("failed to assign device %d (%s): %v", dsCfg.Index, dsCfg.HwType, err))
 			continue
 		}
 
@@ -435,14 +446,14 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 				"dcBlock":         1,
 			},
 		}); err != nil {
-			result.Messages = append(result.Messages, fmt.Sprintf("warning: failed to configure device %d settings: %v", dsCfg.Index, err))
+			add(fmt.Sprintf("warning: failed to configure device %d settings: %v", dsCfg.Index, err))
 		}
 
 		if n := c.clearChannels(dsCfg.Index); n > 0 {
-			result.Messages = append(result.Messages, fmt.Sprintf("device set %d: cleared %d existing channel(s)", dsCfg.Index, n))
+			add(fmt.Sprintf("device set %d: cleared %d existing channel(s)", dsCfg.Index, n))
 		}
 
-		result.Messages = append(result.Messages, fmt.Sprintf("device set %d: %s seq=%d serial=%q center=%d Hz SR=%d", dsCfg.Index, dsCfg.HwType, seq, dsCfg.Serial, dsCfg.CenterFrequencyHz, sr))
+		add(fmt.Sprintf("device set %d: %s seq=%d serial=%q center=%d Hz SR=%d", dsCfg.Index, dsCfg.HwType, seq, dsCfg.Serial, dsCfg.CenterFrequencyHz, sr))
 
 		// The device settings/clear spin up FFT work; blind-wait it out before the
 		// next step (no probing — a concurrent request would race and crash it).
@@ -469,7 +480,7 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 		// anyway, but warn so the misconfiguration is visible.
 		if cf > 0 {
 			if span := int64(sampleRate[ch.DeviceSetIndex]) / 2; freqOffset > span || freqOffset < -span {
-				result.Messages = append(result.Messages, fmt.Sprintf(
+				add(fmt.Sprintf(
 					"warning: channel %q at %d Hz is %+d Hz from center %d Hz, outside the ±%d Hz sampled span — it will produce no audio",
 					ch.Label, ch.FrequencyHz, freqOffset, cf, span,
 				))
@@ -481,7 +492,7 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 			"direction":                0,
 			"originatorDeviceSetIndex": ch.DeviceSetIndex,
 		}, nil); err != nil {
-			result.Messages = append(result.Messages, fmt.Sprintf("failed to add UDPSink for %s: %v", ch.Label, err))
+			add(fmt.Sprintf("failed to add UDPSink for %s: %v", ch.Label, err))
 			continue
 		}
 
@@ -499,13 +510,13 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 			"direction":       0,
 			"UDPSinkSettings": udpSinkSettings(ch, freqOffset),
 		}); err != nil {
-			result.Messages = append(result.Messages, fmt.Sprintf("warning: failed to configure UDPSink for %s: %v", ch.Label, err))
+			add(fmt.Sprintf("warning: failed to configure UDPSink for %s: %v", ch.Label, err))
 		}
 
 		// Persist the channel index so the bridge can address the right channel.
 		updated[i].ChannelIndex = chIdx
 
-		result.Messages = append(result.Messages, fmt.Sprintf(
+		add(fmt.Sprintf(
 			"channel %q: UDPSink idx=%d fmt=%d → UDP %d (offset %+d Hz)",
 			ch.Label, chIdx, protocolToSampleFormat(ch.Protocol), ch.UdpPort, freqOffset,
 		))
@@ -517,9 +528,9 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 	// Start all configured devices
 	for _, dsCfg := range dsCfgs {
 		if err := c.postJSON(fmt.Sprintf("/deviceset/%d/device/run", dsCfg.Index), nil, nil); err != nil {
-			result.Messages = append(result.Messages, fmt.Sprintf("warning: failed to start device %d: %v", dsCfg.Index, err))
+			add(fmt.Sprintf("warning: failed to start device %d: %v", dsCfg.Index, err))
 		} else {
-			result.Messages = append(result.Messages, fmt.Sprintf("device set %d started", dsCfg.Index))
+			add(fmt.Sprintf("device set %d started", dsCfg.Index))
 		}
 	}
 
@@ -641,6 +652,57 @@ func (admin *Admin) SDRangelStatusHandler(w http.ResponseWriter, r *http.Request
 	json.NewEncoder(w).Encode(status)
 }
 
+// ProvisionStatus is the snapshot the admin UI polls while an async provision runs.
+type ProvisionStatus struct {
+	Running    bool     `json:"running"`
+	Done       bool     `json:"done"`
+	Success    bool     `json:"success"`
+	Messages   []string `json:"messages"`
+	StartedAt  int64    `json:"startedAt,omitempty"`  // unix ms
+	FinishedAt int64    `json:"finishedAt,omitempty"` // unix ms
+}
+
+// provisionJob serializes a single async provision run and exposes a live status
+// snapshot. SDRangel can only be provisioned one run at a time, so at most one job
+// is active; start() returns false if one is already running.
+type provisionJob struct {
+	mu     sync.Mutex
+	status ProvisionStatus
+}
+
+func (j *provisionJob) start() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.status.Running {
+		return false
+	}
+	j.status = ProvisionStatus{Running: true, Messages: []string{}, StartedAt: time.Now().UnixMilli()}
+	return true
+}
+
+func (j *provisionJob) emit(msg string) {
+	j.mu.Lock()
+	j.status.Messages = append(j.status.Messages, msg)
+	j.mu.Unlock()
+}
+
+func (j *provisionJob) finish(success bool) {
+	j.mu.Lock()
+	j.status.Running = false
+	j.status.Done = true
+	j.status.Success = success
+	j.status.FinishedAt = time.Now().UnixMilli()
+	j.mu.Unlock()
+}
+
+func (j *provisionJob) snapshot() ProvisionStatus {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	s := j.status
+	s.Messages = append([]string(nil), j.status.Messages...)
+	return s
+}
+
 func (admin *Admin) SDRangelProvisionHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -657,51 +719,71 @@ func (admin *Admin) SDRangelProvisionHandler(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	opts := admin.Controller.Options
+	controller := admin.Controller
 
-	// provision() paces each device-set and channel step (FFTW-settle blind-waits,
-	// up to 90s each) and routinely runs well past the server's 30s WriteTimeout,
-	// which would close the connection mid-request — the browser sees that as
-	// "NetworkError <no response>" even though provisioning completes server-side.
-	// A flat 10-minute deadline still cuts off large multi-dongle / many-channel
-	// configs, so budget the deadline from the actual settle costs in provision():
-	// a fixed base (waitReachable up to 30s + device run + slack), ~3 min per device
-	// set (set construction + device-assign retries + device-settings settles), and
-	// ~30s per channel (creation + settings settles + slack). Floor it at 10 min so
-	// small configs are unaffected. The global timeout stays 30s for every other
-	// endpoint.
-	budget := 1*time.Minute +
-		time.Duration(len(req.DeviceSets))*3*time.Minute +
-		time.Duration(len(opts.BridgeChannels))*30*time.Second
-	if budget < 10*time.Minute {
-		budget = 10 * time.Minute
+	// Provisioning is long-running: provision() paces every device-set and channel
+	// step with FFTW-settle blind-waits (up to 90s each), minutes total on the Pi.
+	// Run it in the BACKGROUND and return immediately, so the request never trips the
+	// server WriteTimeout and the provision completes unattended even if the browser
+	// closes. The admin UI polls SDRangelProvisionStatusHandler for live progress.
+	// Only one provision may run at a time (SDRangel can't be provisioned twice at
+	// once); reject a second.
+	if !controller.Provision.start() {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]any{"error": "a provision is already running"})
+		return
 	}
-	rc := http.NewResponseController(w)
-	if err := rc.SetWriteDeadline(time.Now().Add(budget)); err != nil {
-		log.Printf("provision: could not extend write deadline: %v", err)
-	}
+
 	client := newSDRangelClient(opts.BridgeHost, opts.BridgePort)
-	// Each device/channel REST call blocks on FFTW plan-building on the Pi and
-	// routinely takes longer than the 5s default, so the channel POSTs time out
-	// ("awaiting headers") even though they succeed server-side. Give the provision
-	// client a generous per-call timeout; the short 5s default stays on the client
-	// the status endpoint uses, so UI polling never blocks on a wedged SDRangel.
+	// Each device/channel REST call blocks on FFTW plan-building on the Pi well past
+	// the 5s default, so give the provision client a generous per-call timeout; the
+	// status endpoint's client stays at 5s so UI polling never blocks on a wedged
+	// SDRangel.
 	client.http.Timeout = 60 * time.Second
-	result, updatedChannels := client.provision(req.DeviceSets, opts.BridgeChannels)
 
-	// Write the SDRangel-assigned channel indices back to the bridge config. The
-	// bridge keys channels off UdpPort (not ChannelIndex) and segments calls from
-	// the UDP audio stream itself, so ChannelIndex is now vestigial bookkeeping —
-	// but persist it anyway, then restart the bridge to (re)start it against the
-	// freshly-provisioned channels.
-	if result.Success {
-		admin.Controller.Options.BridgeChannels = updatedChannels
-		if err := admin.Controller.Options.Write(admin.Controller.Database); err != nil {
-			result.Messages = append(result.Messages, fmt.Sprintf("warning: failed to persist updated channel indices: %v", err))
-		} else {
-			admin.Controller.Bridge.Restart()
+	deviceSets := req.DeviceSets
+	channels := opts.BridgeChannels
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				controller.Provision.emit(fmt.Sprintf("provision: aborted by internal error: %v", rec))
+				controller.Provision.finish(false)
+			}
+		}()
+
+		result, updatedChannels := client.provision(deviceSets, channels, controller.Provision.emit)
+
+		// Persist the SDRangel-assigned channel indices and (re)start the bridge so it
+		// listens on the freshly-provisioned channels. The bridge keys off UdpPort, so
+		// ChannelIndex is vestigial bookkeeping, but persist it anyway.
+		if result.Success {
+			controller.Options.BridgeChannels = updatedChannels
+			if err := controller.Options.Write(controller.Database); err != nil {
+				controller.Provision.emit(fmt.Sprintf("warning: failed to persist updated channel indices: %v", err))
+			} else {
+				controller.Bridge.Restart()
+			}
 		}
-	}
+		controller.Provision.finish(result.Success)
+	}()
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(controller.Provision.snapshot())
+}
+
+// SDRangelProvisionStatusHandler returns the current/last async provision's live
+// status (running flag + accumulated messages), polled by the admin UI.
+func (admin *Admin) SDRangelProvisionStatusHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !admin.ValidateToken(admin.GetAuthorization(r)) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(admin.Controller.Provision.snapshot())
 }

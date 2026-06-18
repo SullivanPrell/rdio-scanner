@@ -49,6 +49,7 @@ type Controller struct {
 	Groups           *Groups
 	Logs             *Logs
 	Options          *Options
+	Provision        *provisionJob
 	Scheduler        *Scheduler
 	ServiceManager   *SDRangelServiceManager
 	TRServiceManager *TrunkRecorderServiceManager
@@ -81,6 +82,7 @@ func NewController(config *Config) *Controller {
 	controller.Admin = NewAdmin(controller)
 	controller.Api = NewApi(controller)
 	controller.Bridge = NewBridge(controller)
+	controller.Provision = &provisionJob{}
 	controller.Calls = NewCalls(controller)
 	controller.Database = NewDatabase(config)
 	controller.Delayer = NewDelayer(controller)
