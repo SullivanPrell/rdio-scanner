@@ -86,8 +86,8 @@ info "Repo root: ${REPO_ROOT}"
 if [[ "$YES" == false ]]; then
     echo ""
     echo "  This script will:"
-    echo "   • Install build tools (Go, Node.js 22)"
-    echo "   • Build the Angular client and Go server binary"
+    echo "   • Install build tools (Go, Node.js 22, Yarn)"
+    echo "   • Build the Nuxt client and Go server binary"
     echo "   • Install: rtl-sdr, ffmpeg$([ "$SKIP_SDRANGEL" = false ] && echo ", sdrangelsrv")"
     [ "$SKIP_TRUNK_RECORDER" = false ] && \
     echo "   • Build trunk-recorder (P25 trunked decoder, ~15 min)"
@@ -353,13 +353,30 @@ fi
 
 if [[ "$SKIP_BUILD" == false ]]; then
 
-    step "Building Angular client"
+    step "Enabling Yarn (corepack)"
+    # client-nuxt uses Yarn Berry — the lockfile is Berry-format and config lives in
+    # .yarnrc.yml. corepack (bundled with Node 22) provides a Berry yarn; classic
+    # yarn 1.x would rewrite the lockfile, so prefer corepack and only fall back to a
+    # global npm install if corepack is somehow unavailable.
+    if command -v corepack &>/dev/null; then
+        corepack enable 2>/dev/null || true
+        corepack prepare yarn@stable --activate 2>/dev/null || true
+    fi
+    if ! command -v yarn &>/dev/null; then
+        warn "corepack unavailable — installing Yarn via npm as a fallback."
+        npm install -g yarn 2>/dev/null || true
+    fi
+    command -v yarn &>/dev/null \
+        && info "Yarn $(yarn --version 2>/dev/null) ready." \
+        || fatal "Yarn is required to build the client but could not be installed."
+
+    step "Building Nuxt client"
     (
-        cd "${REPO_ROOT}/client"
-        npm ci --prefer-offline 2>&1 | tail -3
-        npm run build 2>&1 | tail -5
+        cd "${REPO_ROOT}/client-nuxt"
+        yarn install 2>&1 | tail -5
+        yarn build 2>&1 | tail -5
     )
-    info "Angular client built → server/webapp/"
+    info "Nuxt client built → server/webapp/"
 
     step "Compiling rdio-scanner server binary"
     (
