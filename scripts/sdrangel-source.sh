@@ -208,12 +208,24 @@ _stub_qt5 Qt5Charts       libqt5charts5-dev
 _stub_qt5 Qt5Gamepad      libqt5gamepad5-dev
 _stub_qt5 Qt5TextToSpeech libqt5texttospeech5-dev
 
+# verify_threadsafe returns 0 if the binary actually carries the FFTW
+# planner-thread-safety fix. We check for an (undefined, runtime-resolved)
+# reference to fftwf_make_planner_thread_safe rather than a baked-in string
+# marker: the build uses -O3 -flto, which strips the unused marker string but
+# NOT the planner call. Falls back to checking the threads lib is a runtime dep.
+verify_threadsafe() {
+    local bin="$1"
+    nm -D "$bin" 2>/dev/null | grep -q 'fftwf_make_planner_thread_safe' && return 0
+    ldd "$bin" 2>/dev/null | grep -q 'libfftw3f_threads' && return 0
+    return 1
+}
+
 # ── Clone (or reuse) the source tree ─────────────────────────────────────────
 # Reuse an existing compiled build tree so re-runs don't recompile from scratch.
 NEED_CLONE=true
 if [[ -d "${SRC_DIR}/.git" ]]; then
     if [[ -x "${SRC_DIR}/build/sdrangelsrv" ]] && \
-       grep -aq "$FIX_MARKER" "${SRC_DIR}/build/sdrangelsrv" 2>/dev/null; then
+       verify_threadsafe "${SRC_DIR}/build/sdrangelsrv"; then
         info "Existing thread-safe build present at ${SRC_DIR}/build — reusing it (skip clone/patch/compile)."
         NEED_CLONE=false
         SKIP_PATCH=true
@@ -436,14 +448,14 @@ fi
 
 # ── Verify the fix is actually in the freshly-built binary BEFORE installing ──
 # Guards against a silent patch/anchor drift on a future SDRangel version: if the
-# marker isn't in the binary, the planner fix almost certainly didn't compile in,
-# so we refuse to install rather than ship a crashing server.
+# binary has no reference to make_planner_thread_safe, the planner fix didn't
+# compile in, so we refuse to install rather than ship a crashing server.
 BUILT_BIN="${SRC_DIR}/build/sdrangelsrv"
 [[ -x "$BUILT_BIN" ]] || fatal "Build produced no sdrangelsrv binary at ${BUILT_BIN}."
-if ! grep -aq "$FIX_MARKER" "$BUILT_BIN" 2>/dev/null; then
-    fatal "Built binary lacks the FFTW thread-safety marker '${FIX_MARKER}'. The source patch did not take effect (SDRangel layout may have changed). Refusing to install."
+if ! verify_threadsafe "$BUILT_BIN"; then
+    fatal "Built binary has no reference to fftwf_make_planner_thread_safe. The source patch did not take effect (SDRangel layout may have changed). Refusing to install."
 fi
-info "Verified FFTW thread-safety marker present in built binary."
+info "Verified FFTW thread-safety (make_planner_thread_safe linked) in built binary."
 
 # ── Install ──────────────────────────────────────────────────────────────────
 
@@ -453,8 +465,8 @@ step "Installing to ${INSTALL_BIN}"
 # `make install` writes to CMAKE_INSTALL_PREFIX=/usr, so the binary lands at
 # /usr/bin/sdrangelsrv. Confirm and re-verify the marker on the installed copy.
 [[ -x "$INSTALL_BIN" ]] || fatal "sdrangelsrv not found at ${INSTALL_BIN} after install."
-if ! grep -aq "$FIX_MARKER" "$INSTALL_BIN" 2>/dev/null; then
-    fatal "Installed ${INSTALL_BIN} lacks the thread-safety marker — install may have picked up a different binary."
+if ! verify_threadsafe "$INSTALL_BIN"; then
+    fatal "Installed ${INSTALL_BIN} has no make_planner_thread_safe reference — install may have picked up a different binary."
 fi
 
 info "Thread-safe sdrangelsrv ${SDRANGEL_VERSION} installed at ${INSTALL_BIN}."
