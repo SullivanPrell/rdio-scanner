@@ -413,15 +413,15 @@ func (b *Bridge) monitorChannel(ctx context.Context, cfg BridgeChannelConfig) {
 				}
 
 				payload := data
-				// Once framing is decided, RTP packets are always stripped.
-				// Before that, optimistically strip the header of any RTP-
-				// shaped datagram too: this avoids leaking the first packet's
-				// RTP header on a genuinely RTP-framed stream, and for raw L16
-				// PCM that merely looks RTP-shaped it costs only ~12 bytes once
-				// at stream start. Non-RTP-shaped packets are always forwarded
-				// whole (raw PCM).
-				if off := rtpPayloadOffset(data); off >= 0 && (rtpFramed || !rtpDecided) {
-					payload = data[off:]
+				// Strip RTP headers ONLY once the stream is confirmed RTP-framed
+				// (two consecutive datagrams sharing an SSRC + monotonic sequence).
+				// Never strip before that: raw L16 PCM whose first byte happens to
+				// look RTP-shaped must be forwarded whole, or we'd corrupt real audio
+				// samples. UDPSink sends raw L16 here, so this path stays untouched.
+				if rtpFramed {
+					if off := rtpPayloadOffset(data); off >= 0 {
+						payload = data[off:]
+					}
 				}
 
 				chunk := make([]byte, len(payload))
