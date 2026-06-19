@@ -469,7 +469,7 @@ function addChannel() {
       frequencyHz: 0,
       label: '',
       protocol: 'nfm',
-      squelchDb: -55,
+      squelchDb: -45,
       sampleRate: 8000,
       systemRef: 0,
       talkgroupRef: 0,
@@ -533,7 +533,7 @@ function addSystemChannels() {
       frequencyHz: freq,
       label: tg.name || tg.label || `TG ${tg.talkgroupRef}`,
       protocol: 'nfm',
-      squelchDb: -55,
+      squelchDb: -45,
       sampleRate: 8000,
       systemRef: sys.systemRef,
       talkgroupRef: tg.talkgroupRef,
@@ -1093,8 +1093,9 @@ const trSystemOptions = computed(() => [
 
       <p class="text-xs text-neutral-600">
         Each channel maps one SDRangel NFM/AM/USB/LSB demodulator to a rdio-scanner talkgroup via UDP audio relay.
-        Squelch (dB) is the per-channel threshold SDRangel uses to gate audio — lower it (e.g. −60) if weak signals
-        aren't opening, raise it if noise records constantly. After editing, save config and click Provision SDRangel.
+        Squelch (dB) is the per-channel threshold SDRangel uses to gate audio (default −45). If you get constant
+        static or never-ending calls, the squelch is passing noise — raise it toward −35/−30. Lower it (e.g. −55)
+        only if real transmissions don't open it. After editing, save config and click Provision SDRangel.
       </p>
     </div>
   </div>

@@ -540,8 +540,11 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 
 // bridgeDefaultSquelchDB is the squelch threshold used when a channel doesn't
 // specify one (SquelchDB == 0). Squelch values are negative dBFS, so 0 reliably
-// means "unset" rather than a threshold anyone would pick.
-const bridgeDefaultSquelchDB = -55
+// means "unset" rather than a threshold anyone would pick. -45 is deliberately less
+// twitchy than a hair-trigger -55/-60: an open squelch sitting on the noise floor
+// passes static AND never emits the closed-squelch silence the bridge segments on,
+// so calls run to the cap. Operators lower it per-channel for genuinely weak signals.
+const bridgeDefaultSquelchDB = -45
 
 // udpSinkSettings builds the UDPSinkSettings payload for one bridge channel.
 // sampleFormat selects the demodulator; the squelch produces the exact-zero PCM
@@ -583,8 +586,8 @@ func udpSinkSettings(ch BridgeChannelConfig, freqOffset int64) map[string]interf
 		"outputSampleRate":     sr,
 		"squelchEnabled":       1,
 		"squelchDB":            squelchDB,
-		"squelchGate":          5, // 100ths of a second → 50 ms
-		"agc":                  1,
+		"squelchGate":          10, // 100ths of a second → 100 ms: ride out brief noise spikes that flick the squelch open
+		"agc":                  0,  // off: fixed gain keeps levels predictable and stops the demod cranking the noise floor to full scale (loud static) on open squelch
 		"gain":                 1.0,
 		"channelMute":          0,
 		"audioActive":          0,
