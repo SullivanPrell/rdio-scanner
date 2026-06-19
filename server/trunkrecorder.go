@@ -877,14 +877,14 @@ func (m *TrunkRecorderServiceManager) systemdAction(action string) TrunkRecorder
 }
 
 // systemdLogs returns the unit's recent journal lines (needs systemd-journal group).
-func systemdLogs(tail int) []string {
-	out, err := exec.Command("journalctl", "-u", trunkRecorderUnit, "-n", strconv.Itoa(tail), "--no-pager", "-o", "short-iso").CombinedOutput()
+func systemdLogs(unit string, tail int) []string {
+	out, err := exec.Command("journalctl", "-u", unit, "-n", strconv.Itoa(tail), "--no-pager", "-o", "short-iso").CombinedOutput()
 	if err != nil {
 		return []string{"journalctl unavailable (service user may need the systemd-journal group): " + strings.TrimSpace(string(out))}
 	}
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
 	if len(lines) == 0 || (len(lines) == 1 && lines[0] == "") {
-		return []string{"No journal output yet. Start trunk-recorder to see logs here."}
+		return []string{"No journal output yet for " + unit + "."}
 	}
 	return lines
 }
@@ -1151,7 +1151,7 @@ func (m *TrunkRecorderServiceManager) Logs(containerName string, tail int) []str
 	case "docker":
 		return dockerLogs(containerName, tail)
 	case "systemd":
-		return systemdLogs(tail)
+		return systemdLogs(trunkRecorderUnit, tail)
 	default:
 		lines := m.nativeLogs.Lines(tail)
 		if len(lines) == 0 {

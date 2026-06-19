@@ -538,15 +538,38 @@ func (m *SDRangelServiceManager) Restart(containerName, binaryPath, extraArgs, h
 	return m.Start(containerName, binaryPath, extraArgs, host, port)
 }
 
+const sdrangelUnit = "sdrangelsrv.service"
+
+// sdrangelSystemdInstalled reports whether the sdrangelsrv systemd unit file exists,
+// so Live Logs can fall back to the journal for an adopted (systemd-started) instance.
+func sdrangelSystemdInstalled() bool {
+	for _, p := range []string{
+		"/etc/systemd/system/" + sdrangelUnit,
+		"/lib/systemd/system/" + sdrangelUnit,
+		"/usr/lib/systemd/system/" + sdrangelUnit,
+	} {
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *SDRangelServiceManager) Logs(containerName string, tail int) []string {
 	if m.mode(containerName) == "docker" {
 		return dockerLogs(containerName, tail)
 	}
-	lines := m.nativeLogs.Lines(tail)
-	if len(lines) == 0 {
-		return []string{"No output captured yet. Start sdrangelsrv to see logs here."}
+	// Prefer stdout we captured ourselves (when rdio-scanner spawned sdrangelsrv). When
+	// the instance was started by systemd and merely adopted (the common Pi setup —
+	// setup.sh installs sdrangelsrv.service), our ring buffer is empty, so fall back to
+	// the unit's journal — otherwise Live Logs stays blank for a healthy sdrangelsrv.
+	if lines := m.nativeLogs.Lines(tail); len(lines) > 0 {
+		return lines
 	}
-	return lines
+	if sdrangelSystemdInstalled() {
+		return systemdLogs(sdrangelUnit, tail)
+	}
+	return []string{"No output captured yet. Start sdrangelsrv to see logs here."}
 }
 
 // ── Admin HTTP handlers ────────────────────────────────────────────────────
