@@ -119,13 +119,21 @@ func NewSDRangelServiceManager() *SDRangelServiceManager {
 // AND the Docker socket is reachable. Native is the default so bare-metal Pi
 // deployments never require Docker to be installed.
 func (m *SDRangelServiceManager) mode(containerName string) string {
-	if containerName == "" {
-		return "native"
+	if containerName != "" {
+		conn, err := net.Dial("unix", "/var/run/docker.sock")
+		if err == nil {
+			conn.Close()
+			return "docker"
+		}
 	}
-	conn, err := net.Dial("unix", "/var/run/docker.sock")
-	if err == nil {
-		conn.Close()
-		return "docker"
+	// Prefer the systemd unit when installed: rdio-scanner must DRIVE sdrangelsrv via
+	// systemctl, not spawn/adopt/reap it natively. The native reaper SIGINTs ANY
+	// sdrangelsrv by binary name — including the systemd-managed instance — which
+	// exits cleanly (status 0), so Restart=on-failure won't relaunch it and it ends up
+	// "down with no logs". Routing through systemd (like the trunk-recorder manager)
+	// removes that conflict; the polkit rule from setup.sh authorizes the service user.
+	if sdrangelSystemdInstalled() {
+		return "systemd"
 	}
 	return "native"
 }
@@ -509,33 +517,88 @@ func (m *SDRangelServiceManager) nativeStop(binaryPath string) SDRangelServiceRe
 // ── Public API ─────────────────────────────────────────────────────────────
 
 func (m *SDRangelServiceManager) Status(containerName, binaryPath, host string, port uint) SDRangelServiceStatus {
-	if m.mode(containerName) == "docker" {
+	switch m.mode(containerName) {
+	case "docker":
 		return m.dockerStatus(containerName)
+	case "systemd":
+		return m.systemdStatus()
+	default:
+		return m.nativeStatus(binaryPath, host, port)
 	}
-	return m.nativeStatus(binaryPath, host, port)
 }
 
 func (m *SDRangelServiceManager) Start(containerName, binaryPath, extraArgs, host string, port uint) SDRangelServiceResult {
-	if m.mode(containerName) == "docker" {
+	switch m.mode(containerName) {
+	case "docker":
 		return m.dockerStart(containerName)
+	case "systemd":
+		return m.systemdAction("start")
+	default:
+		return m.nativeStart(binaryPath, extraArgs, host, port)
 	}
-	return m.nativeStart(binaryPath, extraArgs, host, port)
 }
 
 func (m *SDRangelServiceManager) Stop(containerName, binaryPath string) SDRangelServiceResult {
-	if m.mode(containerName) == "docker" {
+	switch m.mode(containerName) {
+	case "docker":
 		return m.dockerStop(containerName)
+	case "systemd":
+		return m.systemdAction("stop")
+	default:
+		return m.nativeStop(binaryPath)
 	}
-	return m.nativeStop(binaryPath)
 }
 
 func (m *SDRangelServiceManager) Restart(containerName, binaryPath, extraArgs, host string, port uint) SDRangelServiceResult {
+	if m.mode(containerName) == "systemd" {
+		return m.systemdAction("restart") // atomic; avoids the native reap/spawn race
+	}
 	stop := m.Stop(containerName, binaryPath)
 	if !stop.Success {
 		return stop
 	}
 	// nativeStop waits for the process to fully exit, so no sleep needed here
 	return m.Start(containerName, binaryPath, extraArgs, host, port)
+}
+
+// systemdStatus reads the sdrangelsrv unit's active state and main PID (no privileges).
+func (m *SDRangelServiceManager) systemdStatus() SDRangelServiceStatus {
+	st := SDRangelServiceStatus{Mode: "systemd"}
+	active, _ := exec.Command("systemctl", "is-active", sdrangelUnit).Output()
+	state := strings.TrimSpace(string(active))
+	st.Running = state == "active"
+	if st.Running {
+		st.Message = "running (systemd)"
+		if out, err := exec.Command("systemctl", "show", "-p", "MainPID", "--value", sdrangelUnit).Output(); err == nil {
+			if pid, e := strconv.Atoi(strings.TrimSpace(string(out))); e == nil {
+				st.PID = pid
+			}
+		}
+	} else {
+		if state == "" {
+			state = "unknown"
+		}
+		st.Message = state // inactive | failed | activating | ...
+	}
+	return st
+}
+
+// systemdAction drives the sdrangelsrv unit via systemctl. The service user is
+// authorized by the polkit rule setup.sh installs; surface a clear hint if it isn't.
+func (m *SDRangelServiceManager) systemdAction(action string) SDRangelServiceResult {
+	out, err := exec.Command("systemctl", action, sdrangelUnit).CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		low := strings.ToLower(msg)
+		if strings.Contains(low, "interactive authentication required") || strings.Contains(low, "access denied") {
+			msg += " — the service user can't manage the unit; re-run setup.sh to install the polkit rule"
+		}
+		return SDRangelServiceResult{Message: fmt.Sprintf("systemctl %s failed: %s", action, msg)}
+	}
+	return SDRangelServiceResult{Success: true, Message: fmt.Sprintf("sdrangelsrv %sed (systemd)", action)}
 }
 
 const sdrangelUnit = "sdrangelsrv.service"
