@@ -192,18 +192,20 @@ func GenerateTrunkRecorderConfig(req TrunkRecorderGenRequest, systems []*System,
 		}}
 	}
 
-	// The cross-source control-channel hazard (control channels that span more than
-	// one source's bandwidth) is NOT a hard failure here: generation always returns
-	// a saved config so the operator can review and tune it. It's surfaced as a
-	// warning by the handler and re-checked — and refused — only at trunk-recorder
-	// start, where a genuinely-unsafe config would actually crash (status=11/SEGV).
+	// Lock out the cross-source crash-config: trunk-recorder SIGABRTs the instant it
+	// retunes a control channel across an SDR source boundary, and the config runs
+	// straight from disk via systemd, so we must never WRITE control channels that
+	// span sources. Confine them to one band here (all sources stay — voice grants
+	// legitimately span them). The handler reports anything dropped.
+	controlChannels, _ := confineControlChannels(req.ControlChannels, sources)
+
 	cfg := &TrunkRecorderConfig{
 		Ver:     2,
 		Sources: sources,
 		Systems: []TrunkRecorderSystem{{
 			ShortName:       shortName,
 			Type:            systemType,
-			ControlChannels: req.ControlChannels,
+			ControlChannels: controlChannels,
 			UploadServer:    uploadURL,
 			APIKey:          req.APIKey,
 			Talkgroups:      talkgroups,
@@ -276,6 +278,40 @@ func describeTRSource(src TrunkRecorderSource) string {
 	}
 	high := src.Center + half
 	return fmt.Sprintf("%s (center %s, band %s–%s)", dev, formatFreqMHz(src.Center), formatFreqMHz(low), formatFreqMHz(high))
+}
+
+// confineControlChannels keeps only the control channels served by a SINGLE SDR
+// source, so a generated config can never make trunk-recorder retune a control
+// channel across a source/dongle boundary — which SIGABRTs it at runtime
+// ("rtlsdr_read_async returned with -2"). Because the config is launched straight
+// from disk by systemd (bypassing any in-process guard), confining it at generation
+// is the only reliable lock. It keeps the band of the FIRST (primary) control
+// channel — operator-controllable by ordering — and drops any in a different
+// source's band. Voice channels are unaffected: trunk-recorder discovers them from
+// the control channel and records each on whichever source covers it, so all sources
+// stay in the config. Returns the kept and dropped sets, input order preserved.
+func confineControlChannels(controlChannels []uint64, sources []TrunkRecorderSource) (kept []uint64, dropped []uint64) {
+	if len(controlChannels) == 0 || len(sources) == 0 {
+		return controlChannels, nil
+	}
+	primary := -1
+	for i, src := range sources {
+		if trSourceCovers(src, controlChannels[0]) {
+			primary = i
+			break
+		}
+	}
+	if primary < 0 {
+		return controlChannels, nil // first CC covered by no source — can't confine sensibly
+	}
+	for _, cc := range controlChannels {
+		if trSourceCovers(sources[primary], cc) {
+			kept = append(kept, cc)
+		} else {
+			dropped = append(dropped, cc)
+		}
+	}
+	return kept, dropped
 }
 
 // validateControlChannelCoverage enforces that every control channel of a single
@@ -569,11 +605,22 @@ func (admin *Admin) TrunkRecorderConfigHandler(w http.ResponseWriter, r *http.Re
 		}
 	}
 
-	// Surface the cross-source control-channel hazard as a non-fatal warning so the
-	// operator sees it but still gets a saved config. It is enforced (refused) only
-	// at trunk-recorder start, where a genuinely-unsafe config would actually SEGV.
-	if covErr := validateControlChannelCoverage(req.ControlChannels, cfg.Sources); covErr != nil {
-		saveMsg = appendMsg(saveMsg, "warning: "+covErr.Error())
+	// If control channels were confined to one SDR band (cross-source control channels
+	// crash trunk-recorder), tell the operator exactly what was kept vs dropped. The
+	// kept band is the FIRST control channel's band, which may not be the one that
+	// actually decodes — only runtime tells — so guide them to swap if it shows 0/sec.
+	if len(cfg.Systems) > 0 && len(cfg.Systems[0].ControlChannels) < len(req.ControlChannels) {
+		keptSet := map[uint64]bool{}
+		for _, c := range cfg.Systems[0].ControlChannels {
+			keptSet[c] = true
+		}
+		var dropped []uint64
+		for _, c := range req.ControlChannels {
+			if !keptSet[c] {
+				dropped = append(dropped, c)
+			}
+		}
+		saveMsg = appendMsg(saveMsg, fmt.Sprintf("confined control channels to one SDR band to avoid a trunk-recorder crash — kept %s, dropped %s. If the kept band shows a 0/sec decode rate, regenerate listing only the other band's frequencies (put the working control channel first).", joinFreqsMHz(cfg.Systems[0].ControlChannels), joinFreqsMHz(dropped)))
 	}
 
 	// Make rdio-scanner actually ingest what trunk-recorder records. trunk-recorder

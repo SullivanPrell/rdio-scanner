@@ -388,7 +388,15 @@ async function generateTRConfig() {
     msg += ` ${sources.length} SDR source(s) from ${trDongleIndices.value.length || 1} dongle(s).`
     if (uncovered > 0) msg += ` ⚠ ${uncovered} more frequency window(s) need ${uncovered} more dongle(s) assigned to trunk-recorder.`
     trGenMessage.value = msg
-    toast.add({ title: 'Config generated', description: msg, color: uncovered > 0 ? 'warning' : 'success' })
+    // Flag (amber + persistent) when the server dropped/confined channels or warned —
+    // e.g. control channels confined to one SDR band — so it isn't a cheery green.
+    const flagged = uncovered > 0 || /confined|dropped|warning|could not|failed/i.test(result.saveMessage ?? '')
+    toast.add({
+      title: flagged ? 'Config generated — review the note below' : 'Config generated',
+      description: msg,
+      color: flagged ? 'warning' : 'success',
+      duration: flagged ? 0 : undefined,
+    })
   }
 }
 
