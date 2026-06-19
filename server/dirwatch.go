@@ -366,6 +366,12 @@ func (dirwatch *Dirwatch) ingestTrunkRecorder(p string) error {
 	}
 
 	if call.Audio, err = os.ReadFile(audioName); err != nil {
+		// Don't drop this silently — a .json with no readable sibling audio is a
+		// classic "trunk-recorder records but nothing shows in the scanner" cause
+		// (audio written with a different extension, a partial/in-progress write,
+		// or a capture-dir mismatch). Surface it so the failure is diagnosable
+		// instead of vanishing without a trace.
+		dirwatch.controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("dirwatch: trunk-recorder %s has no readable audio at %s — skipping (%v)", filepath.Base(p), filepath.Base(audioName), err))
 		return nil
 	}
 
