@@ -5,6 +5,7 @@ import type {
   AdminSystem,
   RTLDongle,
   SDRangelServiceStatus,
+  SDRangelConnectStatus,
   TrunkRecorderServiceStatus,
   BridgeStatus,
 } from '~/composables/useAdmin'
@@ -30,6 +31,11 @@ const sdrangelSvc = ref<SDRangelServiceStatus>({ running: false, mode: 'native' 
 const sdrangelLogs = ref<string[]>([])
 const sdrangelActioning = ref(false)
 const sdrangelLogsEl = ref<HTMLElement | null>(null)
+// REST view of what SDRangel currently has provisioned (device sets + channels).
+const sdrangelStatus = ref<SDRangelConnectStatus>({ connected: false })
+const provisionedChannelCount = computed(() =>
+  (sdrangelStatus.value.deviceSets ?? []).reduce((n, ds) => n + ds.channels.length, 0),
+)
 
 // ── Trunk-recorder service state ──────────────────────────────────────────────
 const trSvc = ref<TrunkRecorderServiceStatus>({ running: false, mode: 'native' })
@@ -72,14 +78,16 @@ let pollTimer: ReturnType<typeof setInterval> | null = null
 let provisionPollTimer: ReturnType<typeof setTimeout> | null = null
 
 async function refreshAll() {
-  const [svc, tr, br] = await Promise.all([
+  const [svc, tr, br, sdr] = await Promise.all([
     admin.getSDRangelServiceStatus(),
     admin.getTRServiceStatus(),
     admin.getBridgeStatus(),
+    admin.getSDRangelStatus(),
   ])
   sdrangelSvc.value = svc
   trSvc.value = tr
   bridgeSvc.value = br
+  sdrangelStatus.value = sdr
 }
 
 async function refreshSDRangelLogs() {
@@ -728,6 +736,42 @@ const trSystemOptions = computed(() => [
           </div>
         </div>
         <p v-if="sdrangelSvc.message" class="text-xs text-neutral-500">{{ sdrangelSvc.message }}</p>
+      </div>
+
+      <!-- Provisioned state: what SDRangel actually has configured right now -->
+      <div class="rounded-lg border border-neutral-800 p-4">
+        <div class="flex items-center justify-between mb-2">
+          <p class="text-xs font-semibold text-neutral-400 uppercase tracking-wide">Provisioned on SDRangel</p>
+          <span
+            class="text-xs font-mono"
+            :class="provisioning ? 'text-amber-400' : (sdrangelStatus.connected ? 'text-green-500' : 'text-neutral-500')"
+          >
+            {{ provisioning ? 'provisioning…' : (sdrangelStatus.connected ? 'live' : 'unreachable') }}
+          </span>
+        </div>
+
+        <p v-if="!sdrangelStatus.connected" class="text-xs text-neutral-500">
+          Can't read SDRangel — start sdrangelsrv to see what's provisioned.
+        </p>
+        <p v-else-if="!provisionedChannelCount" class="text-xs text-neutral-500">
+          Nothing provisioned yet — set up channels below, then click Provision SDRangel.
+        </p>
+        <div v-else class="space-y-2">
+          <p class="text-xs text-neutral-400">
+            {{ (sdrangelStatus.deviceSets ?? []).length }} device set(s) · {{ provisionedChannelCount }} channel(s)
+          </p>
+          <div v-for="ds in (sdrangelStatus.deviceSets ?? [])" :key="ds.index" class="text-xs">
+            <span class="font-mono text-neutral-300">Device set {{ ds.index }}</span>
+            <span class="text-neutral-500"> · {{ ds.hwType || 'unassigned' }} · {{ ds.channels.length }} ch</span>
+            <div v-if="ds.channels.length" class="mt-1 pl-3 flex flex-wrap gap-1">
+              <span
+                v-for="ch in ds.channels"
+                :key="ch.index"
+                class="rounded bg-neutral-800 px-1.5 py-0.5 text-neutral-300 font-mono"
+              >{{ ch.title || ch.idText || ('ch ' + ch.index) }}</span>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- Connection settings -->
