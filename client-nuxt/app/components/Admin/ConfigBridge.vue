@@ -36,6 +36,31 @@ const sdrangelStatus = ref<SDRangelConnectStatus>({ connected: false })
 const provisionedChannelCount = computed(() =>
   (sdrangelStatus.value.deviceSets ?? []).reduce((n, ds) => n + ds.channels.length, 0),
 )
+// SDRangel's device-set listing doesn't carry a channel's frequency or UDP port, so
+// join each provisioned channel back to the local bridge config (by device-set +
+// channel index, falling back to a label/title match) to surface freq + port.
+const provisionedDeviceSets = computed(() => {
+  const chans = bridge.value.channels ?? []
+  return (sdrangelStatus.value.deviceSets ?? []).map(ds => ({
+    index: ds.index,
+    hwType: ds.hwType,
+    channels: ds.channels.map(ch => {
+      const m = chans.find(c => c.deviceSetIndex === ds.index && c.channelIndex === ch.index)
+        ?? chans.find(c => !!c.label && c.label === ch.title)
+      return {
+        index: ch.index,
+        label: ch.title || ch.idText || `ch ${ch.index}`,
+        freqHz: m?.frequencyHz,
+        udpPort: m?.udpPort,
+      }
+    }),
+  }))
+})
+
+function formatMHz(hz?: number): string {
+  if (!hz) return ''
+  return `${(hz / 1e6).toFixed(4).replace(/\.?0+$/, '')} MHz`
+}
 
 // ── Trunk-recorder service state ──────────────────────────────────────────────
 const trSvc = ref<TrunkRecorderServiceStatus>({ running: false, mode: 'native' })
@@ -760,7 +785,7 @@ const trSystemOptions = computed(() => [
           <p class="text-xs text-neutral-400">
             {{ (sdrangelStatus.deviceSets ?? []).length }} device set(s) · {{ provisionedChannelCount }} channel(s)
           </p>
-          <div v-for="ds in (sdrangelStatus.deviceSets ?? [])" :key="ds.index" class="text-xs">
+          <div v-for="ds in provisionedDeviceSets" :key="ds.index" class="text-xs">
             <span class="font-mono text-neutral-300">Device set {{ ds.index }}</span>
             <span class="text-neutral-500"> · {{ ds.hwType || 'unassigned' }} · {{ ds.channels.length }} ch</span>
             <div v-if="ds.channels.length" class="mt-1 pl-3 flex flex-wrap gap-1">
@@ -768,7 +793,10 @@ const trSystemOptions = computed(() => [
                 v-for="ch in ds.channels"
                 :key="ch.index"
                 class="rounded bg-neutral-800 px-1.5 py-0.5 text-neutral-300 font-mono"
-              >{{ ch.title || ch.idText || ('ch ' + ch.index) }}</span>
+              >{{ ch.label }}<span
+                v-if="ch.freqHz || ch.udpPort"
+                class="text-neutral-500"
+              >{{ ch.freqHz ? ' · ' + formatMHz(ch.freqHz) : '' }}{{ ch.udpPort ? ' · :' + ch.udpPort : '' }}</span></span>
             </div>
           </div>
         </div>
