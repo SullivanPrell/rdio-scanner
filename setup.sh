@@ -849,6 +849,7 @@ if [[ -f "$BOOT_CFG" ]]; then
       | grep -v '^dtoverlay=disable-bt' \
       | grep -v '^max_usb_current=' \
       | grep -v '^usb_max_current_enable=' \
+      | grep -v '^dtparam=watchdog=' \
       > /tmp/config.txt.tmp && mv /tmp/config.txt.tmp "$BOOT_CFG"
     # Raise the downstream USB current budget so several RTL-SDR dongles can run
     # at once. The key is board-specific: Pi 4 uses max_usb_current=1, Pi 5 uses
@@ -863,11 +864,75 @@ gpu_mem=16
 dtoverlay=disable-bt
 max_usb_current=1
 usb_max_current_enable=1
+# hardware watchdog — exposes /dev/watchdog0 so systemd can hard-reset a hung Pi
+dtparam=watchdog=on
 BOOTCFG
-    info "config.txt updated (USB current budget raised — needs an adequate PSU)."
+    info "config.txt updated (USB current budget raised; hardware watchdog enabled — needs an adequate PSU)."
 else
     warn "/boot/firmware/config.txt not found — skipping boot config."
 fi
+
+# ── Auto-recovery (watchdog · panic · power) ───────────────────────────────
+# Bring the Pi back on its own from a hang, kernel panic, or power blip — while a
+# deliberate `poweroff`/`shutdown` stays down (none of these fire on a clean stop).
+# Each step verifies and skips if already applied, so re-runs are safe.
+
+step "Configuring auto-recovery (watchdog + panic reboot)"
+
+# systemd hardware watchdog: hard-resets the SoC when the system locks up and can no
+# longer pet /dev/watchdog0 (exposed by the dtparam=watchdog=on added to config.txt).
+WATCHDOG_CONF="/etc/systemd/system.conf.d/watchdog.conf"
+if [[ -f "$WATCHDOG_CONF" ]]; then
+    info "systemd watchdog already configured — skipping (${WATCHDOG_CONF})."
+else
+    mkdir -p /etc/systemd/system.conf.d
+    cat > "$WATCHDOG_CONF" <<'EOF'
+[Manager]
+RuntimeWatchdogSec=15
+RebootWatchdogSec=2min
+EOF
+    systemctl daemon-reexec
+    info "systemd hardware watchdog enabled (auto-reset on full system hang)."
+fi
+
+# Auto-reboot on kernel panic/oops instead of sitting frozen until someone notices.
+PANIC_CONF="/etc/sysctl.d/99-panic-reboot.conf"
+if [[ -f "$PANIC_CONF" ]]; then
+    info "kernel panic auto-reboot already configured — skipping (${PANIC_CONF})."
+else
+    cat > "$PANIC_CONF" <<'EOF'
+kernel.panic = 10
+kernel.panic_on_oops = 1
+EOF
+    sysctl -p "$PANIC_CONF" >/dev/null 2>&1 || true
+    info "kernel panic/oops auto-reboot enabled (reboots ~10s after a panic)."
+fi
+
+# The watchdog device only appears once the config.txt change is applied at boot.
+if [[ -e /dev/watchdog0 ]]; then
+    info "/dev/watchdog0 present — hardware watchdog active."
+else
+    warn "/dev/watchdog0 not present yet — reboot to apply dtparam=watchdog=on."
+fi
+
+# Power loss needs no config: the Pi 5 cold-boots automatically when power returns,
+# and a manual poweroff stays off until power is cycled. Report the policy only.
+if command -v rpi-eeprom-config >/dev/null 2>&1; then
+    POH="$(rpi-eeprom-config 2>/dev/null | sed -n 's/^POWER_OFF_ON_HALT=//p')"
+    info "Power-on-when-powered is automatic (POWER_OFF_ON_HALT=${POH:-unset}); manual poweroff stays off."
+fi
+
+# Services already auto-restart on crash (Restart=on-failure in the units above);
+# verify that, and that the boot-critical ones are enabled.
+for u in rdio-scanner sdrangelsrv trunk-recorder; do
+    [[ -f "/etc/systemd/system/${u}.service" ]] || continue
+    rp="$(systemctl show -p Restart --value "$u" 2>/dev/null)"
+    if systemctl is-enabled "$u" &>/dev/null; then
+        info "${u}: enabled on boot, Restart=${rp:-?}."
+    else
+        info "${u}: Restart=${rp:-?}, not enabled on boot (enable once configured)."
+    fi
+done
 
 # ── Start services now ─────────────────────────────────────────────────────
 
