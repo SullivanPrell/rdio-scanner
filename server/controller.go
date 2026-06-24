@@ -574,6 +574,11 @@ func (controller *Controller) Start() error {
 
 	if controller.Options.BridgeEnabled {
 		controller.Bridge.Start()
+		// SDRangel keeps its provisioning only in memory, so re-apply the saved
+		// provisioning once its REST API is up — otherwise a fresh sdrangelsrv (after
+		// a reboot) sits blank and no audio ever reaches the bridge. Runs in the
+		// background so a slow/booting SDRangel never blocks startup.
+		go controller.autoProvisionSDRangel()
 	}
 
 	go func() {
@@ -628,10 +633,14 @@ func (controller *Controller) Start() error {
 func (controller *Controller) Terminate() {
 	controller.Dirwatches.Stop()
 
-	// Stop any sdrangelsrv / trunk-recorder processes we spawned so they don't
-	// outlive us holding the SDR devices (which would block the next start).
-	controller.ServiceManager.Stop(controller.Options.SDRangelContainerName, controller.Options.SDRangelBinaryPath)
-	controller.TRServiceManager.Stop(controller.Options.TrunkRecorderContainerName)
+	// Stop only sdrangelsrv / trunk-recorder processes WE directly spawned (native
+	// mode) so they don't outlive us holding the SDR devices. When systemd or docker
+	// owns the lifecycle, leave them running: they survive a rdio-scanner restart with
+	// their in-memory provisioning intact, and tearing them down here would blank
+	// SDRangel (losing every UDPSink channel) on every restart — exactly the "no audio
+	// after a restart" trap. systemd/docker stop them on a genuine system shutdown.
+	controller.ServiceManager.StopOwned(controller.Options.SDRangelContainerName, controller.Options.SDRangelBinaryPath)
+	controller.TRServiceManager.StopOwned(controller.Options.TrunkRecorderContainerName)
 
 	if err := controller.Database.Sql.Close(); err != nil {
 		log.Println(err)

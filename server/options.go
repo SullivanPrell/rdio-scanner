@@ -39,30 +39,31 @@ type SDRDeviceAssignment struct {
 }
 
 type Options struct {
-	AudioConversion             uint                  `json:"audioConversion"`
-	AutoPopulate                bool                  `json:"autoPopulate"`
-	BridgeChannels              []BridgeChannelConfig `json:"bridgeChannels"`
-	BridgeEnabled               bool                  `json:"bridgeEnabled"`
-	BridgeHost                  string                `json:"bridgeHost"`
-	BridgePort                  uint                  `json:"bridgePort"`
-	Branding                    string                `json:"branding"`
-	DimmerDelay                 uint                  `json:"dimmerDelay"`
-	DisableDuplicateDetection   bool                  `json:"disableDuplicateDetection"`
-	DuplicateDetectionTimeFrame uint                  `json:"duplicateDetectionTimeFrame"`
-	Email                       string                `json:"email"`
-	KeypadBeeps                 string                `json:"keypadBeeps"`
-	MaxClients                  uint                  `json:"maxClients"`
-	PlaybackGoesLive            bool                  `json:"playbackGoesLive"`
-	PruneDays                   uint                  `json:"pruneDays"`
-	SDRangelBinaryPath          string                `json:"sdrangelBinaryPath"`
-	SDRangelContainerName       string                `json:"sdrangelContainerName"`
-	SDRDeviceAssignments        []SDRDeviceAssignment `json:"sdrDeviceAssignments"`
-	ShowListenersCount          bool                  `json:"showListenersCount"`
-	SortTalkgroups              bool                  `json:"sortTalkgroups"`
-	Time12hFormat               bool                  `json:"time12hFormat"`
-	TrunkRecorderBinaryPath     string                `json:"trunkRecorderBinaryPath"`
-	TrunkRecorderConfigPath     string                `json:"trunkRecorderConfigPath"`
-	TrunkRecorderContainerName  string                `json:"trunkRecorderContainerName"`
+	AudioConversion             uint                      `json:"audioConversion"`
+	AutoPopulate                bool                      `json:"autoPopulate"`
+	BridgeChannels              []BridgeChannelConfig     `json:"bridgeChannels"`
+	BridgeDeviceSets            []SDRangelDeviceSetConfig `json:"bridgeDeviceSets"`
+	BridgeEnabled               bool                      `json:"bridgeEnabled"`
+	BridgeHost                  string                    `json:"bridgeHost"`
+	BridgePort                  uint                      `json:"bridgePort"`
+	Branding                    string                    `json:"branding"`
+	DimmerDelay                 uint                      `json:"dimmerDelay"`
+	DisableDuplicateDetection   bool                      `json:"disableDuplicateDetection"`
+	DuplicateDetectionTimeFrame uint                      `json:"duplicateDetectionTimeFrame"`
+	Email                       string                    `json:"email"`
+	KeypadBeeps                 string                    `json:"keypadBeeps"`
+	MaxClients                  uint                      `json:"maxClients"`
+	PlaybackGoesLive            bool                      `json:"playbackGoesLive"`
+	PruneDays                   uint                      `json:"pruneDays"`
+	SDRangelBinaryPath          string                    `json:"sdrangelBinaryPath"`
+	SDRangelContainerName       string                    `json:"sdrangelContainerName"`
+	SDRDeviceAssignments        []SDRDeviceAssignment     `json:"sdrDeviceAssignments"`
+	ShowListenersCount          bool                      `json:"showListenersCount"`
+	SortTalkgroups              bool                      `json:"sortTalkgroups"`
+	Time12hFormat               bool                      `json:"time12hFormat"`
+	TrunkRecorderBinaryPath     string                    `json:"trunkRecorderBinaryPath"`
+	TrunkRecorderConfigPath     string                    `json:"trunkRecorderConfigPath"`
+	TrunkRecorderContainerName  string                    `json:"trunkRecorderContainerName"`
 	adminPassword               string
 	adminPasswordNeedChange     bool
 	mutex                       sync.Mutex
@@ -269,6 +270,7 @@ func (options *Options) Read(db *Database) error {
 	options.AudioConversion = defaults.options.audioConversion
 	options.AutoPopulate = defaults.options.autoPopulate
 	options.BridgeChannels = []BridgeChannelConfig{}
+	options.BridgeDeviceSets = []SDRangelDeviceSetConfig{}
 	options.BridgeEnabled = false
 	options.BridgeHost = ""
 	options.BridgePort = 0
@@ -364,6 +366,8 @@ func (options *Options) Read(db *Database) error {
 			}
 		case "bridgeChannels":
 			json.Unmarshal([]byte(value.String), &options.BridgeChannels)
+		case "bridgeDeviceSets":
+			json.Unmarshal([]byte(value.String), &options.BridgeDeviceSets)
 		case "branding":
 			if err = json.Unmarshal([]byte(value.String), &f); err == nil {
 				switch v := f.(type) {
@@ -546,6 +550,7 @@ func (options *Options) Write(db *Database) error {
 	set("bridgeHost", options.BridgeHost)
 	set("bridgePort", options.BridgePort)
 	set("bridgeChannels", options.BridgeChannels)
+	set("bridgeDeviceSets", options.BridgeDeviceSets)
 	set("branding", options.Branding)
 	set("dimmerDelay", options.DimmerDelay)
 	set("disableDuplicateDetection", options.DisableDuplicateDetection)

@@ -391,12 +391,29 @@ func (b *Bridge) monitorChannel(ctx context.Context, cfg BridgeChannelConfig) {
 			rtpSeen    bool
 			prevSeq    uint16
 			prevSSRC   uint32
+
+			// rx diagnostics — make "no audio" answerable from the logs alone:
+			// confirm the first datagram, summarize throughput, and warn loudly if
+			// nothing ever arrives (SDRangel not provisioned / streaming elsewhere).
+			rxBytes  int64
+			rxPkts   int64
+			everSeen bool
+			warned   bool
+			startAt  = time.Now()
+			lastStat = time.Now()
 		)
 		for {
 			conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
 			n, _, err := conn.ReadFromUDP(udpBuf)
 			if n > 0 {
 				data := udpBuf[:n]
+
+				rxBytes += int64(n)
+				rxPkts++
+				if !everSeen {
+					everSeen = true
+					b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: first UDP audio received (%d bytes) on port %d", cfg.Label, n, cfg.UdpPort))
+				}
 
 				if !rtpDecided {
 					if off := rtpPayloadOffset(data); off >= 0 {
@@ -431,6 +448,16 @@ func (b *Bridge) monitorChannel(ctx context.Context, cfg BridgeChannelConfig) {
 				default: // drop if consumer is behind
 				}
 			}
+
+			now := time.Now()
+			if everSeen && now.Sub(lastStat) >= 60*time.Second {
+				b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: rx %d pkt / %d bytes in %s on port %d", cfg.Label, rxPkts, rxBytes, now.Sub(lastStat).Round(time.Second), cfg.UdpPort))
+				rxPkts, rxBytes, lastStat = 0, 0, now
+			} else if !everSeen && !warned && now.Sub(startAt) >= 30*time.Second {
+				warned = true
+				b.Controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("bridge: %s: no UDP audio on port %d after 30s — check SDRangel is provisioned and streaming there", cfg.Label, cfg.UdpPort))
+			}
+
 			if err != nil {
 				select {
 				case <-ctx.Done():

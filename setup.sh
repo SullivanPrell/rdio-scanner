@@ -831,11 +831,29 @@ SystemMaxUse=50M
 RuntimeMaxUse=20M
 EOF
 
-# ── Disable swap ──────────────────────────────────────────────────────────
-
+# ── Swap (compressed-RAM cushion) ──────────────────────────────────────────
+# Keep a modest zram (compressed-RAM) swap as an OOM cushion. The SDR stack
+# (sdrangelsrv FFTW plans + trunk-recorder DSP) can spike memory; with NO swap at
+# all the kernel can stall in direct reclaim under pressure, which — together with
+# the hardware watchdog — can hard-reset the Pi. zram lives in RAM (no SD/SSD wear)
+# and only compresses cold pages, so it adds headroom without disk-swap latency.
+# Disk-backed dphys-swapfile stays disabled in favour of zram.
 if systemctl is-enabled dphys-swapfile &>/dev/null 2>&1; then
     systemctl disable --now dphys-swapfile 2>/dev/null || true
-    info "dphys-swapfile (SD card swap) disabled."
+    info "dphys-swapfile (disk-backed swap) disabled in favour of zram."
+fi
+if DEBIAN_FRONTEND=noninteractive apt-get install -y zram-tools >/dev/null 2>&1; then
+    cat > /etc/default/zramswap <<'EOF'
+# ~25% of RAM as zstd-compressed swap (≈2 GB headroom on an 8 GB Pi); high priority.
+ALGO=zstd
+PERCENT=25
+PRIORITY=100
+EOF
+    systemctl enable zramswap >/dev/null 2>&1 || true
+    systemctl restart zramswap >/dev/null 2>&1 || systemctl start zramswap >/dev/null 2>&1 || true
+    info "zram swap enabled (~25% RAM, zstd) as an OOM cushion."
+else
+    warn "could not install zram-tools — running with NO swap; heavy memory spikes may stall the Pi."
 fi
 
 # ── /boot/firmware/config.txt ─────────────────────────────────────────────
@@ -882,30 +900,44 @@ step "Configuring auto-recovery (watchdog + panic reboot)"
 # systemd hardware watchdog: hard-resets the SoC when the system locks up and can no
 # longer pet /dev/watchdog0 (exposed by the dtparam=watchdog=on added to config.txt).
 WATCHDOG_CONF="/etc/systemd/system.conf.d/watchdog.conf"
-if [[ -f "$WATCHDOG_CONF" ]]; then
-    info "systemd watchdog already configured — skipping (${WATCHDOG_CONF})."
-else
-    mkdir -p /etc/systemd/system.conf.d
-    cat > "$WATCHDOG_CONF" <<'EOF'
+mkdir -p /etc/systemd/system.conf.d
+WATCHDOG_TMP="$(mktemp)"
+cat > "$WATCHDOG_TMP" <<'EOF'
 [Manager]
-RuntimeWatchdogSec=15
+# Generous runtime watchdog: hard-reset only on a TRUE lockup, not a transient load
+# or memory spike. A tight 15s here hard-reset the Pi under heavy SDR load and, with
+# no clean shutdown, destroyed the very logs needed to debug it. systemd pets
+# /dev/watchdog0 at half this interval.
+RuntimeWatchdogSec=120
 RebootWatchdogSec=2min
 EOF
+if cmp -s "$WATCHDOG_TMP" "$WATCHDOG_CONF" 2>/dev/null; then
+    rm -f "$WATCHDOG_TMP"
+    info "systemd watchdog already at desired setting (120s) — skipping."
+else
+    mv "$WATCHDOG_TMP" "$WATCHDOG_CONF"
     systemctl daemon-reexec
-    info "systemd hardware watchdog enabled (auto-reset on full system hang)."
+    info "systemd hardware watchdog set to a generous 120s (recovers true lockups; won't fire on load spikes)."
 fi
 
 # Auto-reboot on kernel panic/oops instead of sitting frozen until someone notices.
 PANIC_CONF="/etc/sysctl.d/99-panic-reboot.conf"
-if [[ -f "$PANIC_CONF" ]]; then
-    info "kernel panic auto-reboot already configured — skipping (${PANIC_CONF})."
-else
-    cat > "$PANIC_CONF" <<'EOF'
+PANIC_TMP="$(mktemp)"
+cat > "$PANIC_TMP" <<'EOF'
+# Reboot ~10s after a real kernel panic (unrecoverable). We deliberately do NOT reboot
+# on a mere oops: an oops is often survivable, and hard-resetting on one destroys the
+# logs that explain what went wrong. Set explicitly to 0 so a re-run also UNDOES an
+# earlier panic_on_oops=1 on the running kernel.
 kernel.panic = 10
-kernel.panic_on_oops = 1
+kernel.panic_on_oops = 0
 EOF
+if cmp -s "$PANIC_TMP" "$PANIC_CONF" 2>/dev/null; then
+    rm -f "$PANIC_TMP"
+    info "kernel panic setting already as desired — skipping."
+else
+    mv "$PANIC_TMP" "$PANIC_CONF"
     sysctl -p "$PANIC_CONF" >/dev/null 2>&1 || true
-    info "kernel panic/oops auto-reboot enabled (reboots ~10s after a panic)."
+    info "kernel panic auto-reboot set (panic=10; panic_on_oops OFF to preserve crash logs)."
 fi
 
 # The watchdog device only appears once the config.txt change is applied at boot.

@@ -81,8 +81,8 @@ type TrunkRecorderConfig struct {
 	Sources []TrunkRecorderSource `json:"sources"`
 	Systems []TrunkRecorderSystem `json:"systems"`
 	// Common global options with sensible defaults
-	CaptureDir  string `json:"captureDir"`
-	LogLevel    string `json:"logLevel"`
+	CaptureDir string `json:"captureDir"`
+	LogLevel   string `json:"logLevel"`
 }
 
 // TrunkRecorderGenRequest is the body for POST /api/admin/trunk-recorder/config.
@@ -768,13 +768,13 @@ func (admin *Admin) DonglesHandler(w http.ResponseWriter, r *http.Request) {
 
 type TrunkRecorderServiceStatus struct {
 	Running bool   `json:"running"`
-	Mode    string `json:"mode"`    // "docker" | "native"
+	Mode    string `json:"mode"` // "docker" | "native"
 	Message string `json:"message,omitempty"`
 	PID     int    `json:"pid,omitempty"`
 }
 
 type TrunkRecorderServiceAction struct {
-	Action        string `json:"action"`        // "start" | "stop" | "restart"
+	Action        string `json:"action"` // "start" | "stop" | "restart"
 	BinaryPath    string `json:"binaryPath"`
 	ConfigPath    string `json:"configPath"`
 	ContainerName string `json:"containerName"`
@@ -899,8 +899,8 @@ func (m *TrunkRecorderServiceManager) dockerStatus(containerName string) TrunkRe
 	}
 	var inspect struct {
 		State struct {
-			Running bool `json:"Running"`
-			Pid     int  `json:"Pid"`
+			Running bool   `json:"Running"`
+			Pid     int    `json:"Pid"`
 			Status  string `json:"Status"`
 		} `json:"State"`
 	}
@@ -1131,6 +1131,21 @@ func (m *TrunkRecorderServiceManager) Stop(containerName string) TrunkRecorderSe
 		return m.systemdAction("stop")
 	default:
 		return m.nativeStop()
+	}
+}
+
+// StopOwned stops trunk-recorder only when rdio-scanner directly spawned it (native
+// mode with a live child). systemd/docker own the lifecycle otherwise and should keep
+// it running across a rdio-scanner restart, so this is a no-op there.
+func (m *TrunkRecorderServiceManager) StopOwned(containerName string) {
+	if m.mode(containerName) != "native" {
+		return
+	}
+	m.mutex.Lock()
+	owned := m.nativeProcess != nil && m.nativeProcess.Process != nil
+	m.mutex.Unlock()
+	if owned {
+		m.nativeStop()
 	}
 }
 

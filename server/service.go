@@ -77,7 +77,7 @@ func (rb *ringBuffer) Lines(tail int) []string {
 
 type SDRangelServiceStatus struct {
 	Running       bool   `json:"running"`
-	Mode          string `json:"mode"`    // "docker", "native", "unavailable"
+	Mode          string `json:"mode"` // "docker", "native", "unavailable"
 	Message       string `json:"message,omitempty"`
 	ContainerID   string `json:"containerId,omitempty"`
 	ContainerName string `json:"containerName,omitempty"`
@@ -546,6 +546,24 @@ func (m *SDRangelServiceManager) Stop(containerName, binaryPath string) SDRangel
 		return m.systemdAction("stop")
 	default:
 		return m.nativeStop(binaryPath)
+	}
+}
+
+// StopOwned stops sdrangelsrv only when rdio-scanner directly spawned it (native
+// mode with a live child process). When systemd or docker owns the lifecycle, the
+// instance MUST keep running across a rdio-scanner restart: it holds the in-memory
+// device sets / UDPSink channels the bridge depends on, so tearing it down would
+// leave SDRangel blank (and audio-less) until the next provision. So this is a no-op
+// outside native mode — systemd/docker stop it on a genuine system shutdown.
+func (m *SDRangelServiceManager) StopOwned(containerName, binaryPath string) {
+	if m.mode(containerName) != "native" {
+		return
+	}
+	m.mutex.Lock()
+	owned := m.nativeProcess != nil && m.nativeProcess.Process != nil
+	m.mutex.Unlock()
+	if owned {
+		m.nativeStop(binaryPath)
 	}
 }
 

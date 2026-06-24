@@ -721,7 +721,6 @@ func (admin *Admin) SDRangelProvisionHandler(w http.ResponseWriter, r *http.Requ
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	opts := admin.Controller.Options
 	controller := admin.Controller
 
 	// Provisioning is long-running: provision() paces every device-set and channel
@@ -738,6 +737,27 @@ func (admin *Admin) SDRangelProvisionHandler(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	go controller.runProvisionJob(req.DeviceSets, controller.Options.BridgeChannels)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(controller.Provision.snapshot())
+}
+
+// runProvisionJob runs a provision to completion against the configured SDRangel,
+// persists the result, and (re)starts the bridge. The caller MUST have already
+// claimed the run via Provision.start() (so a duplicate is rejected before here);
+// this always calls Provision.finish(). Shared by the manual admin handler and the
+// startup auto-provision so both behave identically.
+func (controller *Controller) runProvisionJob(deviceSets []SDRangelDeviceSetConfig, channels []BridgeChannelConfig) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			controller.Provision.emit(fmt.Sprintf("provision: aborted by internal error: %v", rec))
+			controller.Provision.finish(false)
+		}
+	}()
+
+	opts := controller.Options
 	client := newSDRangelClient(opts.BridgeHost, opts.BridgePort)
 	// Each device/channel REST call blocks on FFTW plan-building on the Pi well past
 	// the 5s default, so give the provision client a generous per-call timeout; the
@@ -745,35 +765,67 @@ func (admin *Admin) SDRangelProvisionHandler(w http.ResponseWriter, r *http.Requ
 	// SDRangel.
 	client.http.Timeout = 60 * time.Second
 
-	deviceSets := req.DeviceSets
-	channels := opts.BridgeChannels
-	go func() {
-		defer func() {
-			if rec := recover(); rec != nil {
-				controller.Provision.emit(fmt.Sprintf("provision: aborted by internal error: %v", rec))
-				controller.Provision.finish(false)
-			}
-		}()
+	result, updatedChannels := client.provision(deviceSets, channels, controller.Provision.emit)
 
-		result, updatedChannels := client.provision(deviceSets, channels, controller.Provision.emit)
-
-		// Persist the SDRangel-assigned channel indices and (re)start the bridge so it
-		// listens on the freshly-provisioned channels. The bridge keys off UdpPort, so
-		// ChannelIndex is vestigial bookkeeping, but persist it anyway.
-		if result.Success {
-			controller.Options.BridgeChannels = updatedChannels
-			if err := controller.Options.Write(controller.Database); err != nil {
-				controller.Provision.emit(fmt.Sprintf("warning: failed to persist updated channel indices: %v", err))
-			} else {
-				controller.Bridge.Restart()
-			}
+	// Persist BOTH the SDRangel-assigned channel indices AND the device-set configs.
+	// The device sets are what a later restart needs to re-apply this exact
+	// provisioning unattended (autoProvisionSDRangel) — SDRangel keeps channels only
+	// in memory, so without this a reboot leaves it blank and audio never resumes.
+	// The bridge keys off UdpPort, so ChannelIndex is vestigial bookkeeping, but
+	// persist it anyway.
+	if result.Success {
+		controller.Options.BridgeChannels = updatedChannels
+		controller.Options.BridgeDeviceSets = deviceSets
+		if err := controller.Options.Write(controller.Database); err != nil {
+			controller.Provision.emit(fmt.Sprintf("warning: failed to persist provisioning: %v", err))
+		} else {
+			controller.Bridge.Restart()
 		}
-		controller.Provision.finish(result.Success)
-	}()
+	}
+	controller.Provision.finish(result.Success)
+}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(controller.Provision.snapshot())
+// autoProvisionSDRangel re-applies the last-known SDRangel provisioning after a
+// (re)start so audio resumes unattended. SDRangel holds its device sets / UDPSink
+// channels only in memory: a fresh sdrangelsrv (e.g. after a reboot, or after its
+// own systemd restart) comes up blank, and nothing else re-creates the channels the
+// bridge listens on — so without this, no audio would flow until someone clicked
+// Provision by hand. It waits for the REST API, skips when SDRangel already has the
+// expected channels (a live, already-provisioned instance we must not disturb), and
+// otherwise runs a normal background provision from the persisted configs.
+func (controller *Controller) autoProvisionSDRangel() {
+	opts := controller.Options
+	if len(opts.BridgeChannels) == 0 || len(opts.BridgeDeviceSets) == 0 {
+		return // never provisioned through the admin UI yet — nothing to replay
+	}
+
+	client := newSDRangelClient(opts.BridgeHost, opts.BridgePort)
+
+	// Wait for SDRangel's REST API (it starts alongside us via systemd). At startup
+	// SDRangel is idle (default FileInput, nothing constructing), so probing here is
+	// safe — unlike mid-provision, where settle() forbids it.
+	var devResp sdrangelDeviceSetsResponse
+	if err := client.waitReachable(&devResp, 3*time.Minute); err != nil {
+		controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("auto-provision: SDRangel not reachable, skipping: %v", err))
+		return
+	}
+
+	// If SDRangel already has at least as many channels as we expect, it kept its
+	// provisioning (e.g. only rdio-scanner restarted) — leave the live run untouched.
+	have := 0
+	for _, ds := range devResp.DeviceSets {
+		have += len(ds.Chans)
+	}
+	if have >= len(opts.BridgeChannels) {
+		controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("auto-provision: SDRangel already has %d channel(s) for %d configured — skipping", have, len(opts.BridgeChannels)))
+		return
+	}
+
+	if !controller.Provision.start() {
+		return // a provision is already running (a manual one raced us)
+	}
+	controller.Logs.LogEvent(LogLevelWarn, "auto-provision: SDRangel came up unprovisioned — re-applying saved provisioning")
+	controller.runProvisionJob(opts.BridgeDeviceSets, opts.BridgeChannels)
 }
 
 // SDRangelProvisionStatusHandler returns the current/last async provision's live
