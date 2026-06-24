@@ -36,6 +36,11 @@ type SDRDeviceAssignment struct {
 	Index        int    `json:"index"`
 	SerialNumber string `json:"serialNumber"`
 	AssignTo     string `json:"assignTo"` // "sdrangel" | "trunk-recorder" | ""
+	// ScanEnabled marks this SDRangel-assigned dongle as a scanner: when set (and
+	// at least one of its bridge channels has Scan), provisioning drives the
+	// dongle with a single SDRangel Frequency Scanner that hops the scan channels
+	// instead of one fixed UDPSink per channel. Ignored unless AssignTo=="sdrangel".
+	ScanEnabled bool `json:"scanEnabled,omitempty"`
 }
 
 type Options struct {
@@ -219,8 +224,35 @@ func (options *Options) BridgeFromMap(m map[string]any) {
 		options.BridgePort = uint(v)
 	}
 	if v, ok := m["channels"].([]any); ok {
+		// Snapshot the provision-derived indices (ChannelIndex, ScannerChannelIndex)
+		// by UDP port BEFORE the unmarshal replaces BridgeChannels. The client doesn't
+		// always echo these non-user-edited fields, so without re-applying them a plain
+		// Save would zero ScannerChannelIndex and silently drop scan mode on a live
+		// scanner. (Ports are stable across edits; new channels get fresh ports, so a
+		// port collision can't mis-inherit.)
+		prevByPort := map[int]BridgeChannelConfig{}
+		for _, c := range options.BridgeChannels {
+			prevByPort[c.UdpPort] = c
+		}
 		if b, err := json.Marshal(v); err == nil {
 			json.Unmarshal(b, &options.BridgeChannels)
+		}
+		for i := range options.BridgeChannels {
+			nc := &options.BridgeChannels[i]
+			if prev, ok := prevByPort[nc.UdpPort]; ok {
+				if nc.ChannelIndex == 0 {
+					nc.ChannelIndex = prev.ChannelIndex
+				}
+				if nc.ScannerChannelIndex == 0 {
+					nc.ScannerChannelIndex = prev.ScannerChannelIndex
+				}
+			}
+			// A non-scan channel must not keep a scanner link, or the bridge would bind
+			// a fixed monitor on the port the shared scanner sink owns. Clearing it
+			// makes turning Scan off cleanly demote the channel to a fixed one.
+			if !nc.Scan {
+				nc.ScannerChannelIndex = 0
+			}
 		}
 		// Pull every channel's UDP port into the valid auto-assigned pool, so a bad
 		// import base (>65535) or manual typo can never leave a channel unusable.

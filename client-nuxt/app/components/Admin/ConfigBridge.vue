@@ -171,6 +171,17 @@ const SDR_SAMPLE_RATE = 2400000 // ~2.4 MHz usable window per RTL-SDR dongle
 async function provision() {
   provisioning.value = true
 
+  // Provisioning reads the SAVED bridge config server-side (the request body's
+  // channels are advisory), and scan mode is gated on each channel's saved Scan flag.
+  // Persist the current edit buffer first so freshly-ticked Scan boxes actually take
+  // effect — otherwise the dongle would be scanner-enabled (that travels live in the
+  // request) while every channel's Scan came back false, silently disabling scanning.
+  if (!(await admin.saveConfig({ bridge: bridge.value }))) {
+    provisioning.value = false
+    provisionMessages.value = ['provision: aborted — config save failed (see error toast)']
+    return
+  }
+
   // Group channels by SDR device set and centre each dongle on the midpoint of
   // its channels, so one dongle's ~2.4 MHz window covers them all. (Centring on
   // the first channel left channels more than ~1.2 MHz away out of range.)
@@ -183,10 +194,10 @@ async function provision() {
   }
 
   // Pin each device set to a specific dongle assigned to SDRangel (by serial), so
-  // SDRangel uses only its dongles and leaves the trunk-recorder ones alone.
-  const sdrangelSerials = bridge.value.sdrDeviceAssignments
-    .filter(a => a.assignTo === 'sdrangel')
-    .map(a => a.serialNumber)
+  // SDRangel uses only its dongles and leaves the trunk-recorder ones alone. Device
+  // set index i maps to the i-th SDRangel-assigned dongle (serial + scanner flag).
+  const sdrangelAssignments = bridge.value.sdrDeviceAssignments.filter(a => a.assignTo === 'sdrangel')
+  const sdrangelSerials = sdrangelAssignments.map(a => a.serialNumber)
 
   const deviceSets = [...freqsByDevice.entries()].map(([index, freqs]) => {
     const min = Math.min(...freqs)
@@ -202,7 +213,15 @@ async function provision() {
         color: 'warning',
       })
     }
-    return { index, hwType: 'RTLSDR', sequence: index, serial: sdrangelSerials[index] ?? '', centerFrequencyHz: center, sampleRateHz: SDR_SAMPLE_RATE }
+    return {
+      index,
+      hwType: 'RTLSDR',
+      sequence: index,
+      serial: sdrangelSerials[index] ?? '',
+      centerFrequencyHz: center,
+      sampleRateHz: SDR_SAMPLE_RATE,
+      scannerEnabled: sdrangelAssignments[index]?.scanEnabled ?? false,
+    }
   })
 
   const kickoff = await admin.provisionSDRangel({ deviceSets, channels: bridge.value.channels.filter(c => c.deviceSetIndex >= 0) })
@@ -451,9 +470,28 @@ function setDongleAssignment(dongle: RTLDongle, assignTo: '' | 'sdrangel' | 'tru
   const assignments = [...bridge.value.sdrDeviceAssignments]
   const idx = assignments.findIndex(a => a.index === dongle.index)
   if (idx >= 0) {
-    assignments[idx] = { ...assignments[idx], assignTo }
+    // Clear scanning when the dongle leaves SDRangel — it only applies there.
+    const scanEnabled = assignTo === 'sdrangel' ? assignments[idx].scanEnabled : false
+    assignments[idx] = { ...assignments[idx], assignTo, scanEnabled }
   } else {
     assignments.push({ index: dongle.index, serialNumber: dongle.serialNumber, assignTo })
+  }
+  bridge.value = { ...bridge.value, sdrDeviceAssignments: assignments }
+}
+
+function dongleScanEnabled(index: number) {
+  return bridge.value.sdrDeviceAssignments.find(a => a.index === index)?.scanEnabled ?? false
+}
+
+// Toggle the per-dongle "drive with a Frequency Scanner" flag. Only meaningful for
+// SDRangel-assigned dongles; provisioning ignores it otherwise.
+function setDongleScan(dongle: RTLDongle, scanEnabled: boolean) {
+  const assignments = [...bridge.value.sdrDeviceAssignments]
+  const idx = assignments.findIndex(a => a.index === dongle.index)
+  if (idx >= 0) {
+    assignments[idx] = { ...assignments[idx], scanEnabled }
+  } else {
+    assignments.push({ index: dongle.index, serialNumber: dongle.serialNumber, assignTo: '', scanEnabled })
   }
   bridge.value = { ...bridge.value, sdrDeviceAssignments: assignments }
 }
@@ -507,6 +545,7 @@ function addChannel() {
       systemRef: 0,
       talkgroupRef: 0,
       udpPort: maxPort + 1,
+      scan: false,
     }],
   }
 }
@@ -571,6 +610,7 @@ function addSystemChannels() {
       systemRef: sys.systemRef,
       talkgroupRef: tg.talkgroupRef,
       udpPort: nextFreePort(used),
+      scan: false,
     })
   }
 
@@ -605,6 +645,22 @@ function removeAllChannels() {
   if (!n) return
   if (!window.confirm(`Remove all ${n} bridge channel${n > 1 ? 's' : ''}? Save to persist this, or reload the page to undo.`)) return
   bridge.value = { ...bridge.value, channels: [] }
+}
+
+// Flip the Scan flag on every channel at once (the "enable/disable all" controls).
+function setAllScan(scan: boolean) {
+  if (!bridge.value.channels.length) return
+  bridge.value = { ...bridge.value, channels: bridge.value.channels.map(c => ({ ...c, scan })) }
+}
+
+const scanChannelCount = computed(() => bridge.value.channels.filter(c => c.scan).length)
+
+function scanStateLabel(s: number): string {
+  switch (s) {
+    case 2: return 'scanning'
+    case 3: return 'receiving'
+    default: return 'idle'
+  }
 }
 
 // Usable RF span one RTL-SDR dongle can cover at a 2.4 MHz sample rate, leaving
@@ -797,6 +853,24 @@ const trSystemOptions = computed(() => [
                 v-if="ch.freqHz || ch.udpPort"
                 class="text-neutral-500"
               >{{ ch.freqHz ? ' · ' + formatMHz(ch.freqHz) : '' }}{{ ch.udpPort ? ' · :' + ch.udpPort : '' }}</span></span>
+            </div>
+          </div>
+
+          <!-- Live Frequency Scanner state -->
+          <div v-if="(sdrangelStatus.scanners ?? []).length" class="space-y-1.5 pt-2 border-t border-neutral-800/60">
+            <p class="text-[11px] font-semibold text-neutral-500 uppercase tracking-wide">Frequency Scanners</p>
+            <div v-for="sc in sdrangelStatus.scanners" :key="`${sc.deviceSetIndex}-${sc.channelIndex}`" class="text-xs">
+              <span class="font-mono text-neutral-300">Scanner ds{{ sc.deviceSetIndex }}</span>
+              <span class="text-neutral-500"> · {{ scanStateLabel(sc.scanState) }}</span>
+              <span v-if="sc.activeFreqHz" class="text-green-400"> · ▶ {{ formatMHz(sc.activeFreqHz) }}</span>
+              <div v-if="(sc.frequencies ?? []).length" class="mt-1 pl-3 flex flex-wrap gap-1">
+                <span
+                  v-for="(f, idx) in sc.frequencies"
+                  :key="`${sc.deviceSetIndex}-${f.frequencyHz}-${idx}`"
+                  class="rounded px-1.5 py-0.5 font-mono"
+                  :class="sc.activeFreqHz === f.frequencyHz ? 'bg-green-900 text-green-300' : 'bg-neutral-800 text-neutral-400'"
+                >{{ f.label || formatMHz(f.frequencyHz) }}<span class="text-neutral-600"> {{ Math.round(f.powerDb) }}dB</span></span>
+              </div>
             </div>
           </div>
         </div>
@@ -1003,6 +1077,7 @@ const trSystemOptions = computed(() => [
               <th class="px-3 py-2 text-left">Product</th>
               <th class="px-3 py-2 text-left">Serial</th>
               <th class="px-3 py-2 text-left">Assign To</th>
+              <th class="px-3 py-2 text-left">Scanning</th>
             </tr>
           </thead>
           <tbody>
@@ -1023,10 +1098,26 @@ const trSystemOptions = computed(() => [
                   @update:model-value="v => setDongleAssignment(dongle, (v === 'unassigned' ? '' : v) as '' | 'sdrangel' | 'trunk-recorder')"
                 />
               </td>
+              <td class="px-3 py-2">
+                <div class="flex items-center gap-1.5">
+                  <UCheckbox
+                    :model-value="dongleScanEnabled(dongle.index)"
+                    :disabled="dongleAssignment(dongle.index) !== 'sdrangel'"
+                    @update:model-value="v => setDongleScan(dongle, v === true)"
+                  />
+                  <span v-if="dongleAssignment(dongle.index) !== 'sdrangel'" class="text-[10px] text-neutral-600">SDRangel only</span>
+                  <span v-else class="text-[10px] text-neutral-500">Frequency Scanner</span>
+                </div>
+              </td>
             </tr>
           </tbody>
         </table>
       </div>
+      <p v-if="dongles.length" class="text-xs text-neutral-500">
+        Enable <span class="text-neutral-400">Scanning</span> on an SDRangel dongle to drive it with a single Frequency
+        Scanner that hops the channels you mark <span class="text-neutral-400">Scan</span> (Bridge Channels tab) instead of
+        running one demodulator per channel — fits more frequencies on one dongle, but receives only one at a time.
+      </p>
 
       <div v-else class="text-center py-8 text-neutral-600 text-sm">
         No dongles detected yet. Click Detect to scan for connected RTL-SDR devices.
@@ -1051,7 +1142,7 @@ const trSystemOptions = computed(() => [
       </div>
 
       <div class="flex items-center justify-between">
-        <span class="text-sm font-semibold text-neutral-300">Channels ({{ bridge.channels.length }})</span>
+        <span class="text-sm font-semibold text-neutral-300">Channels ({{ bridge.channels.length }}<span v-if="scanChannelCount" class="font-normal text-neutral-500"> · {{ scanChannelCount }} scan</span>)</span>
         <div class="flex flex-wrap items-center gap-2">
           <div class="flex items-center gap-1">
             <USelect
@@ -1093,6 +1184,25 @@ const trSystemOptions = computed(() => [
           >
             Auto-assign SDRs
           </UButton>
+          <span class="text-neutral-700">|</span>
+          <UButton
+            icon="i-heroicons-check-circle"
+            size="xs"
+            variant="ghost"
+            :disabled="!bridge.channels.length"
+            @click="setAllScan(true)"
+          >
+            Scan all
+          </UButton>
+          <UButton
+            icon="i-heroicons-no-symbol"
+            size="xs"
+            variant="ghost"
+            :disabled="!bridge.channels.length"
+            @click="setAllScan(false)"
+          >
+            Scan none
+          </UButton>
           <UButton
             icon="i-heroicons-bolt"
             size="xs"
@@ -1110,6 +1220,7 @@ const trSystemOptions = computed(() => [
         <table class="w-full text-xs">
           <thead>
             <tr class="bg-neutral-900 text-neutral-500">
+              <th class="px-2 py-1.5 text-center" title="Include in this device set's Frequency Scanner">Scan</th>
               <th class="px-2 py-1.5 text-left">Label</th>
               <th class="px-2 py-1.5 text-left">Freq (Hz)</th>
               <th class="px-2 py-1.5 text-left">Protocol</th>
@@ -1127,6 +1238,7 @@ const trSystemOptions = computed(() => [
               :key="i"
               class="border-t border-neutral-800"
             >
+              <td class="px-2 py-1 text-center"><UCheckbox v-model="ch.scan" /></td>
               <td class="px-2 py-1"><UInput v-model="ch.label" size="xs" /></td>
               <td class="px-2 py-1"><UInput v-model.number="ch.frequencyHz" type="number" size="xs" /></td>
               <td class="px-2 py-1"><USelect v-model="ch.protocol" :items="protocolOptions" size="xs" /></td>
@@ -1155,7 +1267,7 @@ const trSystemOptions = computed(() => [
               </td>
             </tr>
             <tr v-if="!bridge.channels.length">
-              <td colspan="9" class="px-3 py-6 text-center text-neutral-600">
+              <td colspan="10" class="px-3 py-6 text-center text-neutral-600">
                 No channels — add one above, then click Provision SDRangel.
               </td>
             </tr>

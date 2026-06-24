@@ -43,6 +43,9 @@ export interface SDRDeviceAssignment {
   index: number
   serialNumber: string
   assignTo: '' | 'sdrangel' | 'trunk-recorder'
+  // When set (and the dongle is assigned to SDRangel), provisioning drives it with
+  // a single Frequency Scanner over its Scan channels instead of a UDPSink each.
+  scanEnabled?: boolean
 }
 
 export interface BridgeConfig {
@@ -69,6 +72,13 @@ export interface BridgeChannel {
   systemRef: number
   talkgroupRef: number
   udpPort: number
+  // Include this channel in its device set's Frequency Scanner (effective only when
+  // the device set is scanner-enabled). User-set.
+  scan?: boolean
+  // SDRangel channel index of the FreqScanner driving this scan channel — set by
+  // provisioning. Carried through saves so scan mode survives a config round-trip;
+  // not user-editable.
+  scannerChannelIndex?: number
 }
 
 export interface BridgeStatus {
@@ -233,6 +243,14 @@ export interface TodoEntry {
   count: number
 }
 
+export interface SDRangelScannerStatus {
+  deviceSetIndex: number
+  channelIndex: number
+  scanState: number // 0 idle, 2 scanning, 3 parked on a transmission
+  activeFreqHz?: number
+  frequencies?: Array<{ frequencyHz: number; powerDb: number; label?: string }>
+}
+
 export interface SDRangelConnectStatus {
   connected: boolean
   version?: string
@@ -242,6 +260,7 @@ export interface SDRangelConnectStatus {
     hwType: string
     channels: Array<{ index: number; idText: string; title: string }>
   }>
+  scanners?: SDRangelScannerStatus[]
 }
 
 export interface RTLDongle {

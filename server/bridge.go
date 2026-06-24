@@ -40,6 +40,16 @@ type BridgeChannelConfig struct {
 	SystemRef      uint   `json:"systemRef"`
 	TalkgroupRef   uint   `json:"talkgroupRef"`
 	UdpPort        int    `json:"udpPort"`
+	// Scan marks this channel for inclusion in its device set's Frequency Scanner
+	// (only takes effect when the device set is scanner-enabled). User-set.
+	Scan bool `json:"scan,omitempty"`
+	// ScannerChannelIndex is the SDRangel channel index of the FreqScanner that
+	// drives this scan channel's shared UDPSink. Provisioning sets it (>0) for
+	// channels it actually put behind a scanner; the bridge keys scan mode off it,
+	// so a scan-flagged channel on a non-scanner device set (left 0) stays a normal
+	// fixed UDPSink. Within a device set's scan group, every member shares the same
+	// value, and the first member (in slice order) owns the shared UDP sink port.
+	ScannerChannelIndex int `json:"scannerChannelIndex,omitempty"`
 }
 
 // Bridge UDP ports are auto-assigned from this pool so every channel always has a
@@ -189,6 +199,35 @@ func (s *callSegmenter) finish() (pcm []byte, start time.Time, done bool) {
 	return out, start, true
 }
 
+// callLabel is how a finished call is tagged. For a fixed channel it's the
+// channel's static config; for a scan group it's resolved per call from whichever
+// scanned frequency the FreqScanner had parked on when the recording opened.
+type callLabel struct {
+	systemRef    uint
+	talkgroupRef uint
+	frequencyHz  uint
+	label        string
+}
+
+// bridgeScanGroup is the runtime view of one device set's scan channels: a single
+// shared UDPSink (which the bridge binds on udpPort) fed by a FreqScanner (queried
+// at scannerChannelIndex) that hops the group's frequencies. byFreq maps each
+// scanned frequency back to its channel so a call can be labeled correctly.
+type bridgeScanGroup struct {
+	deviceSetIndex      int
+	scannerChannelIndex int
+	udpPort             int // the first member's port == the shared UDPSink port
+	sampleRate          int
+	label               string
+	byFreq              map[uint]BridgeChannelConfig
+	lead                BridgeChannelConfig // fallback label when the active freq can't be resolved
+}
+
+// bridgeScanFreqTolerance is how far (Hz) a scanner-reported active frequency may
+// differ from a configured scan frequency and still match it — guards against
+// minor rounding in the report. Half a 12.5 kHz channel.
+const bridgeScanFreqTolerance = 6250
+
 type BridgeStatus struct {
 	Running      bool   `json:"running"`
 	ChannelCount int    `json:"channelCount"`
@@ -222,12 +261,54 @@ func (b *Bridge) Start() {
 	ctx, cancel := context.WithCancel(context.Background())
 	b.cancel = cancel
 
+	// Partition channels: fixed channels each get their own monitor (one UDP port,
+	// one static label). Scan channels — those provisioned behind a FreqScanner
+	// (ScannerChannelIndex > 0) — are grouped by device set into ONE monitor that
+	// binds the group's shared UDPSink port and labels each call from the live
+	// scanner report. The group's FIRST channel (slice order) owns the shared port,
+	// matching how provision() created the sink.
+	groups := map[int]*bridgeScanGroup{}
+	groupOrder := []int{}
 	for _, cfg := range channels {
+		if !(cfg.Scan && cfg.ScannerChannelIndex > 0) {
+			continue
+		}
+		g := groups[cfg.DeviceSetIndex]
+		if g == nil {
+			g = &bridgeScanGroup{
+				deviceSetIndex:      cfg.DeviceSetIndex,
+				scannerChannelIndex: cfg.ScannerChannelIndex,
+				udpPort:             cfg.UdpPort,
+				sampleRate:          cfg.SampleRate,
+				label:               fmt.Sprintf("scan ds%d", cfg.DeviceSetIndex),
+				byFreq:              map[uint]BridgeChannelConfig{},
+				lead:                cfg,
+			}
+			groups[cfg.DeviceSetIndex] = g
+			groupOrder = append(groupOrder, cfg.DeviceSetIndex)
+		}
+		if cfg.FrequencyHz > 0 {
+			g.byFreq[cfg.FrequencyHz] = cfg
+		}
+	}
+
+	for _, cfg := range channels {
+		if cfg.Scan && cfg.ScannerChannelIndex > 0 {
+			continue // handled as a scan group below
+		}
 		b.wg.Add(1)
 		go b.monitorChannel(ctx, cfg)
 	}
+	for _, ds := range groupOrder {
+		b.wg.Add(1)
+		go b.monitorScanGroup(ctx, groups[ds])
+	}
 
-	b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("sdrangel bridge started with %d channel(s)", len(channels)))
+	msg := fmt.Sprintf("sdrangel bridge started with %d channel(s)", len(channels))
+	if len(groupOrder) > 0 {
+		msg += fmt.Sprintf(" — %d scanner group(s)", len(groupOrder))
+	}
+	b.Controller.Logs.LogEvent(LogLevelInfo, msg)
 }
 
 func (b *Bridge) Stop() {
@@ -324,25 +405,89 @@ func rtpPayloadOffset(pkt []byte) int {
 	return off
 }
 
+// monitorChannel runs a fixed bridge channel: one UDP port, one static talkgroup.
 func (b *Bridge) monitorChannel(ctx context.Context, cfg BridgeChannelConfig) {
-	// Signal Stop()'s WaitGroup last, once this goroutine and everything it
-	// owns (the UDP reader, the socket) are fully done.
 	defer b.wg.Done()
-
 	sampleRate := cfg.SampleRate
 	if sampleRate <= 0 {
 		sampleRate = 8000
 	}
+	fixed := callLabel{systemRef: cfg.SystemRef, talkgroupRef: cfg.TalkgroupRef, frequencyHz: cfg.FrequencyHz, label: cfg.Label}
+	b.runMonitor(ctx, cfg.UdpPort, sampleRate, cfg.Label, func() callLabel { return fixed })
+}
 
-	udpAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("0.0.0.0:%d", cfg.UdpPort))
+// monitorScanGroup runs one device set's scan group: it binds the shared UDPSink
+// port and, at each recording's start, asks the FreqScanner which frequency it has
+// parked on to label the call with the right talkgroup.
+func (b *Bridge) monitorScanGroup(ctx context.Context, g *bridgeScanGroup) {
+	defer b.wg.Done()
+	sampleRate := g.sampleRate
+	if sampleRate <= 0 {
+		sampleRate = 8000
+	}
+	opts := b.Controller.Options
+	client := newSDRangelClient(opts.BridgeHost, opts.BridgePort)
+	b.runMonitor(ctx, g.udpPort, sampleRate, g.label, func() callLabel { return b.resolveScanLabel(g, client) })
+}
+
+// resolveScanLabel asks the FreqScanner which frequency it's parked on and maps it
+// back to the matching scan channel. Called once per call, when the recording opens
+// (the scanner parks before audio flows, so the report is settled). It must NOT
+// probe SDRangel while a provision runs — a concurrent /report GET races the
+// reconstructing main thread — so during provisioning, and on any failure or
+// no-match, it falls back to the group's lead-channel label.
+func (b *Bridge) resolveScanLabel(g *bridgeScanGroup, client *sdrangelClient) callLabel {
+	fb := callLabel{systemRef: g.lead.SystemRef, talkgroupRef: g.lead.TalkgroupRef, frequencyHz: g.lead.FrequencyHz, label: g.lead.Label}
+	if b.Controller.Provision.isRunning() {
+		return fb
+	}
+	var rep sdrangelFreqScannerReport
+	if err := client.getJSON(fmt.Sprintf("/deviceset/%d/channel/%d/report", g.deviceSetIndex, g.scannerChannelIndex), &rep); err != nil {
+		b.Controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("bridge: %s: scanner report unavailable, labeling as %q: %v", g.label, g.lead.Label, err))
+		return fb
+	}
+	freq, ok := rep.activeFrequency()
+	if !ok {
+		return fb
+	}
+	if ch, ok := g.byFreq[uint(freq)]; ok {
+		return callLabel{systemRef: ch.SystemRef, talkgroupRef: ch.TalkgroupRef, frequencyHz: ch.FrequencyHz, label: ch.Label}
+	}
+	// Nearest configured frequency within tolerance, to ride out report rounding.
+	var best BridgeChannelConfig
+	bestDiff := int64(bridgeScanFreqTolerance) + 1
+	for f, ch := range g.byFreq {
+		d := int64(f) - freq
+		if d < 0 {
+			d = -d
+		}
+		if d < bestDiff {
+			bestDiff, best = d, ch
+		}
+	}
+	if bestDiff <= int64(bridgeScanFreqTolerance) {
+		return callLabel{systemRef: best.SystemRef, talkgroupRef: best.TalkgroupRef, frequencyHz: best.FrequencyHz, label: best.Label}
+	}
+	b.Controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("bridge: %s: active freq %d Hz matched no scan channel, labeling as %q", g.label, freq, g.lead.Label))
+	return fb
+}
+
+// runMonitor binds udpPort, segments the S16LE PCM stream into calls, and submits
+// each one. resolve is invoked once when a recording opens to decide its label
+// (static for a fixed channel, live-resolved for a scan group). logLabel names the
+// stream in diagnostics.
+// The caller (monitorChannel / monitorScanGroup) owns b.wg.Done(); runMonitor
+// must not signal it or Stop()'s WaitGroup would go negative.
+func (b *Bridge) runMonitor(ctx context.Context, udpPort, sampleRate int, logLabel string, resolve func() callLabel) {
+	udpAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("0.0.0.0:%d", udpPort))
 	if err != nil {
-		b.Controller.Logs.LogEvent(LogLevelError, fmt.Sprintf("bridge: %s: udp resolve: %v", cfg.Label, err))
+		b.Controller.Logs.LogEvent(LogLevelError, fmt.Sprintf("bridge: %s: udp resolve: %v", logLabel, err))
 		return
 	}
 
 	conn, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
-		b.Controller.Logs.LogEvent(LogLevelError, fmt.Sprintf("bridge: %s: udp listen on port %d: %v", cfg.Label, cfg.UdpPort, err))
+		b.Controller.Logs.LogEvent(LogLevelError, fmt.Sprintf("bridge: %s: udp listen on port %d: %v", logLabel, udpPort, err))
 		return
 	}
 
@@ -357,19 +502,19 @@ func (b *Bridge) monitorChannel(ctx context.Context, cfg BridgeChannelConfig) {
 
 	seg := &callSegmenter{hangTime: bridgeHangTime, maxDur: bridgeMaxCallDur}
 
-	submit := func(pcm []byte, start time.Time) {
+	submit := func(pcm []byte, start time.Time, lbl callLabel) {
 		call := NewCall()
 		call.Audio = bridgeBuildWAV(pcm, sampleRate)
-		call.AudioFilename = fmt.Sprintf("%s-%d.wav", cfg.Label, start.UnixMilli())
+		call.AudioFilename = fmt.Sprintf("%s-%d.wav", lbl.label, start.UnixMilli())
 		call.AudioMime = "audio/wav"
 		call.Timestamp = start
-		call.Meta.SystemRef = cfg.SystemRef
-		call.Meta.TalkgroupRef = cfg.TalkgroupRef
-		if cfg.FrequencyHz > 0 {
-			call.Frequencies = []CallFrequency{{Frequency: cfg.FrequencyHz}}
+		call.Meta.SystemRef = lbl.systemRef
+		call.Meta.TalkgroupRef = lbl.talkgroupRef
+		if lbl.frequencyHz > 0 {
+			call.Frequencies = []CallFrequency{{Frequency: lbl.frequencyHz}}
 		}
 		b.Controller.Ingest <- call
-		b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: call submitted (duration=%dms pcm=%d bytes)", cfg.Label, len(pcm)*1000/(2*sampleRate), len(pcm)))
+		b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: call submitted (tg=%d duration=%dms pcm=%d bytes)", logLabel, lbl.talkgroupRef, len(pcm)*1000/(2*sampleRate), len(pcm)))
 	}
 
 	audioCh := make(chan []byte, 256)
@@ -412,7 +557,7 @@ func (b *Bridge) monitorChannel(ctx context.Context, cfg BridgeChannelConfig) {
 				rxPkts++
 				if !everSeen {
 					everSeen = true
-					b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: first UDP audio received (%d bytes) on port %d", cfg.Label, n, cfg.UdpPort))
+					b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: first UDP audio received (%d bytes) on port %d", logLabel, n, udpPort))
 				}
 
 				if !rtpDecided {
@@ -421,7 +566,7 @@ func (b *Bridge) monitorChannel(ctx context.Context, cfg BridgeChannelConfig) {
 						ssrc := uint32(data[8])<<24 | uint32(data[9])<<16 | uint32(data[10])<<8 | uint32(data[11])
 						if rtpSeen && ssrc == prevSSRC && seq == prevSeq+1 {
 							rtpFramed, rtpDecided = true, true
-							b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: detected RTP-framed UDP audio, stripping headers", cfg.Label))
+							b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: detected RTP-framed UDP audio, stripping headers", logLabel))
 						}
 						prevSeq, prevSSRC, rtpSeen = seq, ssrc, true
 					} else {
@@ -451,11 +596,11 @@ func (b *Bridge) monitorChannel(ctx context.Context, cfg BridgeChannelConfig) {
 
 			now := time.Now()
 			if everSeen && now.Sub(lastStat) >= 60*time.Second {
-				b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: rx %d pkt / %d bytes in %s on port %d", cfg.Label, rxPkts, rxBytes, now.Sub(lastStat).Round(time.Second), cfg.UdpPort))
+				b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: rx %d pkt / %d bytes in %s on port %d", logLabel, rxPkts, rxBytes, now.Sub(lastStat).Round(time.Second), udpPort))
 				rxPkts, rxBytes, lastStat = 0, 0, now
 			} else if !everSeen && !warned && now.Sub(startAt) >= 30*time.Second {
 				warned = true
-				b.Controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("bridge: %s: no UDP audio on port %d after 30s — check SDRangel is provisioned and streaming there", cfg.Label, cfg.UdpPort))
+				b.Controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("bridge: %s: no UDP audio on port %d after 30s — check SDRangel is provisioned and streaming there", logLabel, udpPort))
 			}
 
 			if err != nil {
@@ -475,6 +620,11 @@ func (b *Bridge) monitorChannel(ctx context.Context, cfg BridgeChannelConfig) {
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 
+	// pending holds the label resolved when the current recording opened; it's used
+	// when that recording finishes (feed boundary or watchdog tick). A recording
+	// never opens and closes in the same feed (open sets lastAudio=now), so pending
+	// is always set before it's consumed.
+	var pending callLabel
 	for {
 		select {
 		case <-ctx.Done():
@@ -486,14 +636,15 @@ func (b *Bridge) monitorChannel(ctx context.Context, cfg BridgeChannelConfig) {
 			}
 			was := seg.recording
 			if pcm, start, done := seg.feed(chunk, time.Now()); done {
-				submit(pcm, start)
+				submit(pcm, start, pending)
 			} else if !was && seg.recording {
-				b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: recording started (sys=%d tg=%d)", cfg.Label, cfg.SystemRef, cfg.TalkgroupRef))
+				pending = resolve()
+				b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: recording started (sys=%d tg=%d)", logLabel, pending.systemRef, pending.talkgroupRef))
 			}
 
 		case <-ticker.C:
 			if pcm, start, done := seg.tick(time.Now()); done {
-				submit(pcm, start)
+				submit(pcm, start, pending)
 			}
 		}
 	}

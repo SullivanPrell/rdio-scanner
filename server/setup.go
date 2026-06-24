@@ -58,6 +58,60 @@ type SDRangelStatus struct {
 	Version    string              `json:"version,omitempty"`
 	OS         string              `json:"os,omitempty"`
 	DeviceSets []SDRangelDeviceSet `json:"deviceSets,omitempty"`
+	Scanners   []SDRangelScanner   `json:"scanners,omitempty"`
+}
+
+// SDRangelScanner is the live state of one provisioned FreqScanner, joined back to
+// the bridge config so the admin UI can label each scanned frequency.
+type SDRangelScanner struct {
+	DeviceSetIndex int                   `json:"deviceSetIndex"`
+	ChannelIndex   int                   `json:"channelIndex"`
+	ScanState      int                   `json:"scanState"`
+	ActiveFreqHz   int64                 `json:"activeFreqHz,omitempty"` // highest-power scanned freq (0 if idle/scanning)
+	Frequencies    []SDRangelScannerFreq `json:"frequencies,omitempty"`
+}
+
+type SDRangelScannerFreq struct {
+	FrequencyHz int64   `json:"frequencyHz"`
+	PowerDB     float64 `json:"powerDb"`
+	Label       string  `json:"label,omitempty"`
+}
+
+// FreqScanner scanState values (SDRangel FreqScannerReport.scanState).
+const (
+	freqScannerStateIdle         = 0
+	freqScannerStateScanning     = 2
+	freqScannerStateWaitForEndTx = 3 // parked on an active transmission
+)
+
+// sdrangelFreqScannerReport is GET /deviceset/{i}/channel/{j}/report for a
+// FreqScanner: the live scan state plus the measured power of each scanned
+// frequency. The active (parked) frequency during a transmission is the highest-
+// power entry — the bridge uses it to label each scanned call.
+type sdrangelFreqScannerReport struct {
+	Report struct {
+		ChannelSampleRate int `json:"channelSampleRate"`
+		ScanState         int `json:"scanState"`
+		ChannelState      []struct {
+			Frequency int64   `json:"frequency"`
+			Power     float64 `json:"power"`
+		} `json:"channelState"`
+	} `json:"FreqScannerReport"`
+}
+
+// activeFrequency returns the highest-power scanned frequency and whether any were
+// reported. While a transmission is open the scanner has parked on it, so the
+// strongest bin is the call's frequency.
+func (r *sdrangelFreqScannerReport) activeFrequency() (int64, bool) {
+	var bestFreq int64
+	var bestPow float64
+	have := false
+	for _, cs := range r.Report.ChannelState {
+		if !have || cs.Power > bestPow {
+			bestFreq, bestPow, have = cs.Frequency, cs.Power, true
+		}
+	}
+	return bestFreq, have
 }
 
 // SDRangelDeviceSetConfig describes one RTL-SDR dongle and its desired center frequency.
@@ -68,7 +122,8 @@ type SDRangelDeviceSetConfig struct {
 	Serial            string `json:"serial,omitempty"` // pin to a specific dongle by serial
 	CenterFrequencyHz uint   `json:"centerFrequencyHz"`
 	SampleRateHz      uint   `json:"sampleRateHz"`
-	GainTenthsDB      int    `json:"gainTenthsDb,omitempty"` // RTL tuner gain ×0.1 dB; 0 ⇒ bridgeDefaultGainTenthsDB
+	GainTenthsDB      int    `json:"gainTenthsDb,omitempty"`   // RTL tuner gain ×0.1 dB; 0 ⇒ bridgeDefaultGainTenthsDB
+	ScannerEnabled    bool   `json:"scannerEnabled,omitempty"` // drive this dongle with a Frequency Scanner over its Scan channels
 }
 
 // SDRangelProvisionRequest is the body sent to the provision endpoint.
@@ -117,6 +172,13 @@ func (c *sdrangelClient) getJSON(path string, out interface{}) error {
 		return err
 	}
 	defer resp.Body.Close()
+	// SDRangel returns errors (e.g. 404 for a stale channel index) with a JSON body
+	// like {"message":...}, which decodes into a typed struct as all-zero with no
+	// error — masking the failure. Surface non-2xx so callers (the scanner /report
+	// poll, devicesBySerial) can tell "broken" from "empty".
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("GET %s: %s", path, resp.Status)
+	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
@@ -327,6 +389,80 @@ func (c *sdrangelClient) getStatus() (*SDRangelStatus, error) {
 	return status, nil
 }
 
+// labelForFreq returns the configured label for a scanner-reported frequency,
+// matching exactly first and then to the nearest configured frequency within
+// bridgeScanFreqTolerance (the report's frequency can be a few Hz off the value we
+// configured). Empty string when nothing is close enough.
+func labelForFreq(m map[int64]string, freq int64) string {
+	if s, ok := m[freq]; ok {
+		return s
+	}
+	best := ""
+	bestDiff := int64(bridgeScanFreqTolerance) + 1
+	for f, s := range m {
+		d := f - freq
+		if d < 0 {
+			d = -d
+		}
+		if d < bestDiff {
+			bestDiff, best = d, s
+		}
+	}
+	if bestDiff <= int64(bridgeScanFreqTolerance) {
+		return best
+	}
+	return ""
+}
+
+// scannerStatuses fetches the live FreqScannerReport for every provisioned scanner
+// (identified from the bridge config's ScannerChannelIndex), joining each scanned
+// frequency back to its channel label. Callers must skip this while provisioning —
+// a concurrent /report GET races SDRangel's main thread (see settle()).
+func (c *sdrangelClient) scannerStatuses(channels []BridgeChannelConfig) []SDRangelScanner {
+	type key struct{ ds, ch int }
+	labels := map[key]map[int64]string{}
+	order := []key{}
+	for _, ch := range channels {
+		if !ch.Scan || ch.ScannerChannelIndex <= 0 {
+			continue
+		}
+		k := key{ch.DeviceSetIndex, ch.ScannerChannelIndex}
+		if labels[k] == nil {
+			labels[k] = map[int64]string{}
+			order = append(order, k)
+		}
+		labels[k][int64(ch.FrequencyHz)] = ch.Label
+	}
+
+	out := []SDRangelScanner{}
+	for _, k := range order {
+		var rep sdrangelFreqScannerReport
+		if err := c.getJSON(fmt.Sprintf("/deviceset/%d/channel/%d/report", k.ds, k.ch), &rep); err != nil {
+			continue
+		}
+		s := SDRangelScanner{DeviceSetIndex: k.ds, ChannelIndex: k.ch, ScanState: rep.Report.ScanState}
+		for _, cs := range rep.Report.ChannelState {
+			s.Frequencies = append(s.Frequencies, SDRangelScannerFreq{
+				FrequencyHz: cs.Frequency,
+				PowerDB:     cs.Power,
+				// Match with the same tolerance the bridge uses to label calls: the
+				// report's bin-derived frequency can differ from the configured value
+				// by a few Hz, which an exact map lookup would miss (blank label).
+				Label: labelForFreq(labels[k], cs.Frequency),
+			})
+		}
+		// Only surface an "active" frequency when parked on a transmission; while
+		// scanning, the strongest bin is just noise, not a call.
+		if rep.Report.ScanState == freqScannerStateWaitForEndTx {
+			if f, ok := rep.activeFrequency(); ok {
+				s.ActiveFreqHz = f
+			}
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
 // ── Provision ──────────────────────────────────────────────────────────────
 
 // provision configures SDRangel device sets and channels to match the bridge
@@ -455,9 +591,9 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 				// closed squelch emits — records one unbroken call to the 5-min
 				// cap. A fixed gain pins the floor ~20 dB below squelch so it
 				// gates cleanly. See bridgeDefaultGainTenthsDB / udpSinkSettings.
-				"agc":             0,
-				"gain":            gainTenthsDB,
-				"dcBlock":         1,
+				"agc":     0,
+				"gain":    gainTenthsDB,
+				"dcBlock": 1,
 			},
 		}); err != nil {
 			add(fmt.Sprintf("warning: failed to configure device %d settings: %v", dsCfg.Index, err))
@@ -474,6 +610,27 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 		settle("device settings", 20*time.Second)
 	}
 
+	// Decide which device sets run in scanner mode. A device set scans when it is
+	// scanner-enabled AND at least one of its channels is flagged Scan; in that
+	// case its scan channels are collapsed into ONE shared UDPSink driven by ONE
+	// FreqScanner (created in the group pass below) instead of a fixed UDPSink each.
+	// Every other case — non-scanner device sets, and scan-flagged channels whose
+	// device set isn't scanner-enabled — provisions exactly as before.
+	scanEnabledDS := map[int]bool{}
+	for _, d := range dsCfgs {
+		scanEnabledDS[d.Index] = d.ScannerEnabled
+	}
+	scanGroupByDS := map[int][]int{} // device-set index → channel indices forming its scan group, in slice order
+	scanDSOrder := []int{}           // device-set indices with a scan group, first-seen order
+	for i, ch := range channels {
+		if ch.Scan && scanEnabledDS[ch.DeviceSetIndex] {
+			if _, seen := scanGroupByDS[ch.DeviceSetIndex]; !seen {
+				scanDSOrder = append(scanDSOrder, ch.DeviceSetIndex)
+			}
+			scanGroupByDS[ch.DeviceSetIndex] = append(scanGroupByDS[ch.DeviceSetIndex], i)
+		}
+	}
+
 	// Create one UDPSink channel per bridge channel. The POST /channel response
 	// doesn't carry the new channel's index (it came back 0 for every channel),
 	// which made every settings PATCH target channel 0 — so only one channel got
@@ -483,6 +640,12 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 	// track that ourselves, per device set.
 	chIdxByDS := map[int]int{}
 	for i, ch := range channels {
+		// Scan-group channels are provisioned together (one shared UDPSink + one
+		// FreqScanner) in the group pass after this loop — skip them here.
+		if ch.Scan && scanEnabledDS[ch.DeviceSetIndex] {
+			continue
+		}
+
 		cf := centerFreq[ch.DeviceSetIndex]
 		var freqOffset int64
 		if cf > 0 {
@@ -529,6 +692,10 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 
 		// Persist the channel index so the bridge can address the right channel.
 		updated[i].ChannelIndex = chIdx
+		// Clear any stale scanner link: this channel is a plain fixed UDPSink now
+		// (e.g. its Scan flag was turned off, or its device set isn't a scanner), so
+		// the bridge must treat it as a normal channel, not part of a scan group.
+		updated[i].ScannerChannelIndex = 0
 
 		add(fmt.Sprintf(
 			"channel %q: UDPSink idx=%d fmt=%d → UDP %d (offset %+d Hz)",
@@ -537,6 +704,125 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 
 		// Let the settings change re-construct before the next channel's POST.
 		settle("channel settings", 8*time.Second)
+	}
+
+	// Scan-group pass: for each scanner-enabled device set with ≥1 scan channel,
+	// create ONE shared UDPSink (the audio the bridge consumes) plus ONE FreqScanner
+	// that hops the scan frequencies and retunes that UDPSink to whichever is active.
+	// The scanner produces no audio of its own — it only points the UDPSink — so the
+	// bridge keeps consuming one UDP stream; it learns the active frequency per call
+	// from the scanner's report (see bridge.go). The group's FIRST channel (slice
+	// order) owns the shared UDP sink port, matching how the bridge binds it.
+	groupFailed := false
+	for _, ds := range scanDSOrder {
+		members := scanGroupByDS[ds]
+		lead := channels[members[0]]
+
+		// Demote first: if any step below fails and we `continue`, these members must
+		// NOT keep a stale ScannerChannelIndex pointing at a scanner that wasn't
+		// (re)created — that would make the bridge poll a non-existent channel and
+		// mislabel every call. The real index is set on full success at the end.
+		for _, mi := range members {
+			updated[mi].ScannerChannelIndex = 0
+		}
+
+		cf := centerFreq[ds]
+		var leadOffset int64
+		if cf > 0 {
+			leadOffset = int64(lead.FrequencyHz) - int64(cf)
+		}
+
+		// Scanner threshold + shared-sink squelch: use the most sensitive (most
+		// negative) squelch among the group's channels so the weakest configured
+		// channel still triggers. Keep both equal so the scanner parks exactly when
+		// the sink's squelch opens (and the bridge can segment on the closed-squelch
+		// silence the sink emits between transmissions).
+		threshold := 0
+		for _, mi := range members {
+			sq := channels[mi].SquelchDB
+			if sq == 0 {
+				sq = bridgeDefaultSquelchDB
+			}
+			if threshold == 0 || sq < threshold {
+				threshold = sq
+			}
+		}
+		if threshold == 0 {
+			threshold = bridgeDefaultSquelchDB
+		}
+
+		// Shared UDPSink, tuned (initially) to the lead channel; the FreqScanner
+		// retunes it at runtime. Streams to the lead channel's UDP port — the one
+		// the bridge binds for this group.
+		sinkCfg := lead
+		sinkCfg.SquelchDB = threshold
+		if err := c.postJSON(fmt.Sprintf("/deviceset/%d/channel", ds), map[string]interface{}{
+			"channelType":              "UDPSink",
+			"direction":                0,
+			"originatorDeviceSetIndex": ds,
+		}, nil); err != nil {
+			add(fmt.Sprintf("failed to add scanner UDPSink for device set %d: %v", ds, err))
+			groupFailed = true
+			continue
+		}
+		sinkIdx := chIdxByDS[ds]
+		chIdxByDS[ds]++
+		settle("channel creation", 10*time.Second)
+		if err := c.patchJSON(fmt.Sprintf("/deviceset/%d/channel/%d/settings", ds, sinkIdx), map[string]interface{}{
+			"channelType":     "UDPSink",
+			"direction":       0,
+			"UDPSinkSettings": udpSinkSettings(sinkCfg, leadOffset),
+		}); err != nil {
+			add(fmt.Sprintf("warning: failed to configure scanner UDPSink for device set %d: %v", ds, err))
+		}
+		settle("channel settings", 8*time.Second)
+
+		// FreqScanner that drives the shared UDPSink ("R{ds}:{sinkIdx}").
+		if err := c.postJSON(fmt.Sprintf("/deviceset/%d/channel", ds), map[string]interface{}{
+			"channelType":              "FreqScanner",
+			"direction":                0,
+			"originatorDeviceSetIndex": ds,
+		}, nil); err != nil {
+			add(fmt.Sprintf("failed to add FreqScanner for device set %d: %v", ds, err))
+			groupFailed = true
+			continue
+		}
+		scannerIdx := chIdxByDS[ds]
+		chIdxByDS[ds]++
+		settle("channel creation", 10*time.Second)
+		groupCfgs := make([]BridgeChannelConfig, len(members))
+		for k, mi := range members {
+			groupCfgs[k] = channels[mi]
+		}
+		if err := c.patchJSON(fmt.Sprintf("/deviceset/%d/channel/%d/settings", ds, scannerIdx), map[string]interface{}{
+			"channelType":         "FreqScanner",
+			"direction":           0,
+			"FreqScannerSettings": freqScannerSettings(groupCfgs, threshold, fmt.Sprintf("R%d:%d", ds, sinkIdx)),
+		}); err != nil {
+			add(fmt.Sprintf("warning: failed to configure FreqScanner for device set %d: %v", ds, err))
+		}
+		settle("channel settings", 8*time.Second)
+
+		// Start the scanner running (it doesn't scan until told to).
+		if err := c.postJSON(fmt.Sprintf("/deviceset/%d/channel/%d/actions", ds, scannerIdx), map[string]interface{}{
+			"channelType":        "FreqScanner",
+			"direction":          0,
+			"FreqScannerActions": map[string]interface{}{"run": 1},
+		}, nil); err != nil {
+			add(fmt.Sprintf("warning: failed to start FreqScanner for device set %d: %v", ds, err))
+		}
+
+		// Record the SDRangel indices on every group member so the bridge can bind
+		// the shared sink port (lead member) and poll the scanner's report.
+		for _, mi := range members {
+			updated[mi].ChannelIndex = sinkIdx
+			updated[mi].ScannerChannelIndex = scannerIdx
+		}
+
+		add(fmt.Sprintf(
+			"device set %d: FreqScanner idx=%d over %d freq(s) → UDPSink idx=%d on UDP %d (threshold %d dB)",
+			ds, scannerIdx, len(members), sinkIdx, lead.UdpPort, threshold,
+		))
 	}
 
 	// Start all configured devices
@@ -548,7 +834,10 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 		}
 	}
 
-	result.Success = true
+	// A failed scan-group POST leaves SDRangel mid-rebuilt; don't persist a partial
+	// scan provisioning. runProvisionJob skips the persist + bridge restart unless
+	// Success, so the old working config stays put and the operator can retry.
+	result.Success = !groupFailed
 	return result, updated
 }
 
@@ -621,6 +910,40 @@ func udpSinkSettings(ch BridgeChannelConfig, freqOffset int64) map[string]interf
 	}
 }
 
+// freqScannerSettings builds the FreqScannerSettings payload for a device set's
+// scan group. The scanner FFT-scans each listed frequency and, when one crosses
+// the threshold, retunes the paired UDPSink (channelRef "R{ds}:{idx}") to it — it
+// produces no audio itself. Only the fields we need are sent; SDRangel keeps its
+// defaults (continuous mode, max-power priority, peak measurement) for the rest.
+// channelBandwidth is the per-frequency detection width, matched to the demod the
+// way udpSinkSettings sets rfBandwidth.
+func freqScannerSettings(group []BridgeChannelConfig, thresholdDB int, channelRef string) map[string]interface{} {
+	chanBW := 12500
+	if len(group) > 0 {
+		switch group[0].Protocol {
+		case "am":
+			chanBW = 10000
+		case "usb", "lsb":
+			chanBW = 3000
+		}
+	}
+	freqs := make([]map[string]interface{}, 0, len(group))
+	for _, ch := range group {
+		freqs = append(freqs, map[string]interface{}{
+			"frequency": ch.FrequencyHz, // absolute Hz
+			"enabled":   1,
+			"notes":     ch.Label,
+		})
+	}
+	return map[string]interface{}{
+		"channel":          channelRef,
+		"frequencies":      freqs,
+		"threshold":        float64(thresholdDB),
+		"channelBandwidth": chanBW,
+		"title":            "Scanner",
+	}
+}
+
 // protocolToSampleFormat maps a bridge channel protocol to a UDPSink sampleFormat
 // enum value (mono audio variants). UDPSink handles analog modes only; digital
 // modes (DSD/NXDN) need a different path and are not provisioned here.
@@ -674,6 +997,12 @@ func (admin *Admin) SDRangelStatusHandler(w http.ResponseWriter, r *http.Request
 	opts := admin.Controller.Options
 	client := newSDRangelClient(opts.BridgeHost, opts.BridgePort)
 	status, _ := client.getStatus()
+	// Attach live scanner state, joined to the bridge config for per-frequency
+	// labels. Skip while a provision runs — a /report GET would race SDRangel's
+	// reconstructing main thread (see settle()).
+	if status.Connected && !admin.Controller.Provision.isRunning() {
+		status.Scanners = client.scannerStatuses(opts.BridgeChannels)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(status)
 }
@@ -710,6 +1039,17 @@ func (j *provisionJob) emit(msg string) {
 	j.mu.Lock()
 	j.status.Messages = append(j.status.Messages, msg)
 	j.mu.Unlock()
+}
+
+// isRunning reports whether a provision is in flight. The bridge checks this
+// before any FreqScanner /report probe: SDRangel's REST/main thread is not
+// thread-safe during (re)provisioning, so a concurrent GET could race it (see
+// settle()/waitReachable()). When provisioning, the bridge skips the probe and
+// falls back to a best-effort label instead.
+func (j *provisionJob) isRunning() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.status.Running
 }
 
 func (j *provisionJob) finish(success bool) {
@@ -835,12 +1175,31 @@ func (controller *Controller) autoProvisionSDRangel() {
 
 	// If SDRangel already has at least as many channels as we expect, it kept its
 	// provisioning (e.g. only rdio-scanner restarted) — leave the live run untouched.
+	// Expected count is scanner-aware: each non-scan channel is one UDPSink, but a
+	// scanner-enabled device set with ≥1 scan channel is just one shared UDPSink +
+	// one FreqScanner no matter how many scan channels it covers. Comparing the raw
+	// channel count would make a scanner set always look unprovisioned.
+	scanEnabledDS := map[int]bool{}
+	for _, d := range opts.BridgeDeviceSets {
+		scanEnabledDS[d.Index] = d.ScannerEnabled
+	}
+	expected := 0
+	scanDS := map[int]bool{}
+	for _, ch := range opts.BridgeChannels {
+		if ch.Scan && scanEnabledDS[ch.DeviceSetIndex] {
+			scanDS[ch.DeviceSetIndex] = true
+		} else {
+			expected++
+		}
+	}
+	expected += 2 * len(scanDS) // shared UDPSink + FreqScanner per scan group
+
 	have := 0
 	for _, ds := range devResp.DeviceSets {
 		have += len(ds.Chans)
 	}
-	if have >= len(opts.BridgeChannels) {
-		controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("auto-provision: SDRangel already has %d channel(s) for %d configured — skipping", have, len(opts.BridgeChannels)))
+	if have >= expected {
+		controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("auto-provision: SDRangel already has %d channel(s) for %d expected — skipping", have, expected))
 		return
 	}
 
