@@ -68,6 +68,7 @@ type SDRangelDeviceSetConfig struct {
 	Serial            string `json:"serial,omitempty"` // pin to a specific dongle by serial
 	CenterFrequencyHz uint   `json:"centerFrequencyHz"`
 	SampleRateHz      uint   `json:"sampleRateHz"`
+	GainTenthsDB      int    `json:"gainTenthsDb,omitempty"` // RTL tuner gain ×0.1 dB; 0 ⇒ bridgeDefaultGainTenthsDB
 }
 
 // SDRangelProvisionRequest is the body sent to the provision endpoint.
@@ -436,13 +437,26 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 			sr = 2400000
 		}
 
+		gainTenthsDB := dsCfg.GainTenthsDB
+		if gainTenthsDB == 0 {
+			gainTenthsDB = bridgeDefaultGainTenthsDB
+		}
+
 		settingsKey := deviceSettingsKey(dsCfg.HwType)
 		if err := c.patchJSON(fmt.Sprintf("/deviceset/%d/device/settings", dsCfg.Index), map[string]interface{}{
 			"deviceHwType": dsCfg.HwType,
 			settingsKey: map[string]interface{}{
 				"centerFrequency": dsCfg.CenterFrequencyHz,
 				"devSampleRate":   sr,
-				"agc":             1,
+				// Fixed tuner gain with hardware AGC OFF. With AGC on (the old
+				// default) the RTL auto-gain floats the noise floor up until it
+				// crosses even the -45 dB squelch, so the UDPSink squelch never
+				// closes and the bridge — which segments on the exact-zero PCM a
+				// closed squelch emits — records one unbroken call to the 5-min
+				// cap. A fixed gain pins the floor ~20 dB below squelch so it
+				// gates cleanly. See bridgeDefaultGainTenthsDB / udpSinkSettings.
+				"agc":             0,
+				"gain":            gainTenthsDB,
 				"dcBlock":         1,
 			},
 		}); err != nil {
@@ -453,7 +467,7 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 			add(fmt.Sprintf("device set %d: cleared %d existing channel(s)", dsCfg.Index, n))
 		}
 
-		add(fmt.Sprintf("device set %d: %s seq=%d serial=%q center=%d Hz SR=%d", dsCfg.Index, dsCfg.HwType, seq, dsCfg.Serial, dsCfg.CenterFrequencyHz, sr))
+		add(fmt.Sprintf("device set %d: %s seq=%d serial=%q center=%d Hz SR=%d gain=%.1fdB agc=off", dsCfg.Index, dsCfg.HwType, seq, dsCfg.Serial, dsCfg.CenterFrequencyHz, sr, float64(gainTenthsDB)/10))
 
 		// The device settings/clear spin up FFT work; blind-wait it out before the
 		// next step (no probing — a concurrent request would race and crash it).
@@ -545,6 +559,15 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 // passes static AND never emits the closed-squelch silence the bridge segments on,
 // so calls run to the cap. Operators lower it per-channel for genuinely weak signals.
 const bridgeDefaultSquelchDB = -45
+
+// bridgeDefaultGainTenthsDB is the fixed RTL tuner gain (tenths of a dB) used when a
+// device set doesn't specify one. The device PATCH forces hardware AGC OFF so the
+// noise floor stays put; 297 (29.7 dB) is the measured sweet spot on the Pi's R820T
+// dongles — it sits the floor ~20 dB below the -45 dB default squelch (so the squelch
+// still reliably closes in silence and the bridge can segment) while staying sensitive:
+// the fixed digital floor barely rose from 20→30 dB of gain, so real-signal SNR climbed
+// nearly 1:1. Operators raise it per device set for weak-signal sites.
+const bridgeDefaultGainTenthsDB = 297
 
 // udpSinkSettings builds the UDPSinkSettings payload for one bridge channel.
 // sampleFormat selects the demodulator; the squelch produces the exact-zero PCM
