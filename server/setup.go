@@ -482,6 +482,23 @@ func (c *sdrangelClient) scannerStatuses(channels []BridgeChannelConfig) []SDRan
 
 // ── Provision ──────────────────────────────────────────────────────────────
 
+// deviceSetFreqMaps returns, keyed by device-set index, each set's center frequency
+// and its effective sample rate (applying the 2400000 default for an unset rate) —
+// the spans used to decide whether a frequency falls within a dongle's window.
+func deviceSetFreqMaps(dsCfgs []SDRangelDeviceSetConfig) (centerFreq, sampleRate map[int]uint) {
+	centerFreq = map[int]uint{}
+	sampleRate = map[int]uint{}
+	for _, d := range dsCfgs {
+		centerFreq[d.Index] = d.CenterFrequencyHz
+		sr := d.SampleRateHz
+		if sr == 0 {
+			sr = 2400000
+		}
+		sampleRate[d.Index] = sr
+	}
+	return centerFreq, sampleRate
+}
+
 // routeScanChannelsToScanners enforces that every channel flagged Scan is assigned
 // to a scanner-enabled device set, so it actually runs behind a Frequency Scanner
 // instead of being silently provisioned as a fixed UDPSink on a plain dongle. A scan
@@ -617,20 +634,10 @@ func (c *sdrangelClient) provision(ctx context.Context, dsCfgs []SDRangelDeviceS
 		return result, updated
 	}
 
-	// Build center-freq lookup: device set index → center frequency
-	centerFreq := map[int]uint{}
-	// And the effective sample rate per device set (applying the same 2400000
-	// default used below), so the channel loop can warn when a channel's frequency
-	// offset falls outside the dongle's sampled span.
-	sampleRate := map[int]uint{}
-	for _, d := range dsCfgs {
-		centerFreq[d.Index] = d.CenterFrequencyHz
-		sr := d.SampleRateHz
-		if sr == 0 {
-			sr = 2400000
-		}
-		sampleRate[d.Index] = sr
-	}
+	// Build center-freq + effective-sample-rate lookups keyed by device-set index, so
+	// the channel loop and scan routing can tell whether a frequency falls within a
+	// dongle's sampled span.
+	centerFreq, sampleRate := deviceSetFreqMaps(dsCfgs)
 
 	// If device sets are pinned to specific dongles by serial (the SDR Devices
 	// assignment), resolve each serial to its SDRangel sequence so we assign those
@@ -682,8 +689,13 @@ func (c *sdrangelClient) provision(ctx context.Context, dsCfgs []SDRangelDeviceS
 			if s, ok := serialSeq[dsCfg.Serial]; ok {
 				seq = s
 			} else {
-				add(fmt.Sprintf("warning: dongle serial %s not found in SDRangel — using sequence %d", dsCfg.Serial, dsCfg.Sequence))
+				add(fmt.Sprintf("warning: dongle serial %s not found in SDRangel — falling back to positional sequence %d, which can grab the wrong dongle (or one trunk-recorder is using). Re-detect dongles or fix the serial.", dsCfg.Serial, dsCfg.Sequence))
 			}
+		} else {
+			// No serial to pin to: the device set takes whatever physical dongle sits at
+			// this positional sequence. If trunk-recorder shares the host (it pins by
+			// rtl=<index>), the two can land on the same dongle — warn so it's visible.
+			add(fmt.Sprintf("warning: device set %d has no dongle serial — using positional sequence %d. Set a unique serial (rtl_eeprom) so SDRangel and trunk-recorder don't grab the same dongle.", dsCfg.Index, dsCfg.Sequence))
 		}
 		if err := c.setDevice(ctx, dsCfg.Index, dsCfg.HwType, seq); err != nil {
 			add(fmt.Sprintf("failed to assign device %d (%s): %v", dsCfg.Index, dsCfg.HwType, err))
@@ -1467,9 +1479,19 @@ func (controller *Controller) autoProvisionSDRangel() {
 	for _, d := range opts.BridgeDeviceSets {
 		scanEnabledDS[d.Index] = d.ScannerEnabled
 	}
+	// Count what provision() will ACTUALLY create — i.e. after scan routing relocates
+	// any stray scan channel (one on a non-scanner set in the persisted config) onto a
+	// scanner set. Counting the raw config would miscount such a channel as a fixed
+	// UDPSink, so `expected` would never match SDRangel and every restart would force a
+	// needless re-provision.
+	routed := make([]BridgeChannelConfig, len(opts.BridgeChannels))
+	copy(routed, opts.BridgeChannels)
+	cf, sr := deviceSetFreqMaps(opts.BridgeDeviceSets)
+	routeScanChannelsToScanners(opts.BridgeDeviceSets, routed, cf, sr)
+
 	expected := 0
 	scanDS := map[int]bool{}
-	for _, ch := range opts.BridgeChannels {
+	for _, ch := range routed {
 		if ch.Scan && scanEnabledDS[ch.DeviceSetIndex] {
 			scanDS[ch.DeviceSetIndex] = true
 		} else {

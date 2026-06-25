@@ -365,6 +365,18 @@ async function provision() {
     }
   })
 
+  // Block the one case where SDRangel and trunk-recorder can collide on a physical
+  // dongle: an SDRangel device set with no serial falls back to a positional index,
+  // and trunk-recorder pins by rtl=<index> — so without a serial to tell them apart
+  // they can grab the same dongle. (Harmless when no dongle is assigned to TR.)
+  const noSerialSets = deviceSets.filter(d => !d.serial).length
+  if (noSerialSets && trDongleDevices.value.length) {
+    provisioning.value = false
+    provisionMessages.value = [`provision: aborted — ${noSerialSets} SDRangel device set(s) have no dongle serial, which falls back to a positional index that can collide with the ${trDongleDevices.value.length} trunk-recorder dongle(s) on this host. Set a unique serial (rtl_eeprom) on each dongle, re-detect, then provision.`]
+    toast.add({ title: 'Dongle serial required', description: 'An SDRangel dongle has no serial; it could collide with trunk-recorder. Set a unique serial (rtl_eeprom) and re-detect.', color: 'error' })
+    return
+  }
+
   const kickoff = await admin.provisionSDRangel({ deviceSets, channels: bridge.value.channels.filter(c => c.deviceSetIndex >= 0) })
 
   if (!kickoff) {
