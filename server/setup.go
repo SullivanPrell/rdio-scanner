@@ -511,13 +511,17 @@ func deviceSetFreqMaps(dsCfgs []SDRangelDeviceSetConfig) (centerFreq, sampleRate
 // to a scanner-enabled device set, so it actually runs behind a Frequency Scanner
 // instead of being silently provisioned as a fixed UDPSink on a plain dongle. A scan
 // channel already on a scanner-enabled set is left in place; one on a plain set is
-// moved to a scanner-enabled set, spreading across multiple scanner dongles (least-
-// loaded first) and preferring a set whose sampled span already covers the channel's
-// frequency so it keeps producing audio. centerFreq/sampleRate are keyed by device-
-// set index (as built in provision()); pass empty maps to skip the coverage
-// preference. It mutates channels in place and returns one message per reassignment,
-// or per scan channel that can't be placed because no scanner-enabled device set
-// exists. Pure (no I/O), so the routing decision is unit-testable on its own.
+// moved to a scanner-enabled set, spread across multiple scanner dongles (least-
+// loaded first). SDRangel's FreqScanner retunes the SDR's center frequency across the
+// whole scan list (it is NOT limited to the initial passband — m_lockDeviceFrequency
+// defaults off), so a single scanner dongle can sweep frequencies spanning multiple
+// bands. Coverage is therefore only a SOFT preference: when several scanners exist we
+// prefer one whose span already covers the frequency (so it retunes less), but a
+// channel that no scanner currently covers is still placed — never parked. The
+// centerFreq/sampleRate maps (keyed by device-set index) drive that preference; pass
+// empty maps to spread purely by load. Mutates channels in place; returns one message
+// per reassignment, or per scan channel that can't be placed because no scanner-
+// enabled device set exists at all. Pure (no I/O), so it is unit-testable on its own.
 func routeScanChannelsToScanners(dsCfgs []SDRangelDeviceSetConfig, channels []BridgeChannelConfig, centerFreq, sampleRate map[int]uint) []string {
 	scanEnabled := map[int]bool{}
 	scannerDSList := []int{}
@@ -532,7 +536,7 @@ func routeScanChannelsToScanners(dsCfgs []SDRangelDeviceSetConfig, channels []Br
 		cf := centerFreq[ds]
 		sr := sampleRate[ds]
 		if cf == 0 || sr == 0 || freq == 0 {
-			return true // unknown center/rate/freq — don't reject on coverage grounds
+			return false // unknown center/rate/freq — can't claim it's on-band for the preference
 		}
 		span := int64(sr) / 2
 		off := int64(freq) - int64(cf)
@@ -548,15 +552,13 @@ func routeScanChannelsToScanners(dsCfgs []SDRangelDeviceSetConfig, channels []Br
 			scanLoad[channels[i].DeviceSetIndex]++
 		}
 	}
-	// leastLoadedCovering picks the least-loaded scanner set whose sampled span covers
-	// freq. We deliberately do NOT fall back to a non-covering scanner: moving a
-	// channel onto a dongle that can't sample its frequency yields silent no-audio
-	// (and the FreqScanner can't scan a frequency outside its window either), which is
-	// worse than leaving it as a fixed UDPSink on a set that does cover it.
-	leastLoadedCovering := func(freq uint) int {
+	// leastLoaded picks the least-loaded scanner, optionally restricted to those whose
+	// span already covers freq (the soft on-band preference). It returns -1 only when
+	// the restriction filters everything out, so the caller can retry unrestricted.
+	leastLoaded := func(freq uint, requireOnBand bool) int {
 		target := -1
 		for _, ds := range scannerDSList {
-			if !covers(ds, freq) {
+			if requireOnBand && !covers(ds, freq) {
 				continue
 			}
 			if target < 0 || scanLoad[ds] < scanLoad[target] {
@@ -567,8 +569,7 @@ func routeScanChannelsToScanners(dsCfgs []SDRangelDeviceSetConfig, channels []Br
 	}
 
 	var msgs []string
-	// Second pass: relocate strays (scan channels on a non-scanner set) onto a
-	// covering scanner set.
+	// Second pass: relocate strays (scan channels on a non-scanner set) onto a scanner.
 	for i := range channels {
 		if !channels[i].Scan || scanEnabled[channels[i].DeviceSetIndex] {
 			continue
@@ -577,14 +578,9 @@ func routeScanChannelsToScanners(dsCfgs []SDRangelDeviceSetConfig, channels []Br
 			msgs = append(msgs, fmt.Sprintf("warning: channel %q is flagged Scan but no scanner-enabled SDR is configured — it will NOT be scanned. Enable Scanning on a dongle in the SDR Devices tab, then re-provision.", channels[i].Label))
 			continue
 		}
-		target := leastLoadedCovering(channels[i].FrequencyHz)
+		target := leastLoaded(channels[i].FrequencyHz, true) // prefer a scanner already on this band (less retuning)
 		if target < 0 {
-			// No scanner dongle's span covers this frequency — it physically cannot be
-			// scanned. Leave it in place (it still provisions as a fixed UDPSink, so it
-			// produces audio if its own set covers it) and warn, rather than silently
-			// moving it onto a scanner that can't receive it.
-			msgs = append(msgs, fmt.Sprintf("warning: channel %q at %d Hz is outside every scanner-enabled SDR's sampled span — it cannot be scanned; left on device set %d. Re-center a scanner dongle near it, or add a scanner covering that band.", channels[i].Label, channels[i].FrequencyHz, channels[i].DeviceSetIndex))
-			continue
+			target = leastLoaded(channels[i].FrequencyHz, false) // none on-band — any scanner retunes to it
 		}
 		msgs = append(msgs, fmt.Sprintf("channel %q: reassigned from device set %d to scanner-enabled device set %d (scan channels must run on a scanner SDR)", channels[i].Label, channels[i].DeviceSetIndex, target))
 		channels[i].DeviceSetIndex = target

@@ -102,22 +102,23 @@ func TestRouteScanChannels_PrefersCoveringScanner(t *testing.T) {
 	}
 }
 
-// A stray scan channel that NO scanner-enabled dongle's span can cover is left in
-// place (rather than moved onto a scanner that can't sample its frequency, which
-// would be silent no-audio) and a warning is emitted.
-func TestRouteScanChannels_NoCoveringScannerLeavesInPlace(t *testing.T) {
+// A stray scan channel whose frequency no scanner currently covers is STILL moved
+// onto a scanner — SDRangel's FreqScanner retunes the device across bands, so it can
+// scan a frequency far outside the initial passband. (It must not be left on a plain
+// set, where it would never be scanned.)
+func TestRouteScanChannels_OffBandStillPlacedOnScanner(t *testing.T) {
 	ds := dsConfigs(true, false) // set 0 scanner (150 MHz), set 1 plain
 	centerFreq := map[int]uint{0: 150_000_000}
 	sampleRate := map[int]uint{0: 2_400_000}
 	ch := []BridgeChannelConfig{
-		{Label: "far", DeviceSetIndex: 1, Scan: true, FrequencyHz: 460_000_000}, // outside the scanner's span
+		{Label: "far", DeviceSetIndex: 1, Scan: true, FrequencyHz: 460_000_000}, // far outside set 0's initial span
 	}
 	msgs := routeScanChannelsToScanners(ds, ch, centerFreq, sampleRate)
 
-	if ch[0].DeviceSetIndex != 1 {
-		t.Errorf("uncoverable scan channel moved to %d; want left on 1 (not moved onto a non-covering scanner)", ch[0].DeviceSetIndex)
+	if ch[0].DeviceSetIndex != 0 {
+		t.Errorf("off-band scan channel landed on %d; want 0 (the scanner — it retunes across bands)", ch[0].DeviceSetIndex)
 	}
 	if len(msgs) != 1 {
-		t.Fatalf("expected 1 warning, got %d: %v", len(msgs), msgs)
+		t.Fatalf("expected 1 reassignment message, got %d: %v", len(msgs), msgs)
 	}
 }

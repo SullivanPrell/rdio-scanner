@@ -242,49 +242,28 @@ const SDR_SAMPLE_RATE = 2400000 // ~2.4 MHz usable window per RTL-SDR dongle
 // the server's routeScanChannelsToScanners so both paths agree.
 function routeScanChannels(channels: BridgeChannel[]): { channels: BridgeChannel[]; warnings: string[] } {
   const scannerSets = scannerSetIndices.value
-  const warnings: string[] = []
-  if (!scannerSets.length) return { channels, warnings }
+  if (!scannerSets.length) return { channels, warnings: [] }
 
-  const freqsOf = new Map<number, number[]>()
-  for (const c of channels) {
-    if (c.frequencyHz > 0 && c.deviceSetIndex >= 0) {
-      const a = freqsOf.get(c.deviceSetIndex) ?? []
-      a.push(c.frequencyHz)
-      freqsOf.set(c.deviceSetIndex, a)
-    }
-  }
-  const fits = (set: number, hz: number) => {
-    const fs = freqsOf.get(set)
-    if (!fs || !fs.length) return true
-    return Math.max(...fs, hz) - Math.min(...fs, hz) <= SDR_USABLE_HZ
-  }
   const load = new Map<number, number>()
   for (const c of channels) {
     if (c.scan && scannerSets.includes(c.deviceSetIndex)) load.set(c.deviceSetIndex, (load.get(c.deviceSetIndex) ?? 0) + 1)
   }
-  const pick = (hz: number) => {
-    let target = -1
-    for (const s of scannerSets) {
-      if (!fits(s, hz)) continue
-      if (target < 0 || (load.get(s) ?? 0) < (load.get(target) ?? 0)) target = s
-    }
+  // SDRangel's FreqScanner retunes the device across bands, so ANY scanner dongle can
+  // take ANY frequency — there's no ~2 MHz passband limit on a scan channel. Just put
+  // each stray on the least-loaded scanner (spread for parallelism); never park it.
+  const pick = () => {
+    let target = scannerSets[0]!
+    for (const s of scannerSets) if ((load.get(s) ?? 0) < (load.get(target) ?? 0)) target = s
     return target
   }
 
   const out = channels.map((c) => {
     if (!c.scan || c.frequencyHz <= 0 || scannerSets.includes(c.deviceSetIndex)) return c
-    const target = pick(c.frequencyHz)
-    if (target < 0) {
-      warnings.push(`${c.label || 'channel'} at ${(c.frequencyHz / 1e6).toFixed(4)} MHz fits no scanner dongle's ~2 MHz window — left on its current device set; it won't be scanned.`)
-      return c
-    }
+    const target = pick()
     load.set(target, (load.get(target) ?? 0) + 1)
-    const fs = freqsOf.get(target) ?? []
-    fs.push(c.frequencyHz)
-    freqsOf.set(target, fs)
     return { ...c, deviceSetIndex: target }
   })
-  return { channels: out, warnings }
+  return { channels: out, warnings: [] }
 }
 
 async function provision() {
@@ -343,13 +322,17 @@ async function provision() {
   const assigned = sdrangelAssignments.value
 
   const deviceSets = [...freqsByDevice.entries()].map(([index, freqs]) => {
+    const isScanner = assigned[index]?.scanEnabled ?? false
     const min = Math.min(...freqs)
     const max = Math.max(...freqs)
     let center = Math.round((min + max) / 2)
     // Nudge the centre off any channel that lands exactly on it — RTL-SDR has a
     // DC spike at the tuned centre frequency that would corrupt that channel.
     if (freqs.includes(center)) center += 100000
-    if (max - min > SDR_SAMPLE_RATE * 0.9) {
+    // The span warning only applies to a FIXED dongle (one demod per channel, all
+    // within one ~2.4 MHz window). A scanner retunes the device across the whole list,
+    // so a wide span is expected and fine — don't warn for it.
+    if (!isScanner && max - min > SDR_SAMPLE_RATE * 0.9) {
       toast.add({
         title: `Device set ${index}: channels span ${((max - min) / 1e6).toFixed(2)} MHz`,
         description: `One SDR only covers ~${(SDR_SAMPLE_RATE / 1e6).toFixed(1)} MHz. Spread these across more device sets.`,
@@ -363,7 +346,7 @@ async function provision() {
       serial: assigned[index]?.serialNumber ?? '',
       centerFrequencyHz: center,
       sampleRateHz: SDR_SAMPLE_RATE,
-      scannerEnabled: assigned[index]?.scanEnabled ?? false,
+      scannerEnabled: isScanner,
     }
   })
 
@@ -895,10 +878,13 @@ function scanStateLabel(s: number): string {
 const SDR_USABLE_HZ = 2_000_000
 
 // clusterToSets greedily packs channels into ≤SDR_USABLE_HZ frequency windows (one
-// dongle covers ~2 MHz) and maps window k to positions[k]. Channels whose window
-// has no available device set are parked (-1). Returns the per-channel mapping plus
-// how many were parked.
-function clusterToSets(chans: BridgeChannel[], positions: number[]) {
+// dongle covers ~2 MHz) and maps window k to positions[k]. `wrap` controls what
+// happens when there are more windows than device sets: a FIXED dongle (one demod per
+// channel) can only sample one ~2 MHz window, so excess windows are parked (-1); a
+// SCANNER dongle retunes across bands, so excess windows wrap round-robin onto the
+// available scanners instead (one scanner sweeps several windows). Returns the
+// per-channel mapping plus how many were parked.
+function clusterToSets(chans: BridgeChannel[], positions: number[], wrap = false) {
   const map = new Map<BridgeChannel, number>()
   if (!chans.length) return { map, parked: 0 }
   const sorted = [...chans].sort((a, b) => a.frequencyHz - b.frequencyHz)
@@ -913,7 +899,10 @@ function clusterToSets(chans: BridgeChannel[], positions: number[]) {
   let parked = 0
   for (const ch of chans) {
     const w = windowFor(ch.frequencyHz)
-    const pos = w < positions.length ? positions[w]! : -1
+    let pos: number
+    if (w < positions.length) pos = positions[w]!
+    else if (wrap && positions.length) pos = positions[w % positions.length]! // scanner retunes — distribute, don't park
+    else pos = -1
     if (pos < 0) parked++
     map.set(ch, pos)
   }
@@ -942,9 +931,13 @@ function autoAssignDevices() {
 
   const scanChans = withFreq.filter(c => c.scan)
   const fixedChans = withFreq.filter(c => !c.scan)
-  const scanRes = clusterToSets(scanChans, scannerSets)
-  // Fixed channels prefer plain dongles; with none, they may ride a scanner dongle.
-  const fixedRes = clusterToSets(fixedChans, plainSets.length ? plainSets : scannerSets)
+  // Scan channels: wrap=true — one scanner dongle sweeps multiple bands by retuning,
+  // so extra frequency windows distribute across the scanners rather than parking.
+  const scanRes = clusterToSets(scanChans, scannerSets, true)
+  // Fixed channels go on plain dongles only (wrap=false: a fixed UDPSink can't retune,
+  // so windows past the dongle count park). They must NOT ride a scanner dongle — its
+  // FreqScanner retunes the device out from under a fixed channel, scrambling it.
+  const fixedRes = clusterToSets(fixedChans, plainSets, false)
 
   bridge.value = {
     ...bridge.value,
