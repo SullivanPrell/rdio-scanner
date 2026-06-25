@@ -113,6 +113,7 @@ export interface SDRangelProvisionStatus {
   running: boolean
   done: boolean
   success: boolean
+  cancelled?: boolean
   messages: string[]
   startedAt?: number
   finishedAt?: number

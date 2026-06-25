@@ -513,11 +513,25 @@ func routeScanChannelsToScanners(dsCfgs []SDRangelDeviceSetConfig, channels []Br
 		off := int64(freq) - int64(cf)
 		return off <= span && off >= -span
 	}
+	// First pass: count scan channels ALREADY on a scanner set, so the spread in the
+	// second pass balances against the full load — not just the strays seen so far
+	// (which, in slice order, would over-load the first scanner before later
+	// correctly-placed channels are counted).
 	scanLoad := map[int]int{} // scanner device-set index → scan channels routed to it (for spreading)
-	leastLoaded := func(restrictCovering bool, freq uint) int {
+	for i := range channels {
+		if channels[i].Scan && scanEnabled[channels[i].DeviceSetIndex] {
+			scanLoad[channels[i].DeviceSetIndex]++
+		}
+	}
+	// leastLoadedCovering picks the least-loaded scanner set whose sampled span covers
+	// freq. We deliberately do NOT fall back to a non-covering scanner: moving a
+	// channel onto a dongle that can't sample its frequency yields silent no-audio
+	// (and the FreqScanner can't scan a frequency outside its window either), which is
+	// worse than leaving it as a fixed UDPSink on a set that does cover it.
+	leastLoadedCovering := func(freq uint) int {
 		target := -1
 		for _, ds := range scannerDSList {
-			if restrictCovering && !covers(ds, freq) {
+			if !covers(ds, freq) {
 				continue
 			}
 			if target < 0 || scanLoad[ds] < scanLoad[target] {
@@ -528,21 +542,24 @@ func routeScanChannelsToScanners(dsCfgs []SDRangelDeviceSetConfig, channels []Br
 	}
 
 	var msgs []string
+	// Second pass: relocate strays (scan channels on a non-scanner set) onto a
+	// covering scanner set.
 	for i := range channels {
-		if !channels[i].Scan {
-			continue
-		}
-		if scanEnabled[channels[i].DeviceSetIndex] {
-			scanLoad[channels[i].DeviceSetIndex]++ // already on a scanner dongle — count it for spreading
+		if !channels[i].Scan || scanEnabled[channels[i].DeviceSetIndex] {
 			continue
 		}
 		if len(scannerDSList) == 0 {
 			msgs = append(msgs, fmt.Sprintf("warning: channel %q is flagged Scan but no scanner-enabled SDR is configured — it will NOT be scanned. Enable Scanning on a dongle in the SDR Devices tab, then re-provision.", channels[i].Label))
 			continue
 		}
-		target := leastLoaded(true, channels[i].FrequencyHz) // prefer a scanner whose span covers it
+		target := leastLoadedCovering(channels[i].FrequencyHz)
 		if target < 0 {
-			target = leastLoaded(false, channels[i].FrequencyHz) // none covers — least-loaded scanner anyway
+			// No scanner dongle's span covers this frequency — it physically cannot be
+			// scanned. Leave it in place (it still provisions as a fixed UDPSink, so it
+			// produces audio if its own set covers it) and warn, rather than silently
+			// moving it onto a scanner that can't receive it.
+			msgs = append(msgs, fmt.Sprintf("warning: channel %q at %d Hz is outside every scanner-enabled SDR's sampled span — it cannot be scanned; left on device set %d. Re-center a scanner dongle near it, or add a scanner covering that band.", channels[i].Label, channels[i].FrequencyHz, channels[i].DeviceSetIndex))
+			continue
 		}
 		msgs = append(msgs, fmt.Sprintf("channel %q: reassigned from device set %d to scanner-enabled device set %d (scan channels must run on a scanner SDR)", channels[i].Label, channels[i].DeviceSetIndex, target))
 		channels[i].DeviceSetIndex = target
@@ -1221,6 +1238,7 @@ type ProvisionStatus struct {
 	Running    bool     `json:"running"`
 	Done       bool     `json:"done"`
 	Success    bool     `json:"success"`
+	Cancelled  bool     `json:"cancelled,omitempty"` // run was aborted by the operator, not a failure
 	Messages   []string `json:"messages"`
 	StartedAt  int64    `json:"startedAt,omitempty"`  // unix ms
 	FinishedAt int64    `json:"finishedAt,omitempty"` // unix ms
@@ -1272,6 +1290,7 @@ func (j *provisionJob) Cancel() bool {
 		if j.cancel != nil {
 			j.cancel()
 		}
+		j.status.Cancelled = true
 		// Append directly (not via emit(), which would re-lock mu) so the live UI
 		// shows the abort immediately while the goroutine winds down.
 		j.status.Messages = append(j.status.Messages, "provision: cancellation requested — stopping at the next safe step…")
@@ -1308,6 +1327,12 @@ func (j *provisionJob) finish(success bool) {
 	j.status.Running = false
 	j.status.Done = true
 	j.status.Success = success
+	// A cancelled context (whether the cancel landed mid-run or in the window between
+	// provision() returning and finish()) marks the run as cancelled, so the UI can
+	// distinguish a deliberate abort from a failure.
+	if j.ctx != nil && j.ctx.Err() != nil {
+		j.status.Cancelled = true
+	}
 	j.status.FinishedAt = time.Now().UnixMilli()
 	j.mu.Unlock()
 }
@@ -1384,13 +1409,18 @@ func (controller *Controller) runProvisionJob(deviceSets []SDRangelDeviceSetConf
 
 	result, updatedChannels := client.provision(controller.Provision.runContext(), deviceSets, channels, controller.Provision.emit)
 
+	// A cancel can land in the window between provision() returning and here. Re-check
+	// it so a late cancel doesn't persist + restart a run the operator just aborted
+	// (which would also leave a self-contradictory success+cancelled status).
+	ok := result.Success && controller.Provision.runContext().Err() == nil
+
 	// Persist BOTH the SDRangel-assigned channel indices AND the device-set configs.
 	// The device sets are what a later restart needs to re-apply this exact
 	// provisioning unattended (autoProvisionSDRangel) — SDRangel keeps channels only
 	// in memory, so without this a reboot leaves it blank and audio never resumes.
 	// The bridge keys off UdpPort, so ChannelIndex is vestigial bookkeeping, but
 	// persist it anyway.
-	if result.Success {
+	if ok {
 		controller.Options.BridgeChannels = updatedChannels
 		controller.Options.BridgeDeviceSets = deviceSets
 		if err := controller.Options.Write(controller.Database); err != nil {
@@ -1399,7 +1429,7 @@ func (controller *Controller) runProvisionJob(deviceSets []SDRangelDeviceSetConf
 			controller.Bridge.Restart()
 		}
 	}
-	controller.Provision.finish(result.Success)
+	controller.Provision.finish(ok)
 }
 
 // autoProvisionSDRangel re-applies the last-known SDRangel provisioning after a
