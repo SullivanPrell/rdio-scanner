@@ -138,41 +138,20 @@ build_sdrangel_from_source() {
     fi
 }
 
-# Try a pre-built arm64 .deb from GitHub releases; fall back to source build.
+# Install the source-patched sdrangelsrv. rdio-scanner REQUIRES patches that a stock
+# build or release .deb does NOT have, so we ALWAYS build from source — never a
+# pre-built package:
+#   * the FFTW planner thread-safety fix, or creating a device set over the REST API
+#     races SDRangel's planner and crashes the API mid-provision;
+#   * the FreqScanner 'enabled' webapi fix (Patch C), or frequency scanning provisions
+#     but never starts.
+# We also do NOT skip merely because /usr/bin/sdrangelsrv exists: an existing binary
+# may be stock or built from an older patch set. Idempotency is owned by
+# scripts/sdrangel-source.sh, which returns in seconds when the installed binary
+# already carries the CURRENT patch set (tracked via a sidecar marker) and otherwise
+# rebuilds — so this stays correct whether setup.sh is run for a fresh install or to
+# pull a newer patch set on update.
 install_sdrangel() {
-    # Skip entirely if a working binary is already in place.
-    if [[ -x /usr/bin/sdrangelsrv ]]; then
-        info "sdrangelsrv already installed at /usr/bin/sdrangelsrv — skipping build."
-        return
-    fi
-
-    local api_url="https://api.github.com/repos/f4exb/sdrangel/releases/latest"
-    local release_json deb_url deb_file="/tmp/sdrangel-install.deb"
-
-    info "Checking for SDRangel arm64 pre-built package..."
-    release_json="$(curl -fsSL "$api_url" 2>/dev/null)" || true
-
-    deb_url="$(printf '%s' "$release_json" | \
-        grep -o '"browser_download_url":"[^"]*arm64[^"]*\.deb"' | \
-        grep -o 'https://[^"]*' | head -1)" || true
-    [[ -z "$deb_url" ]] && deb_url="$(printf '%s' "$release_json" | \
-        grep -o '"browser_download_url":"[^"]*aarch64[^"]*\.deb"' | \
-        grep -o 'https://[^"]*' | head -1)" || true
-
-    if [[ -n "$deb_url" ]]; then
-        info "Downloading ${deb_url##*/} ..."
-        if curl -fsSL -o "$deb_file" "$deb_url" && \
-           DEBIAN_FRONTEND=noninteractive apt-get install -y "$deb_file" 2>/dev/null; then
-            rm -f "$deb_file"
-            if command -v sdrangelsrv &>/dev/null; then
-                info "sdrangelsrv installed from release package."
-                return
-            fi
-        fi
-        rm -f "$deb_file"
-        warn "Release package install failed — falling back to source build."
-    fi
-
     build_sdrangel_from_source
 }
 

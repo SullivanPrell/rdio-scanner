@@ -90,12 +90,14 @@ INSTALL_BIN="/usr/bin/sdrangelsrv"
 # A unique marker string we patch into the source. It gets baked into the
 # compiled binary's .rodata, so we can later detect "is the INSTALLED binary a
 # thread-safe build produced by THIS script?" with a cheap `grep` on the ELF.
-# Bump the suffix if the patch semantics ever change so old binaries are
-# correctly treated as stale and rebuilt. v3 = added Patch C (FreqScanner webapi
-# applies per-frequency 'enabled'); the freqscanner source line is the load-bearing
-# staleness check (see FREQSCANNER_PATCH_LINE below), since -flto strips this marker
-# string from the binary — this constant is now primarily documentation of intent.
+# Bump the suffix whenever the patch set changes so a stale install is rebuilt.
+# v3 = added Patch C (FreqScanner webapi applies per-frequency 'enabled'). The
+# marker is recorded in a SIDECAR FILE next to the binary at install time, NOT in
+# the binary's .rodata: -O3 -flto strips an unused in-binary string, so a sidecar
+# is the only reliable "which patch set is installed?" record across runs/reboots.
+# The idempotency gate below reads it so `setup.sh` is safe to re-run for updates.
 FIX_MARKER="RDIO_FFTW_PLANNER_THREADSAFE_v3"
+SDRANGEL_MARKER_FILE="${INSTALL_BIN}.rdio-marker"
 
 # ── Colours / logging ────────────────────────────────────────────────────────
 
@@ -117,18 +119,24 @@ step "Pre-flight checks"
 ARCH="$(uname -m)"
 [[ "$ARCH" == "aarch64" ]] || warn "Expected aarch64 (Pi 5 arm64), got '${ARCH}' — continuing anyway."
 
-# ── Idempotency gate: is a thread-safe binary already installed? ──────────────
+# ── Idempotency gate: is the CURRENT patched binary already installed? ─────────
 #
-# We deliberately do NOT skip merely because /usr/bin/sdrangelsrv exists — a
-# pre-existing binary (apt package, or an OLD build from setup.sh) would be the
-# NON-thread-safe one that crashes. We only skip if the installed binary carries
-# our FIX_MARKER, proving it was built by this script with the patch applied.
-if [[ -x "$INSTALL_BIN" ]] && grep -aq "$FIX_MARKER" "$INSTALL_BIN" 2>/dev/null; then
-    info "Thread-safe sdrangelsrv already installed at ${INSTALL_BIN} (marker '${FIX_MARKER}' present) — nothing to do."
+# Skip the 20-40 min rebuild only when the installed binary was produced by THIS
+# script with the CURRENT patch set, tracked by the sidecar marker written at
+# install time (see SDRANGEL_MARKER_FILE). We deliberately do NOT skip merely
+# because /usr/bin/sdrangelsrv exists: a stock apt/release package, or a build from
+# an older patch set, is missing the FFTW and/or FreqScanner fix and must be
+# replaced. setup.sh delegates here unconditionally, so this gate — not setup.sh —
+# owns the rebuild-vs-skip decision, which is what makes `setup.sh` safe to re-run
+# for updates without either re-flashing every time or silently shipping a stale
+# (non-scanning / crash-prone) sdrangelsrv.
+if [[ -x "$INSTALL_BIN" ]] && [[ -f "$SDRANGEL_MARKER_FILE" ]] \
+   && [[ "$(cat "$SDRANGEL_MARKER_FILE" 2>/dev/null)" == "$FIX_MARKER" ]]; then
+    info "Patched sdrangelsrv already installed (marker '${FIX_MARKER}') — nothing to do."
     exit 0
 fi
 if [[ -x "$INSTALL_BIN" ]]; then
-    warn "An sdrangelsrv is installed but lacks the FFTW thread-safety fix — it will be replaced."
+    warn "An sdrangelsrv is installed but is missing the current rdio-scanner patch set (FFTW + FreqScanner 'enabled') — it will be rebuilt and replaced."
 fi
 
 warn "Building thread-safe sdrangelsrv ${SDRANGEL_VERSION} from source. Expect 20-40 min on a Pi 5."
@@ -536,7 +544,16 @@ if ! verify_threadsafe "$INSTALL_BIN"; then
     fatal "Installed ${INSTALL_BIN} has no make_planner_thread_safe reference — install may have picked up a different binary."
 fi
 
-info "Thread-safe sdrangelsrv ${SDRANGEL_VERSION} installed at ${INSTALL_BIN}."
+# Record the current patch-set marker so a later setup.sh re-run knows THIS binary
+# already carries these patches and can skip the rebuild. The marker can't live
+# reliably in the binary (-flto strips an unused string), so this sidecar file is
+# the source of truth for the idempotency gate at the top of the script. Written
+# LAST, only after the build + both verifications succeed, so a failed/partial run
+# never leaves a marker that would suppress a needed rebuild.
+echo "$FIX_MARKER" > "$SDRANGEL_MARKER_FILE" \
+    || warn "could not write marker ${SDRANGEL_MARKER_FILE}; re-runs may rebuild unnecessarily"
+
+info "Thread-safe + FreqScanner-patched sdrangelsrv ${SDRANGEL_VERSION} installed at ${INSTALL_BIN}."
 info "Source tree left at ${SRC_DIR} for fast idempotent re-runs (safe to delete)."
 echo ""
 echo -e "${G}${BOLD}Done.${NC} The FFTW planner is now globally locked; creating device sets via REST no longer races/crashes."
