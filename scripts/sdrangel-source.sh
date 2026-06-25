@@ -91,8 +91,11 @@ INSTALL_BIN="/usr/bin/sdrangelsrv"
 # compiled binary's .rodata, so we can later detect "is the INSTALLED binary a
 # thread-safe build produced by THIS script?" with a cheap `grep` on the ELF.
 # Bump the suffix if the patch semantics ever change so old binaries are
-# correctly treated as stale and rebuilt.
-FIX_MARKER="RDIO_FFTW_PLANNER_THREADSAFE_v1"
+# correctly treated as stale and rebuilt. v3 = added Patch C (FreqScanner webapi
+# applies per-frequency 'enabled'); the freqscanner source line is the load-bearing
+# staleness check (see FREQSCANNER_PATCH_LINE below), since -flto strips this marker
+# string from the binary — this constant is now primarily documentation of intent.
+FIX_MARKER="RDIO_FFTW_PLANNER_THREADSAFE_v3"
 
 # ── Colours / logging ────────────────────────────────────────────────────────
 
@@ -222,18 +225,30 @@ verify_threadsafe() {
 
 # ── Clone (or reuse) the source tree ─────────────────────────────────────────
 # Reuse an existing compiled build tree so re-runs don't recompile from scratch.
+#
+# A reused tree must carry BOTH source-level fixes, not just the FFTW one:
+#   * verify_threadsafe() proves the FFTW planner fix linked into the binary.
+#   * FREQSCANNER_PATCH_LINE must be present in the freqscanner.cpp SOURCE.
+# The second check is essential: Patch C is a one-line behavioral change with no
+# symbol or string that survives -O3 -flto, so it is INVISIBLE to verify_threadsafe
+# and to any binary probe. Without this guard a tree built before Patch C existed
+# (FFTW-only) would be reused and silently ship a scanner that never scans — the
+# exact failure Patch C exists to fix. If either fix is missing, wipe and rebuild.
+FREQSCANNER_PATCH_LINE='freqSetting.m_enabled = frequency->getEnabled();'
+FREQSCANNER_CPP_REL='plugins/channelrx/freqscanner/freqscanner.cpp'
 NEED_CLONE=true
 if [[ -d "${SRC_DIR}/.git" ]]; then
     if [[ -x "${SRC_DIR}/build/sdrangelsrv" ]] && \
-       verify_threadsafe "${SRC_DIR}/build/sdrangelsrv"; then
-        info "Existing thread-safe build present at ${SRC_DIR}/build — reusing it (skip clone/patch/compile)."
+       verify_threadsafe "${SRC_DIR}/build/sdrangelsrv" && \
+       grep -qF "$FREQSCANNER_PATCH_LINE" "${SRC_DIR}/${FREQSCANNER_CPP_REL}" 2>/dev/null; then
+        info "Existing fully-patched build present at ${SRC_DIR}/build (FFTW + FreqScanner 'enabled') — reusing it (skip clone/patch/compile)."
         NEED_CLONE=false
         SKIP_PATCH=true
         SKIP_COMPILE=true
     else
-        # A build tree exists but is stale (no marker) — wipe and start clean so
-        # we never ship a half-patched binary.
-        warn "Existing source tree at ${SRC_DIR} is stale (no fix marker) — removing for a clean build."
+        # A build tree exists but is stale (missing the FFTW fix and/or Patch C) —
+        # wipe and start clean so we never ship a half-patched binary.
+        warn "Existing source tree at ${SRC_DIR} is stale (missing FFTW fix and/or FreqScanner 'enabled' patch) — removing for a clean build."
         rm -rf "${SRC_DIR}"
     fi
 fi
@@ -415,7 +430,59 @@ print("  Patched sdrbase/maincore.cpp — all positioning implementations guarde
 print("Qt5Positioning patch complete.")
 PYEOF
 
+    # ── Patch C: FreqScanner REST `enabled` fix (needed by the bridge scan mode) ─
+    # rdio-scanner can drive an SDRangel Frequency Scanner over REST to scan a set
+    # of frequencies on one dongle. SDRangel's FreqScanner webapi has a bug (present
+    # in v7.26.1 AND master): webapiUpdateChannelSettings() rebuilds the scanned
+    # frequency list from the request but NEVER reads each entry's `enabled` flag, so
+    # every REST-added frequency stays disabled. processScanResults()/START_SCAN only
+    # scans enabled frequencies, so the scanner provisions but never starts — it sits
+    # at scanState=START with nothing to scan. (The two other FreqScanner REST quirks
+    # — the frequencies/frequencySettings apply-key mismatch and the GUI-only
+    # top-level `channel` — are worked around in rdio-scanner's freqScannerSettings()
+    # via a dummy key + per-frequency channel, so only `enabled` needs a source fix.)
+    # One line: read the per-frequency `enabled` in the frequencies loop.
+    step "Patching SDRangel source — FreqScanner webapi applies per-frequency 'enabled'"
+    python3 - "${SRC_DIR}" <<'PYEOF' || fatal "FreqScanner 'enabled' patch failed."
+import sys
+src = sys.argv[1]
+path = f"{src}/plugins/channelrx/freqscanner/freqscanner.cpp"
+with open(path) as f:
+    txt = f.read()
+
+if "freqSetting.m_enabled = frequency->getEnabled();" in txt:
+    print("  freqscanner.cpp already patched — nothing to change.")
+    sys.exit(0)
+
+lines = txt.split("\n")
+out, done = [], False
+for line in lines:
+    out.append(line)
+    if (not done) and line.strip() == "freqSetting.m_frequency = frequency->getFrequency();":
+        indent = line[:len(line) - len(line.lstrip())]
+        out.append(indent + "freqSetting.m_enabled = frequency->getEnabled(); // rdio-scanner: webapi never applied 'enabled' -> REST frequencies stayed disabled and the scanner never started")
+        done = True
+
+if not done:
+    sys.exit("FATAL: freqscanner.cpp anchor 'freqSetting.m_frequency = frequency->getFrequency();' not found — SDRangel layout changed; refusing to build a half-patched scanner.")
+
+with open(path, "w") as f:
+    f.write("\n".join(out))
+print("  Patched freqscanner.cpp — webapi now applies per-frequency 'enabled'")
+PYEOF
+
 fi  # end SKIP_PATCH
+
+# ── Source chokepoint: assert Patch C is present BEFORE the 20-40 min compile ──
+# Patch C (per-frequency `enabled`) is a one-line behavioral change with no symbol
+# or string that survives the optimised build, so neither the pre-install nor the
+# post-install binary verify below can confirm it. Assert it at the SOURCE here,
+# which covers BOTH paths into this point — a fresh clone+patch AND a reused tree —
+# so a scanner that "provisions but never scans" can never reach the compiler.
+if ! grep -qF "$FREQSCANNER_PATCH_LINE" "${SRC_DIR}/${FREQSCANNER_CPP_REL}" 2>/dev/null; then
+    fatal "FreqScanner 'enabled' patch (Patch C) missing from ${SRC_DIR}/${FREQSCANNER_CPP_REL} — refusing to build a scanner that never scans."
+fi
+info "Verified FreqScanner 'enabled' patch (Patch C) present in source."
 
 # ── Configure ────────────────────────────────────────────────────────────────
 
