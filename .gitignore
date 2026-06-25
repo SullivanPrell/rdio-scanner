@@ -14,3 +14,8 @@ sdr-linux/bin/rdio-scanner-arm64
 sdr-linux/bin/rdio-scanner-armhf
 
 client-nuxt/dist
+
+# Local dev build / run artifacts at the repo root (server build binary +
+# default SQLite database created by running ./rdio-scanner from the root)
+/rdio-scanner
+/rdio-scanner.db
