@@ -401,6 +401,14 @@ func (c *sdrangelClient) getStatus() (*SDRangelStatus, error) {
 	}
 	var devResp sdrangelDeviceSetsResponse
 	if err := c.getJSON("/devicesets", &devResp); err == nil {
+		// A device set with no channels comes back with a nil Chans slice, which
+		// marshals to JSON null — and the admin UI then crashes on `ds.channels.length`,
+		// blanking the whole Bridge tab. Normalize nil → [] so the API never sends null.
+		for i := range devResp.DeviceSets {
+			if devResp.DeviceSets[i].Chans == nil {
+				devResp.DeviceSets[i].Chans = []SDRangelChannel{}
+			}
+		}
 		status.DeviceSets = devResp.DeviceSets
 	}
 	return status, nil

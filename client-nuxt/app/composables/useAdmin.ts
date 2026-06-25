@@ -259,7 +259,9 @@ export interface SDRangelConnectStatus {
   deviceSets?: Array<{
     index: number
     hwType: string
-    channels: Array<{ index: number; idText: string; title: string }>
+    // null when SDRangel created the device set but has no channels on it yet (a Go
+    // nil slice marshals to JSON null) — callers must guard before .length/.map.
+    channels: Array<{ index: number; idText: string; title: string }> | null
   }>
   scanners?: SDRangelScannerStatus[]
 }

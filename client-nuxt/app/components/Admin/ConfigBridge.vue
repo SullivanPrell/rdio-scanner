@@ -35,7 +35,9 @@ const sdrangelLogsEl = ref<HTMLElement | null>(null)
 // REST view of what SDRangel currently has provisioned (device sets + channels).
 const sdrangelStatus = ref<SDRangelConnectStatus>({ connected: false })
 const provisionedChannelCount = computed(() =>
-  (sdrangelStatus.value.deviceSets ?? []).reduce((n, ds) => n + ds.channels.length, 0),
+  // ds.channels is null for a device set SDRangel created but has no channels on
+  // (Go marshals a nil slice to JSON null) — guard it or the whole tab blanks.
+  (sdrangelStatus.value.deviceSets ?? []).reduce((n, ds) => n + (ds.channels?.length ?? 0), 0),
 )
 // SDRangel's device-set listing doesn't carry a channel's frequency or UDP port, so
 // join each provisioned channel back to the local bridge config (by device-set +
@@ -45,7 +47,7 @@ const provisionedDeviceSets = computed(() => {
   return (sdrangelStatus.value.deviceSets ?? []).map(ds => ({
     index: ds.index,
     hwType: ds.hwType,
-    channels: ds.channels.map(ch => {
+    channels: (ds.channels ?? []).map(ch => {
       const m = chans.find(c => c.deviceSetIndex === ds.index && c.channelIndex === ch.index)
         ?? chans.find(c => !!c.label && c.label === ch.title)
       return {
