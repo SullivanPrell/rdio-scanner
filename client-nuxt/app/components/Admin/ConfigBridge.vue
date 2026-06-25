@@ -98,6 +98,31 @@ const trDongleIndices = computed(() =>
     .map(a => a.index)
     .sort((a, b) => a - b))
 
+// Dongles assigned to SDRangel, in assignment order. This order DEFINES the device
+// sets: device-set index i is bound to the i-th SDRangel dongle (its serial pins the
+// physical dongle, its scanEnabled makes that set a Frequency Scanner). A channel's
+// deviceSetIndex therefore selects which assigned dongle handles it.
+const sdrangelAssignments = computed(() =>
+  bridge.value.sdrDeviceAssignments.filter(a => a.assignTo === 'sdrangel'))
+
+// Device-set indices whose dongle has Scanning enabled — the only sets a Scan
+// channel may be provisioned on.
+const scannerSetIndices = computed(() =>
+  sdrangelAssignments.value.map((a, i) => ({ a, i })).filter(x => x.a.scanEnabled).map(x => x.i))
+
+// Options for the per-channel "Dev Set" picker: one entry per SDRangel-assigned
+// dongle (so the choice maps to a real physical dongle), plus Unassigned. Without
+// this the Dev Set was a free-form integer with no connection to which dongle ran
+// it — the reason assignment "didn't seem to work".
+const deviceSetOptions = computed(() => {
+  const opts = sdrangelAssignments.value.map((a, i) => ({
+    label: `Set ${i} · ${a.serialNumber || 'dongle'}${a.scanEnabled ? ' · scanner' : ''}`,
+    value: i,
+  }))
+  opts.push({ label: 'Unassigned', value: -1 })
+  return opts
+})
+
 // ── Polling ───────────────────────────────────────────────────────────────────
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let provisionPollTimer: ReturnType<typeof setTimeout> | null = null
@@ -171,6 +196,19 @@ const SDR_SAMPLE_RATE = 2400000 // ~2.4 MHz usable window per RTL-SDR dongle
 async function provision() {
   provisioning.value = true
 
+  // A Scan channel can only be provisioned behind a Frequency Scanner on a dongle
+  // marked Scanning — so if any channel is flagged Scan but no dongle has Scanning
+  // enabled, block here with a clear message rather than silently provisioning those
+  // channels as un-scanned fixed UDPSinks. (When a scanner dongle DOES exist, the
+  // server additionally re-routes any stray scan channel onto it.)
+  const scanChannels = bridge.value.channels.filter(c => c.scan && c.deviceSetIndex >= 0)
+  if (scanChannels.length && !scannerSetIndices.value.length) {
+    provisioning.value = false
+    provisionMessages.value = [`provision: aborted — ${scanChannels.length} channel(s) are flagged Scan but no dongle has Scanning enabled. Enable Scanning on an SDRangel dongle (SDR Devices tab), then provision.`]
+    toast.add({ title: 'No scanner dongle', description: 'Enable Scanning on an SDRangel dongle before provisioning scan channels.', color: 'error' })
+    return
+  }
+
   // Provisioning reads the SAVED bridge config server-side (the request body's
   // channels are advisory), and scan mode is gated on each channel's saved Scan flag.
   // Persist the current edit buffer first so freshly-ticked Scan boxes actually take
@@ -195,9 +233,11 @@ async function provision() {
 
   // Pin each device set to a specific dongle assigned to SDRangel (by serial), so
   // SDRangel uses only its dongles and leaves the trunk-recorder ones alone. Device
-  // set index i maps to the i-th SDRangel-assigned dongle (serial + scanner flag).
-  const sdrangelAssignments = bridge.value.sdrDeviceAssignments.filter(a => a.assignTo === 'sdrangel')
-  const sdrangelSerials = sdrangelAssignments.map(a => a.serialNumber)
+  // set index i maps to the i-th SDRangel-assigned dongle: its serial pins the exact
+  // physical dongle and its scanEnabled makes the set a Frequency Scanner. This is
+  // the SAME ordering the Dev Set picker and Auto-assign use, so the dongle a channel
+  // is assigned to is the dongle it actually runs on.
+  const assigned = sdrangelAssignments.value
 
   const deviceSets = [...freqsByDevice.entries()].map(([index, freqs]) => {
     const min = Math.min(...freqs)
@@ -217,10 +257,10 @@ async function provision() {
       index,
       hwType: 'RTLSDR',
       sequence: index,
-      serial: sdrangelSerials[index] ?? '',
+      serial: assigned[index]?.serialNumber ?? '',
       centerFrequencyHz: center,
       sampleRateHz: SDR_SAMPLE_RATE,
-      scannerEnabled: sdrangelAssignments[index]?.scanEnabled ?? false,
+      scannerEnabled: assigned[index]?.scanEnabled ?? false,
     }
   })
 
@@ -276,6 +316,35 @@ async function pollProvision() {
   }
   // Pull any stdout from a managed sdrangelsrv (e.g. a crash during provisioning).
   await refreshSDRangelLogs()
+}
+
+// cancelProvision aborts an in-flight provision, or wipes a finished/idle run's
+// output panel — so a mistake (wrong channels marked Scan, wrong dongle) can be
+// undone and a corrected provision started right away. A running job is signalled to
+// stop at its next safe step server-side; the poller then sees it finish.
+const cancelling = ref(false)
+async function cancelProvision() {
+  cancelling.value = true
+  const res = await admin.cancelSDRangelProvision()
+  cancelling.value = false
+  if (!res) return // transport error already toasted
+  if (res.cancelled) {
+    // Still running server-side until it reaches a safe boundary — keep polling so
+    // the panel updates as it winds down, then re-enables Provision on its own.
+    if (res.status.messages.length) provisionMessages.value = res.status.messages
+    toast.add({ title: 'Provision cancelling…', description: 'Stopping at the next safe step.', color: 'warning' })
+    if (!provisioning.value) {
+      provisioning.value = true
+      if (provisionPollTimer) clearTimeout(provisionPollTimer)
+      void pollProvision()
+    }
+  } else {
+    // Nothing was running: the server cleared the status; clear the local panel too.
+    if (provisionPollTimer) clearTimeout(provisionPollTimer)
+    provisioning.value = false
+    provisionMessages.value = []
+    toast.add({ title: 'Provision status cleared', color: 'success' })
+  }
 }
 
 // resumeProvisionIfRunning re-attaches the live poll to a provision still running
@@ -667,67 +736,84 @@ function scanStateLabel(s: number): string {
 // margin for filter rolloff and the centre DC spike.
 const SDR_USABLE_HZ = 2_000_000
 
-// autoAssignDevices clusters channel frequencies into the fewest ~2 MHz windows
-// (one per SDR) so nearby frequencies share a dongle and the available SDRs cover
-// as much spectrum as possible. It fills the Dev Set column; the user then Saves
-// and Provisions. With 4 dongles and clustered IndyCar pit/track freqs this maps
-// everything automatically.
+// clusterToSets greedily packs channels into ≤SDR_USABLE_HZ frequency windows (one
+// dongle covers ~2 MHz) and maps window k to positions[k]. Channels whose window
+// has no available device set are parked (-1). Returns the per-channel mapping plus
+// how many were parked.
+function clusterToSets(chans: BridgeChannel[], positions: number[]) {
+  const map = new Map<BridgeChannel, number>()
+  if (!chans.length) return { map, parked: 0 }
+  const sorted = [...chans].sort((a, b) => a.frequencyHz - b.frequencyHz)
+  const starts: number[] = [sorted[0]!.frequencyHz]
+  for (const ch of sorted) {
+    if (ch.frequencyHz - starts[starts.length - 1]! > SDR_USABLE_HZ) starts.push(ch.frequencyHz)
+  }
+  const windowFor = (hz: number) => {
+    for (let i = starts.length - 1; i >= 0; i--) if (hz >= starts[i]!) return i
+    return 0
+  }
+  let parked = 0
+  for (const ch of chans) {
+    const w = windowFor(ch.frequencyHz)
+    const pos = w < positions.length ? positions[w]! : -1
+    if (pos < 0) parked++
+    map.set(ch, pos)
+  }
+  return { map, parked }
+}
+
+// autoAssignDevices fills the Dev Set column scan-aware: Scan channels are clustered
+// onto the dongles marked Scanning (a scan channel may run ONLY on a scanner dongle),
+// and fixed channels onto the remaining SDRangel dongles (falling back to scanner
+// dongles, which can also host fixed UDPSinks). Channels with no matching dongle are
+// parked (Dev Set −1). The user then Saves and Provisions.
 function autoAssignDevices() {
   const withFreq = bridge.value.channels.filter(c => c.frequencyHz > 0)
   if (!withFreq.length) {
     toast.add({ title: 'Add channels with frequencies first', color: 'warning' })
     return
   }
-  const sorted = [...withFreq].sort((a, b) => a.frequencyHz - b.frequencyHz)
-  // Greedy minimum-windows cover: each window starts at the first freq it can't fit.
-  const windowStarts: number[] = [sorted[0].frequencyHz]
-  for (const ch of sorted) {
-    if (ch.frequencyHz - windowStarts[windowStarts.length - 1] > SDR_USABLE_HZ) {
-      windowStarts.push(ch.frequencyHz)
-    }
-  }
-  const needed = windowStarts.length
-  // Only the dongles assigned to SDRangel are available to the bridge — the rest
-  // are reserved for trunk-recorder. Fall back to all detected dongles when no
-  // assignment has been made yet.
-  const sdrangelCount = bridge.value.sdrDeviceAssignments.filter(a => a.assignTo === 'sdrangel').length
-  const available = sdrangelCount || dongles.value.length || 4
 
-  // Map a frequency to its ~2 MHz window index (the highest window start ≤ freq).
-  const windowForFreq = (hz: number) => {
-    for (let i = windowStarts.length - 1; i >= 0; i--) {
-      if (hz >= windowStarts[i]) return i
-    }
-    return 0
+  const scannerSets = scannerSetIndices.value
+  let plainSets = sdrangelAssignments.value.map((a, i) => ({ a, i })).filter(x => !x.a.scanEnabled).map(x => x.i)
+  // No assignment made yet: treat detected dongles as plain sets so fixed channels
+  // still auto-assign. Scanning genuinely needs a dongle explicitly marked Scanning.
+  if (!sdrangelAssignments.value.length) {
+    plainSets = Array.from({ length: dongles.value.length || 4 }, (_, i) => i)
   }
-  // Only hand out device-set indices for SDRs that physically exist. A channel
-  // whose window falls beyond the available dongles is parked (deviceSetIndex
-  // -1) instead of being pointed at a device set that was never created —
-  // provisioning skips it and it simply isn't received until more SDRs are
-  // added. Reception within each covered window is unaffected: one dongle
-  // handles every channel inside its ~2 MHz window at once.
-  const deviceForFreq = (hz: number) => {
-    const w = windowForFreq(hz)
-    return w < available ? w : -1
-  }
+
+  const scanChans = withFreq.filter(c => c.scan)
+  const fixedChans = withFreq.filter(c => !c.scan)
+  const scanRes = clusterToSets(scanChans, scannerSets)
+  // Fixed channels prefer plain dongles; with none, they may ride a scanner dongle.
+  const fixedRes = clusterToSets(fixedChans, plainSets.length ? plainSets : scannerSets)
+
   bridge.value = {
     ...bridge.value,
-    channels: bridge.value.channels.map(c =>
-      c.frequencyHz > 0 ? { ...c, deviceSetIndex: deviceForFreq(c.frequencyHz) } : c),
+    channels: bridge.value.channels.map(c => {
+      if (c.frequencyHz <= 0) return c
+      const idx = c.scan ? (scanRes.map.get(c) ?? -1) : (fixedRes.map.get(c) ?? -1)
+      return { ...c, deviceSetIndex: idx }
+    }),
   }
 
-  const spanMHz = ((sorted[sorted.length - 1].frequencyHz - sorted[0].frequencyHz) / 1e6).toFixed(2)
-  if (needed > available) {
-    const parked = withFreq.filter(c => windowForFreq(c.frequencyHz) >= available).length
+  const placed = withFreq.length - scanRes.parked - fixedRes.parked
+  if (scanChans.length && !scannerSets.length) {
     toast.add({
-      title: `Needs ${needed} SDRs, only ${available} available`,
-      description: `Frequencies span ${spanMHz} MHz; each SDR covers ~${(SDR_USABLE_HZ / 1e6).toFixed(1)} MHz. Assigned ${available} SDR${available > 1 ? 's' : ''}; ${parked} channel(s) left unassigned (Dev Set −1) — they won't be received until more SDRs are added.`,
+      title: `${scanChans.length} scan channel(s) need a scanner dongle`,
+      description: 'No dongle has Scanning enabled. Mark one on the SDR Devices tab, then Auto-assign again. Other channels were assigned.',
+      color: 'warning',
+    })
+  } else if (scanRes.parked || fixedRes.parked) {
+    toast.add({
+      title: `Assigned ${placed}, parked ${scanRes.parked + fixedRes.parked}`,
+      description: `Parked channels (Dev Set −1) need more SDRangel dongles: ${scanRes.parked} scan / ${fixedRes.parked} fixed. Each dongle covers ~${(SDR_USABLE_HZ / 1e6).toFixed(1)} MHz.`,
       color: 'warning',
     })
   } else {
     toast.add({
-      title: `Assigned ${withFreq.length} channel(s) across ${needed} SDR${needed > 1 ? 's' : ''}`,
-      description: `Span ${spanMHz} MHz. Review the Dev Set column, Save, then Provision.`,
+      title: `Assigned ${placed} channel(s)`,
+      description: 'Scan channels on scanner dongle(s), fixed channels on the rest. Review the Dev Set column, Save, then Provision.',
       color: 'success',
     })
   }
@@ -917,6 +1003,28 @@ const trSystemOptions = computed(() => [
           @click="provision"
         >
           Provision SDRangel
+        </UButton>
+        <!-- Cancel an in-flight run so a mistake can be undone and restarted. -->
+        <UButton
+          v-if="provisioning"
+          icon="i-heroicons-x-mark"
+          color="error"
+          variant="soft"
+          :loading="cancelling"
+          @click="cancelProvision"
+        >
+          Cancel
+        </UButton>
+        <!-- Clear a finished run's output (also wipes the server-side status). -->
+        <UButton
+          v-else-if="provisionMessages.length"
+          icon="i-heroicons-trash"
+          color="neutral"
+          variant="ghost"
+          :loading="cancelling"
+          @click="cancelProvision"
+        >
+          Clear
         </UButton>
         <span class="text-xs text-neutral-500">
           Pushes channel config to the running SDRangel instance
@@ -1213,6 +1321,17 @@ const trSystemOptions = computed(() => [
           >
             Provision SDRangel
           </UButton>
+          <UButton
+            v-if="provisioning"
+            icon="i-heroicons-x-mark"
+            size="xs"
+            color="error"
+            variant="soft"
+            :loading="cancelling"
+            @click="cancelProvision"
+          >
+            Cancel
+          </UButton>
         </div>
       </div>
 
@@ -1258,8 +1377,9 @@ const trSystemOptions = computed(() => [
               </td>
               <td class="px-2 py-1"><UInput v-model.number="ch.udpPort" type="number" size="xs" /></td>
               <td class="px-2 py-1">
-                <UInput v-model.number="ch.deviceSetIndex" type="number" size="xs" />
+                <USelect v-model="ch.deviceSetIndex" :items="deviceSetOptions" size="xs" class="w-40" />
                 <span v-if="ch.deviceSetIndex < 0" class="block text-[10px] text-amber-500 mt-0.5">unassigned</span>
+                <span v-else-if="ch.scan && !scannerSetIndices.includes(ch.deviceSetIndex)" class="block text-[10px] text-amber-500 mt-0.5">not a scanner — will move on provision</span>
               </td>
               <td class="px-2 py-1">
                 <UButton icon="i-heroicons-trash" color="error" variant="ghost" size="xs"

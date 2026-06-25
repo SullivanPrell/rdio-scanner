@@ -17,6 +17,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -237,7 +238,7 @@ func (c *sdrangelClient) postJSON(path string, body interface{}, out interface{}
 // audio ever flows. The PUT echoes the assigned device's hwType on success (or
 // {"message": ...} on failure), so retry until the echoed hwType matches what we
 // asked for, waiting for the set to settle between attempts.
-func (c *sdrangelClient) setDevice(dsIndex int, hwType string, sequence int) error {
+func (c *sdrangelClient) setDevice(ctx context.Context, dsIndex int, hwType string, sequence int) error {
 	body, err := json.Marshal(map[string]interface{}{
 		"hwType":    hwType,
 		"sequence":  sequence,
@@ -248,6 +249,9 @@ func (c *sdrangelClient) setDevice(dsIndex int, hwType string, sequence int) err
 	}
 	last := "no response"
 	for try := 0; try < 5; try++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		req, err := http.NewRequest(http.MethodPut, c.apiURL(fmt.Sprintf("/deviceset/%d/device", dsIndex)), bytes.NewReader(body))
 		if err != nil {
 			return err
@@ -263,8 +267,8 @@ func (c *sdrangelClient) setDevice(dsIndex int, hwType string, sequence int) err
 			json.NewDecoder(resp.Body).Decode(&ack)
 			resp.Body.Close()
 			if ack.HwType == hwType {
-				settle("device assignment", 45*time.Second) // blind-wait the re-plan, don't probe
-				return nil                                  // the set echoed the device back → assignment took
+				settle(ctx, "device assignment", 45*time.Second) // blind-wait the re-plan, don't probe
+				return nil                                       // the set echoed the device back → assignment took
 			}
 			if ack.Message != "" {
 				last = ack.Message
@@ -272,7 +276,7 @@ func (c *sdrangelClient) setDevice(dsIndex int, hwType string, sequence int) err
 				last = fmt.Sprintf("device set still on %q", ack.HwType)
 			}
 		}
-		settle("device set", 20*time.Second) // blind-wait, then retry the assignment
+		settle(ctx, "device set", 20*time.Second) // blind-wait, then retry the assignment
 	}
 	return fmt.Errorf("not assigned after retries: %s", last)
 }
@@ -318,9 +322,15 @@ func (c *sdrangelClient) deleteReq(path string) (int, error) {
 // refused" seen mid-provision). make_planner_thread_safe() doesn't help because
 // the race is general state, not just the FFTW planner. So we deliberately do
 // NOT poll for readiness here; we wait a fixed, generous interval instead.
-func settle(what string, d time.Duration) {
+func settle(ctx context.Context, what string, d time.Duration) {
 	log.Printf("provision: settling %s for %s (no probing)", what, d)
-	time.Sleep(d)
+	// Interruptible: a cancelled provision wakes immediately instead of sleeping out
+	// the full (up to 90s) settle, so the run can stop at the next safe boundary.
+	select {
+	case <-ctx.Done():
+		log.Printf("provision: settle %s interrupted (cancelled)", what)
+	case <-time.After(d):
+	}
 }
 
 // waitReachable polls GET /devicesets until SDRangel answers (decoding the
@@ -332,11 +342,14 @@ func settle(what string, d time.Duration) {
 // returns in milliseconds. So retry (with a generous per-attempt timeout) rather
 // than give up. The shared client stays at a short 5s timeout so the status
 // endpoint the admin UI polls never blocks on a wedged SDRangel.
-func (c *sdrangelClient) waitReachable(out *sdrangelDeviceSetsResponse, maxWait time.Duration) error {
+func (c *sdrangelClient) waitReachable(ctx context.Context, out *sdrangelDeviceSetsResponse, maxWait time.Duration) error {
 	probe := &http.Client{Timeout: 10 * time.Second}
 	deadline := time.Now().Add(maxWait)
 	var lastErr error
 	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		resp, err := probe.Get(c.apiURL("/devicesets"))
 		if err == nil {
 			lastErr = json.NewDecoder(resp.Body).Decode(out)
@@ -350,7 +363,11 @@ func (c *sdrangelClient) waitReachable(out *sdrangelDeviceSetsResponse, maxWait 
 		if !time.Now().Before(deadline) {
 			return lastErr
 		}
-		time.Sleep(1 * time.Second)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(1 * time.Second):
+		}
 	}
 }
 
@@ -465,6 +482,75 @@ func (c *sdrangelClient) scannerStatuses(channels []BridgeChannelConfig) []SDRan
 
 // ── Provision ──────────────────────────────────────────────────────────────
 
+// routeScanChannelsToScanners enforces that every channel flagged Scan is assigned
+// to a scanner-enabled device set, so it actually runs behind a Frequency Scanner
+// instead of being silently provisioned as a fixed UDPSink on a plain dongle. A scan
+// channel already on a scanner-enabled set is left in place; one on a plain set is
+// moved to a scanner-enabled set, spreading across multiple scanner dongles (least-
+// loaded first) and preferring a set whose sampled span already covers the channel's
+// frequency so it keeps producing audio. centerFreq/sampleRate are keyed by device-
+// set index (as built in provision()); pass empty maps to skip the coverage
+// preference. It mutates channels in place and returns one message per reassignment,
+// or per scan channel that can't be placed because no scanner-enabled device set
+// exists. Pure (no I/O), so the routing decision is unit-testable on its own.
+func routeScanChannelsToScanners(dsCfgs []SDRangelDeviceSetConfig, channels []BridgeChannelConfig, centerFreq, sampleRate map[int]uint) []string {
+	scanEnabled := map[int]bool{}
+	scannerDSList := []int{}
+	for _, d := range dsCfgs {
+		if d.ScannerEnabled {
+			scanEnabled[d.Index] = true
+			scannerDSList = append(scannerDSList, d.Index)
+		}
+	}
+
+	covers := func(ds int, freq uint) bool {
+		cf := centerFreq[ds]
+		sr := sampleRate[ds]
+		if cf == 0 || sr == 0 || freq == 0 {
+			return true // unknown center/rate/freq — don't reject on coverage grounds
+		}
+		span := int64(sr) / 2
+		off := int64(freq) - int64(cf)
+		return off <= span && off >= -span
+	}
+	scanLoad := map[int]int{} // scanner device-set index → scan channels routed to it (for spreading)
+	leastLoaded := func(restrictCovering bool, freq uint) int {
+		target := -1
+		for _, ds := range scannerDSList {
+			if restrictCovering && !covers(ds, freq) {
+				continue
+			}
+			if target < 0 || scanLoad[ds] < scanLoad[target] {
+				target = ds
+			}
+		}
+		return target
+	}
+
+	var msgs []string
+	for i := range channels {
+		if !channels[i].Scan {
+			continue
+		}
+		if scanEnabled[channels[i].DeviceSetIndex] {
+			scanLoad[channels[i].DeviceSetIndex]++ // already on a scanner dongle — count it for spreading
+			continue
+		}
+		if len(scannerDSList) == 0 {
+			msgs = append(msgs, fmt.Sprintf("warning: channel %q is flagged Scan but no scanner-enabled SDR is configured — it will NOT be scanned. Enable Scanning on a dongle in the SDR Devices tab, then re-provision.", channels[i].Label))
+			continue
+		}
+		target := leastLoaded(true, channels[i].FrequencyHz) // prefer a scanner whose span covers it
+		if target < 0 {
+			target = leastLoaded(false, channels[i].FrequencyHz) // none covers — least-loaded scanner anyway
+		}
+		msgs = append(msgs, fmt.Sprintf("channel %q: reassigned from device set %d to scanner-enabled device set %d (scan channels must run on a scanner SDR)", channels[i].Label, channels[i].DeviceSetIndex, target))
+		channels[i].DeviceSetIndex = target
+		scanLoad[target]++
+	}
+	return msgs
+}
+
 // provision configures SDRangel device sets and channels to match the bridge
 // config. For each bridge channel it creates a single UDPSink channel: SDRangel's
 // "UDP Sink" RX channel demodulates the signal (NFM/AM/SSB per the channel's
@@ -477,7 +563,7 @@ func (c *sdrangelClient) scannerStatuses(channels []BridgeChannelConfig) []SDRan
 // Existing channels on each device set are removed first so re-provisioning is
 // idempotent. It returns the result and a copy of channels with ChannelIndex set
 // to the SDRangel-assigned channel index, which callers must persist.
-func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []BridgeChannelConfig, emit func(string)) (*SDRangelProvisionResult, []BridgeChannelConfig) {
+func (c *sdrangelClient) provision(ctx context.Context, dsCfgs []SDRangelDeviceSetConfig, channels []BridgeChannelConfig, emit func(string)) (*SDRangelProvisionResult, []BridgeChannelConfig) {
 	result := &SDRangelProvisionResult{Messages: []string{}}
 	updated := make([]BridgeChannelConfig, len(channels))
 	copy(updated, channels)
@@ -492,8 +578,24 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 		}
 	}
 
+	// cancelled reports (and announces) that the operator aborted this run. The
+	// caller checks it at every safe boundary — between device-set/channel steps,
+	// never mid-construction — so a cancel stops the run promptly without racing
+	// SDRangel's thread-unsafe build. SDRangel is left partially configured; the
+	// next provision's clearChannels() makes it idempotent again.
+	cancelled := func() bool {
+		if ctx.Err() != nil {
+			add("provision: cancelled by user — stopped before completion (re-provision to finish; the partial state is cleaned up on the next run)")
+			return true
+		}
+		return false
+	}
+
 	var devResp sdrangelDeviceSetsResponse
-	if err := c.waitReachable(&devResp, 30*time.Second); err != nil {
+	if err := c.waitReachable(ctx, &devResp, 30*time.Second); err != nil {
+		if cancelled() {
+			return result, updated
+		}
 		add(fmt.Sprintf("cannot reach SDRangel after retrying for 30s (is it busy or stuck? check the sdrangelsrv logs): %v", err))
 		return result, updated
 	}
@@ -531,6 +633,9 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 
 	// Ensure required device sets exist and are configured
 	for _, dsCfg := range dsCfgs {
+		if cancelled() {
+			return result, updated
+		}
 		for devResp.DevicesetCount <= dsCfg.Index {
 			var created struct {
 				DevicesetIndex int `json:"devicesetIndex"`
@@ -550,7 +655,7 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 			// refused"). Blind-wait a generous fixed interval after EACH creation —
 			// creating several sets back-to-back (a gap in device-set indices) without
 			// settling between them would race that same construction and crash it.
-			settle("device-set construction", 90*time.Second)
+			settle(ctx, "device-set construction", 90*time.Second)
 		}
 
 		// Assign the sampling device and confirm it took (see setDevice). When the
@@ -563,7 +668,7 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 				add(fmt.Sprintf("warning: dongle serial %s not found in SDRangel — using sequence %d", dsCfg.Serial, dsCfg.Sequence))
 			}
 		}
-		if err := c.setDevice(dsCfg.Index, dsCfg.HwType, seq); err != nil {
+		if err := c.setDevice(ctx, dsCfg.Index, dsCfg.HwType, seq); err != nil {
 			add(fmt.Sprintf("failed to assign device %d (%s): %v", dsCfg.Index, dsCfg.HwType, err))
 			continue
 		}
@@ -607,22 +712,35 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 
 		// The device settings/clear spin up FFT work; blind-wait it out before the
 		// next step (no probing — a concurrent request would race and crash it).
-		settle("device settings", 20*time.Second)
+		settle(ctx, "device settings", 20*time.Second)
 	}
 
 	// Decide which device sets run in scanner mode. A device set scans when it is
 	// scanner-enabled AND at least one of its channels is flagged Scan; in that
 	// case its scan channels are collapsed into ONE shared UDPSink driven by ONE
 	// FreqScanner (created in the group pass below) instead of a fixed UDPSink each.
-	// Every other case — non-scanner device sets, and scan-flagged channels whose
-	// device set isn't scanner-enabled — provisions exactly as before.
 	scanEnabledDS := map[int]bool{}
 	for _, d := range dsCfgs {
 		scanEnabledDS[d.Index] = d.ScannerEnabled
 	}
+
+	// Enforce scan routing: a channel flagged Scan MUST be provisioned behind a
+	// FreqScanner on a scanner-enabled device set — never as a fixed UDPSink on a
+	// plain dongle (which silently ignores the Scan flag). The admin UI normally
+	// assigns scan channels to scanner-enabled dongles, but a hand-edited Dev Set,
+	// a stale persisted config, or the startup auto-provision replay could leave a
+	// scan channel pointing at a plain device set. routeScanChannelsToScanners
+	// reassigns any such channel onto a scanner-enabled device set (spread across
+	// them, coverage-preferred); mutating `updated` so the correction is grouped,
+	// provisioned, and persisted.
+	for _, m := range routeScanChannelsToScanners(dsCfgs, updated, centerFreq, sampleRate) {
+		add(m)
+	}
+
 	scanGroupByDS := map[int][]int{} // device-set index → channel indices forming its scan group, in slice order
 	scanDSOrder := []int{}           // device-set indices with a scan group, first-seen order
-	for i, ch := range channels {
+	for i := range updated {
+		ch := updated[i]
 		if ch.Scan && scanEnabledDS[ch.DeviceSetIndex] {
 			if _, seen := scanGroupByDS[ch.DeviceSetIndex]; !seen {
 				scanDSOrder = append(scanDSOrder, ch.DeviceSetIndex)
@@ -639,7 +757,11 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 	// a freshly-cleared device set, so the Nth channel created lands at index N;
 	// track that ourselves, per device set.
 	chIdxByDS := map[int]int{}
-	for i, ch := range channels {
+	for i := range updated {
+		if cancelled() {
+			return result, updated
+		}
+		ch := updated[i]
 		// Scan-group channels are provisioned together (one shared UDPSink + one
 		// FreqScanner) in the group pass after this loop — skip them here.
 		if ch.Scan && scanEnabledDS[ch.DeviceSetIndex] {
@@ -680,7 +802,7 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 		// fired now is overwritten back to defaults when construction completes.
 		// Blind-wait for it to go idle, THEN apply the real settings — verified on
 		// the Pi: the same PATCH applies cleanly to an idle channel.
-		settle("channel creation", 10*time.Second)
+		settle(ctx, "channel creation", 10*time.Second)
 
 		if err := c.patchJSON(fmt.Sprintf("/deviceset/%d/channel/%d/settings", ch.DeviceSetIndex, chIdx), map[string]interface{}{
 			"channelType":     "UDPSink",
@@ -703,7 +825,7 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 		))
 
 		// Let the settings change re-construct before the next channel's POST.
-		settle("channel settings", 8*time.Second)
+		settle(ctx, "channel settings", 8*time.Second)
 	}
 
 	// Scan-group pass: for each scanner-enabled device set with ≥1 scan channel,
@@ -716,8 +838,11 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 	groupFailed := false
 	scannerIdxByDS := map[int]int{} // device set → FreqScanner channel index, for the post-provision verify
 	for _, ds := range scanDSOrder {
+		if cancelled() {
+			return result, updated
+		}
 		members := scanGroupByDS[ds]
-		lead := channels[members[0]]
+		lead := updated[members[0]]
 
 		// Demote first: if any step below fails and we `continue`, these members must
 		// NOT keep a stale ScannerChannelIndex pointing at a scanner that wasn't
@@ -740,7 +865,7 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 		// silence the sink emits between transmissions).
 		threshold := 0
 		for _, mi := range members {
-			sq := channels[mi].SquelchDB
+			sq := updated[mi].SquelchDB
 			if sq == 0 {
 				sq = bridgeDefaultSquelchDB
 			}
@@ -768,7 +893,7 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 		}
 		sinkIdx := chIdxByDS[ds]
 		chIdxByDS[ds]++
-		settle("channel creation", 10*time.Second)
+		settle(ctx, "channel creation", 10*time.Second)
 		if err := c.patchJSON(fmt.Sprintf("/deviceset/%d/channel/%d/settings", ds, sinkIdx), map[string]interface{}{
 			"channelType":     "UDPSink",
 			"direction":       0,
@@ -776,7 +901,7 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 		}); err != nil {
 			add(fmt.Sprintf("warning: failed to configure scanner UDPSink for device set %d: %v", ds, err))
 		}
-		settle("channel settings", 8*time.Second)
+		settle(ctx, "channel settings", 8*time.Second)
 
 		// FreqScanner that drives the shared UDPSink ("R{ds}:{sinkIdx}").
 		if err := c.postJSON(fmt.Sprintf("/deviceset/%d/channel", ds), map[string]interface{}{
@@ -790,10 +915,10 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 		}
 		scannerIdx := chIdxByDS[ds]
 		chIdxByDS[ds]++
-		settle("channel creation", 10*time.Second)
+		settle(ctx, "channel creation", 10*time.Second)
 		groupCfgs := make([]BridgeChannelConfig, len(members))
 		for k, mi := range members {
-			groupCfgs[k] = channels[mi]
+			groupCfgs[k] = updated[mi]
 		}
 		if err := c.patchJSON(fmt.Sprintf("/deviceset/%d/channel/%d/settings", ds, scannerIdx), map[string]interface{}{
 			"channelType":         "FreqScanner",
@@ -802,7 +927,7 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 		}); err != nil {
 			add(fmt.Sprintf("warning: failed to configure FreqScanner for device set %d: %v", ds, err))
 		}
-		settle("channel settings", 8*time.Second)
+		settle(ctx, "channel settings", 8*time.Second)
 
 		// Start the scanner running (it doesn't scan until told to).
 		if err := c.postJSON(fmt.Sprintf("/deviceset/%d/channel/%d/actions", ds, scannerIdx), map[string]interface{}{
@@ -827,6 +952,10 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 		))
 	}
 
+	if cancelled() {
+		return result, updated
+	}
+
 	// Start all configured devices
 	for _, dsCfg := range dsCfgs {
 		if err := c.postJSON(fmt.Sprintf("/deviceset/%d/device/run", dsCfg.Index), nil, nil); err != nil {
@@ -843,8 +972,11 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 	// restarted until provision() returns — and warn loudly so a non-functional
 	// scanner is never silent. Non-scan channels are unaffected.
 	if len(scannerIdxByDS) > 0 {
-		settle("scanner startup", 6*time.Second)
+		settle(ctx, "scanner startup", 6*time.Second)
 		for _, ds := range scanDSOrder {
+			if ctx.Err() != nil {
+				break // cancelled — skip the rest of the verify
+			}
 			scannerIdx, ok := scannerIdxByDS[ds]
 			if !ok {
 				continue // group failed earlier; already reported
@@ -858,7 +990,13 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 			var lastErr error
 			for attempt := 0; attempt < 6; attempt++ {
 				if attempt > 0 {
-					time.Sleep(5 * time.Second)
+					select {
+					case <-ctx.Done():
+					case <-time.After(5 * time.Second):
+					}
+				}
+				if ctx.Err() != nil {
+					break
 				}
 				var rep sdrangelFreqScannerReport
 				if err := c.getJSON(fmt.Sprintf("/deviceset/%d/channel/%d/report", ds, scannerIdx), &rep); err != nil {
@@ -877,6 +1015,13 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 				add(fmt.Sprintf("warning: device set %d: FreqScanner provisioned but NOT scanning (0 frequencies measured) — the installed SDRangel build ignores the per-frequency 'enabled' flag over REST (open bug in v7.26.1 and master). Scanning needs a patched sdrangelsrv; non-scan channels are unaffected.", ds))
 			}
 		}
+	}
+
+	// A cancel that arrived during the scanner-verify loop breaks out of it but still
+	// reaches here — treat it as a non-success so runProvisionJob skips persist +
+	// restart, exactly like the mid-run cancel boundaries above.
+	if cancelled() {
+		return result, updated
 	}
 
 	// A failed scan-group POST leaves SDRangel mid-rebuilt; don't persist a partial
@@ -1083,10 +1228,14 @@ type ProvisionStatus struct {
 
 // provisionJob serializes a single async provision run and exposes a live status
 // snapshot. SDRangel can only be provisioned one run at a time, so at most one job
-// is active; start() returns false if one is already running.
+// is active; start() returns false if one is already running. Each run carries a
+// cancellable context so the operator can abort an in-flight provision (provision()
+// stops at the next safe boundary) and immediately start a corrected one.
 type provisionJob struct {
 	mu     sync.Mutex
 	status ProvisionStatus
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 func (j *provisionJob) start() bool {
@@ -1095,8 +1244,46 @@ func (j *provisionJob) start() bool {
 	if j.status.Running {
 		return false
 	}
+	j.ctx, j.cancel = context.WithCancel(context.Background())
 	j.status = ProvisionStatus{Running: true, Messages: []string{}, StartedAt: time.Now().UnixMilli()}
 	return true
+}
+
+// runContext returns the current run's cancellation context (background when no run
+// has started), so runProvisionJob can pass it to provision().
+func (j *provisionJob) runContext() context.Context {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.ctx == nil {
+		return context.Background()
+	}
+	return j.ctx
+}
+
+// Cancel aborts an in-flight provision, or — when nothing is running — wipes the
+// last run's status so the admin UI clears and a fresh provision can start cleanly.
+// Returns true when a running provision was signalled. Cancelling signals the run's
+// context; provision() observes it at the next safe boundary (between steps, never
+// mid-construction), so SDRangel is never raced, and finishes the job itself.
+func (j *provisionJob) Cancel() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.status.Running {
+		if j.cancel != nil {
+			j.cancel()
+		}
+		// Append directly (not via emit(), which would re-lock mu) so the live UI
+		// shows the abort immediately while the goroutine winds down.
+		j.status.Messages = append(j.status.Messages, "provision: cancellation requested — stopping at the next safe step…")
+		return true
+	}
+	// Nothing running: clear the snapshot so the panel resets to empty.
+	if j.cancel != nil {
+		j.cancel()
+		j.cancel = nil
+	}
+	j.status = ProvisionStatus{}
+	return false
 }
 
 func (j *provisionJob) emit(msg string) {
@@ -1195,7 +1382,7 @@ func (controller *Controller) runProvisionJob(deviceSets []SDRangelDeviceSetConf
 	// timing out and logging a spurious "failed to configure FreqScanner".
 	client.http.Timeout = 180 * time.Second
 
-	result, updatedChannels := client.provision(deviceSets, channels, controller.Provision.emit)
+	result, updatedChannels := client.provision(controller.Provision.runContext(), deviceSets, channels, controller.Provision.emit)
 
 	// Persist BOTH the SDRangel-assigned channel indices AND the device-set configs.
 	// The device sets are what a later restart needs to re-apply this exact
@@ -1235,7 +1422,7 @@ func (controller *Controller) autoProvisionSDRangel() {
 	// SDRangel is idle (default FileInput, nothing constructing), so probing here is
 	// safe — unlike mid-provision, where settle() forbids it.
 	var devResp sdrangelDeviceSetsResponse
-	if err := client.waitReachable(&devResp, 3*time.Minute); err != nil {
+	if err := client.waitReachable(context.Background(), &devResp, 3*time.Minute); err != nil {
 		controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("auto-provision: SDRangel not reachable, skipping: %v", err))
 		return
 	}
@@ -1290,4 +1477,26 @@ func (admin *Admin) SDRangelProvisionStatusHandler(w http.ResponseWriter, r *htt
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(admin.Controller.Provision.snapshot())
+}
+
+// SDRangelProvisionCancelHandler aborts an in-flight provision or, when none is
+// running, wipes the last run's status so the admin UI clears. Either way the
+// operator can immediately start a corrected provision: a running job is signalled
+// to stop at its next safe boundary (provision() finishes it), and a finished/idle
+// job's snapshot is reset. Returns the post-cancel snapshot.
+func (admin *Admin) SDRangelProvisionCancelHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !admin.ValidateToken(admin.GetAuthorization(r)) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	cancelledRunning := admin.Controller.Provision.Cancel()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"cancelled": cancelledRunning,
+		"status":    admin.Controller.Provision.snapshot(),
+	})
 }

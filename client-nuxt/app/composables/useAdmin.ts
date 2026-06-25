@@ -574,6 +574,21 @@ export const useAdmin = () => {
     }
   }
 
+  // Cancel an in-flight provision, or wipe a finished/idle job's status so the panel
+  // clears and a corrected provision can start. Returns the post-cancel status (or
+  // null on transport error). `cancelled` is true when a running job was aborted.
+  const cancelSDRangelProvision = async (): Promise<{ cancelled: boolean; status: SDRangelProvisionStatus } | null> => {
+    try {
+      return await $fetch<{ cancelled: boolean; status: SDRangelProvisionStatus }>('/api/admin/sdrangel/provision/cancel', {
+        method: 'POST',
+        headers: authHeader(),
+      })
+    } catch (err) {
+      handleError(err, 'SDRangel provision cancel')
+      return null
+    }
+  }
+
   // ── Trunk-Recorder service ─────────────────────────────────────────────────
 
   const getTRServiceStatus = async (): Promise<TrunkRecorderServiceStatus> => {
@@ -710,6 +725,7 @@ export const useAdmin = () => {
     getSDRangelServiceLogs,
     provisionSDRangel,
     getSDRangelProvisionStatus,
+    cancelSDRangelProvision,
     getTRServiceStatus,
     trServiceAction,
     getTRServiceLogs,
