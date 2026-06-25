@@ -548,6 +548,21 @@ func (b *Bridge) runMonitor(ctx context.Context, udpPort, sampleRate int, logLab
 			lastStat = time.Now()
 		)
 		for {
+			// Honor cancellation unconditionally, before every read. The read-error
+			// branch below ALSO checks ctx, but only fires on a read timeout — and a
+			// continuously-streaming port never times out: SDRangel's UDPSink emits
+			// packets every ~32ms (zero-PCM even while squelched), so ReadFromUDP keeps
+			// returning data with err==nil and the error branch is never reached. Without
+			// this top-of-loop check, the reader spins on a live stream forever after
+			// Stop() cancels ctx, and Stop()'s wg.Wait() (which joins this reader) hangs
+			// indefinitely — wedging any bridge restart/provision that happens while a
+			// monitored port is actively streaming.
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
 			conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
 			n, _, err := conn.ReadFromUDP(udpBuf)
 			if n > 0 {

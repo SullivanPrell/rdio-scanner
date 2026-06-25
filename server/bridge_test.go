@@ -262,3 +262,66 @@ func TestBridgeRestartRebindsPort(t *testing.T) {
 		c.Close()
 	}
 }
+
+// TestBridgeStopTerminatesWithLiveStream guards the streaming-reader cancellation
+// bug: a port receiving a continuous UDP stream never makes ReadFromUDP time out,
+// so the reader's only ctx check (in the read-error branch) was never reached and
+// Stop()'s wg.Wait() — which joins that reader — hung forever. This wedged any
+// bridge restart/provision that ran while a monitored port was actively streaming
+// (e.g. SDRangel's UDPSink, which emits packets every ~32ms even while squelched).
+// Stop() must return promptly even with packets actively arriving.
+func TestBridgeStopTerminatesWithLiveStream(t *testing.T) {
+	port := freeUDPPort(t)
+
+	ctrl := &Controller{
+		Options: &Options{
+			BridgeEnabled:  true,
+			BridgeChannels: []BridgeChannelConfig{{Label: "stream", UdpPort: port, SampleRate: 8000}},
+		},
+		Logs:   &Logs{},
+		Ingest: make(chan *Call, 8),
+	}
+	b := NewBridge(ctrl)
+	b.Start()
+	time.Sleep(100 * time.Millisecond) // let monitorChannel bind
+
+	// Flood the bridge's port faster than the 200ms read deadline so ReadFromUDP
+	// always returns data with err==nil — the exact condition that wedged the reader.
+	dst, err := net.ResolveUDPAddr("udp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender, err := net.DialUDP("udp", nil, dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sender.Close()
+
+	stop := make(chan struct{})
+	go func() {
+		pkt := silentChunk(160) // 20ms @ 8kHz; content irrelevant, only the steady flow matters
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_, _ = sender.Write(pkt)
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+	}()
+	defer close(stop)
+	time.Sleep(150 * time.Millisecond) // ensure the stream is live before tearing down
+
+	// Stop() must return promptly; without the fix it blocks in wg.Wait() forever.
+	done := make(chan struct{})
+	go func() {
+		b.Stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Stop() did not return within 3s while the port was streaming — reader ignored ctx cancellation")
+	}
+}
