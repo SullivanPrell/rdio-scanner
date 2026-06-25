@@ -714,6 +714,7 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 	// from the scanner's report (see bridge.go). The group's FIRST channel (slice
 	// order) owns the shared UDP sink port, matching how the bridge binds it.
 	groupFailed := false
+	scannerIdxByDS := map[int]int{} // device set → FreqScanner channel index, for the post-provision verify
 	for _, ds := range scanDSOrder {
 		members := scanGroupByDS[ds]
 		lead := channels[members[0]]
@@ -818,6 +819,7 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 			updated[mi].ChannelIndex = sinkIdx
 			updated[mi].ScannerChannelIndex = scannerIdx
 		}
+		scannerIdxByDS[ds] = scannerIdx
 
 		add(fmt.Sprintf(
 			"device set %d: FreqScanner idx=%d over %d freq(s) → UDPSink idx=%d on UDP %d (threshold %d dB)",
@@ -831,6 +833,32 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 			add(fmt.Sprintf("warning: failed to start device %d: %v", dsCfg.Index, err))
 		} else {
 			add(fmt.Sprintf("device set %d started", dsCfg.Index))
+		}
+	}
+
+	// Verify each scanner actually started scanning. A stock SDRangel webapi never
+	// applies the per-frequency `enabled` flag (see freqScannerSettings), so the
+	// scanner provisions but sits idle with nothing to scan. Probe the report once —
+	// safe now: construction is done, the device is running, and the bridge isn't
+	// restarted until provision() returns — and warn loudly so a non-functional
+	// scanner is never silent. Non-scan channels are unaffected.
+	if len(scannerIdxByDS) > 0 {
+		settle("scanner startup", 6*time.Second)
+		for _, ds := range scanDSOrder {
+			scannerIdx, ok := scannerIdxByDS[ds]
+			if !ok {
+				continue // group failed earlier; already reported
+			}
+			var rep sdrangelFreqScannerReport
+			if err := c.getJSON(fmt.Sprintf("/deviceset/%d/channel/%d/report", ds, scannerIdx), &rep); err != nil {
+				add(fmt.Sprintf("warning: device set %d: could not verify scanner state: %v", ds, err))
+				continue
+			}
+			if len(rep.Report.ChannelState) == 0 {
+				add(fmt.Sprintf("warning: device set %d: FreqScanner provisioned but NOT scanning (0 frequencies measured) — the installed SDRangel build ignores the per-frequency 'enabled' flag over REST (open bug in v7.26.1 and master). Scanning needs a patched sdrangelsrv; non-scan channels are unaffected.", ds))
+			} else {
+				add(fmt.Sprintf("device set %d: scanner active — measuring %d frequency(ies)", ds, len(rep.Report.ChannelState)))
+			}
 		}
 	}
 
@@ -912,11 +940,28 @@ func udpSinkSettings(ch BridgeChannelConfig, freqOffset int64) map[string]interf
 
 // freqScannerSettings builds the FreqScannerSettings payload for a device set's
 // scan group. The scanner FFT-scans each listed frequency and, when one crosses
-// the threshold, retunes the paired UDPSink (channelRef "R{ds}:{idx}") to it — it
-// produces no audio itself. Only the fields we need are sent; SDRangel keeps its
-// defaults (continuous mode, max-power priority, peak measurement) for the rest.
+// the threshold, retunes the paired UDPSink to it — it produces no audio itself.
 // channelBandwidth is the per-frequency detection width, matched to the demod the
 // way udpSinkSettings sets rfBandwidth.
+//
+// Three SDRangel FreqScanner webapi quirks are worked around here (verified against
+// the source for v7.26.1 AND master — these are open SDRangel bugs):
+//
+//  1. The top-level `channel` (paired demod, "R{ds}:{idx}") is NOT applied over REST
+//     (webapiUpdateChannelSettings has no handler for it — GUI/preset only). The
+//     PER-FREQUENCY `channel` IS applied and takes precedence at scan time, so we set
+//     the pairing on every frequency entry instead. (We still send the top-level
+//     `channel` for forward-compatibility if SDRangel ever wires it up.)
+//  2. The frequency list is read under key `frequencies` but applySettings copies it
+//     under key `frequencySettings` — a name mismatch that drops the list. We also
+//     send the list under `frequencySettings` so the key reaches applySettings (the
+//     parser only reads `frequencies`, so the data still comes from there; this just
+//     trips the apply, and is harmless on a fixed SDRangel).
+//  3. The per-frequency `enabled` flag is NOT read by the webapi at all, so on a
+//     STOCK SDRangel every scanned frequency stays disabled and the scanner never
+//     starts (it has no enabled frequencies to scan). We set enabled:1 anyway (a
+//     no-op today, correct once SDRangel reads it). provision() verifies the scanner
+//     actually started and warns loudly when it didn't, so this never fails silently.
 func freqScannerSettings(group []BridgeChannelConfig, thresholdDB int, channelRef string) map[string]interface{} {
 	chanBW := 12500
 	if len(group) > 0 {
@@ -933,14 +978,16 @@ func freqScannerSettings(group []BridgeChannelConfig, thresholdDB int, channelRe
 			"frequency": ch.FrequencyHz, // absolute Hz
 			"enabled":   1,
 			"notes":     ch.Label,
+			"channel":   channelRef, // per-frequency pairing (top-level `channel` is GUI/preset-only over REST)
 		})
 	}
 	return map[string]interface{}{
-		"channel":          channelRef,
-		"frequencies":      freqs,
-		"threshold":        float64(thresholdDB),
-		"channelBandwidth": chanBW,
-		"title":            "Scanner",
+		"channel":           channelRef, // forward-compat; ignored by current SDRangel webapi
+		"frequencies":       freqs,
+		"frequencySettings": freqs, // workaround: makes the list reach applySettings (see doc above)
+		"threshold":         float64(thresholdDB),
+		"channelBandwidth":  chanBW,
+		"title":             "Scanner",
 	}
 }
 
