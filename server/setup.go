@@ -849,15 +849,32 @@ func (c *sdrangelClient) provision(dsCfgs []SDRangelDeviceSetConfig, channels []
 			if !ok {
 				continue // group failed earlier; already reported
 			}
-			var rep sdrangelFreqScannerReport
-			if err := c.getJSON(fmt.Sprintf("/deviceset/%d/channel/%d/report", ds, scannerIdx), &rep); err != nil {
-				add(fmt.Sprintf("warning: device set %d: could not verify scanner state: %v", ds, err))
-				continue
+			// Poll the report a few times instead of once. The first scan-FFT plan
+			// build can take tens of seconds on a Pi, and a wide span needs several
+			// device retunes before the first full sweep fills channelState — a single
+			// 6s probe routinely reports a false "not scanning" on a scanner that is in
+			// fact seconds from sweeping. Stop as soon as it reports measured channels.
+			measured := 0
+			var lastErr error
+			for attempt := 0; attempt < 6; attempt++ {
+				if attempt > 0 {
+					time.Sleep(5 * time.Second)
+				}
+				var rep sdrangelFreqScannerReport
+				if err := c.getJSON(fmt.Sprintf("/deviceset/%d/channel/%d/report", ds, scannerIdx), &rep); err != nil {
+					lastErr = err
+				} else if n := len(rep.Report.ChannelState); n > 0 {
+					measured = n
+					break
+				}
 			}
-			if len(rep.Report.ChannelState) == 0 {
+			switch {
+			case measured > 0:
+				add(fmt.Sprintf("device set %d: scanner active — measuring %d frequency(ies)", ds, measured))
+			case lastErr != nil:
+				add(fmt.Sprintf("warning: device set %d: could not verify scanner state: %v", ds, lastErr))
+			default:
 				add(fmt.Sprintf("warning: device set %d: FreqScanner provisioned but NOT scanning (0 frequencies measured) — the installed SDRangel build ignores the per-frequency 'enabled' flag over REST (open bug in v7.26.1 and master). Scanning needs a patched sdrangelsrv; non-scan channels are unaffected.", ds))
-			} else {
-				add(fmt.Sprintf("device set %d: scanner active — measuring %d frequency(ies)", ds, len(rep.Report.ChannelState)))
 			}
 		}
 	}
@@ -1172,8 +1189,11 @@ func (controller *Controller) runProvisionJob(deviceSets []SDRangelDeviceSetConf
 	// Each device/channel REST call blocks on FFTW plan-building on the Pi well past
 	// the 5s default, so give the provision client a generous per-call timeout; the
 	// status endpoint's client stays at 5s so UI polling never blocks on a wedged
-	// SDRangel.
-	client.http.Timeout = 60 * time.Second
+	// SDRangel. The FreqScanner settings PATCH is the slowest call — it builds the
+	// scan FFT plan (FFTW_PATIENT) for the whole scan window and routinely needs
+	// >60s on a Pi 5 — so the budget is large enough to let it finish instead of
+	// timing out and logging a spurious "failed to configure FreqScanner".
+	client.http.Timeout = 180 * time.Second
 
 	result, updatedChannels := client.provision(deviceSets, channels, controller.Provision.emit)
 
