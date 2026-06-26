@@ -589,6 +589,153 @@ func routeScanChannelsToScanners(dsCfgs []SDRangelDeviceSetConfig, channels []Br
 	return msgs
 }
 
+// reconcileDeviceSets derives the authoritative SDRangel device-set list from the
+// LIVE dongle assignments (the SDR Devices tab — the single source of truth for which
+// physical dongle each app owns) and the bridge channels, rather than trusting a
+// previously-persisted snapshot. Options.BridgeDeviceSets is only rewritten on a
+// SUCCESSFUL provision, so after the operator reassigns a dongle (moves it to
+// trunk-recorder, or flips which one scans) the snapshot can still pin a device set —
+// by serial — to a dongle that no longer belongs to SDRangel, or is no longer the
+// scanner. Auto-provision replaying that snapshot would then drive a trunk-recorder
+// dongle (the exact symptom that prompted this), or scan on a non-scanner. Rebuilding
+// from assignments makes every provision self-heal: a device set can only ever be a
+// dongle currently assigned to SDRangel.
+//
+// Device-set index i is the i-th SDRangel-assigned dongle (matching the admin UI's
+// positional Dev Set picker): its serial pins the physical dongle, its ScanEnabled
+// makes it a Frequency Scanner. Channels are re-homed onto valid sets — scan channels
+// onto a scanner-enabled set (via routeScanChannelsToScanners; a scanner sweeps across
+// bands so any will do), and any channel still pointing past the available sets is
+// parked (DeviceSetIndex −1) so a stale index can't silently grab the wrong dongle.
+// Each emitted set is centred on the midpoint of the channels that land on it (nudged
+// off any channel sitting exactly on the centre to dodge the RTL DC spike), matching
+// the admin client's centring so a manual re-provision is a no-op confirmation.
+//
+// Mutates channels' DeviceSetIndex in place; returns the device sets (only those with
+// at least one channel) and a human-readable log of every change. Pure (no I/O), so
+// it is unit-testable on its own.
+func reconcileDeviceSets(assignments []SDRDeviceAssignment, channels []BridgeChannelConfig) ([]SDRangelDeviceSetConfig, []string) {
+	var msgs []string
+
+	// SDRangel-assigned dongles, in assignment order — this order DEFINES the device
+	// set indices the channels' DeviceSetIndex refers to.
+	type sdrDongle struct {
+		serial string
+		scan   bool
+	}
+	var sdrDongles []sdrDongle
+	for _, a := range assignments {
+		if a.AssignTo == "sdrangel" {
+			sdrDongles = append(sdrDongles, sdrDongle{serial: a.SerialNumber, scan: a.ScanEnabled})
+		}
+	}
+	n := len(sdrDongles)
+
+	// park marks a channel as having no device set. It clears not just DeviceSetIndex
+	// but also the scanner/channel bookkeeping: a parked channel that kept a stale
+	// ScannerChannelIndex>0 would make the bridge and the status poller treat it as a
+	// live scan member on device set -1 and hammer /deviceset/-1/channel/N/report (404
+	// spam + a pointless UDP bind). Clearing them is the read-side mirror of the guard
+	// that stops provision() POSTing a parked channel to /deviceset/-1.
+	park := func(i int) {
+		channels[i].DeviceSetIndex = -1
+		channels[i].ScannerChannelIndex = 0
+		channels[i].ChannelIndex = 0
+	}
+
+	if n == 0 {
+		// Nothing is assigned to SDRangel — there are no valid device sets. Park every
+		// channel so none can land on a dongle SDRangel doesn't own.
+		for i := range channels {
+			if channels[i].DeviceSetIndex >= 0 {
+				park(i)
+			}
+		}
+		msgs = append(msgs, "no dongle is assigned to SDRangel — nothing to provision (assign one on the SDR Devices tab)")
+		return nil, msgs
+	}
+
+	// Preliminary set configs (index + scanner flag only) so scan routing knows which
+	// indices are scanners. Centres are computed after the channels settle.
+	prelim := make([]SDRangelDeviceSetConfig, n)
+	for i, d := range sdrDongles {
+		prelim[i] = SDRangelDeviceSetConfig{Index: i, ScannerEnabled: d.scan}
+	}
+
+	// Move scan channels onto scanner-enabled sets. This also catches a scan channel
+	// whose index is out of range (its scanEnabled lookup is false, so it gets routed).
+	msgs = append(msgs, routeScanChannelsToScanners(prelim, channels, map[int]uint{}, map[int]uint{})...)
+
+	// Park anything still pointing past the available sets: a fixed channel on a
+	// removed dongle, or a scan channel that couldn't be placed (no scanner exists).
+	for i := range channels {
+		if channels[i].DeviceSetIndex >= n {
+			msgs = append(msgs, fmt.Sprintf("channel %q: device set %d no longer exists (only %d SDRangel dongle(s) assigned) — parked; re-assign it on the Bridge Channels tab", channels[i].Label, channels[i].DeviceSetIndex, n))
+			park(i)
+		}
+	}
+
+	// Group the surviving channels by device set to centre each dongle on the midpoint
+	// of its frequencies (one ~2.4 MHz window covers them; a scanner retunes anyway).
+	freqsByDS := map[int][]uint{}
+	for i := range channels {
+		ds := channels[i].DeviceSetIndex
+		if ds < 0 || ds >= n || channels[i].FrequencyHz == 0 {
+			continue
+		}
+		freqsByDS[ds] = append(freqsByDS[ds], channels[i].FrequencyHz)
+	}
+
+	var sets []SDRangelDeviceSetConfig
+	for i := 0; i < n; i++ {
+		freqs := freqsByDS[i]
+		if len(freqs) == 0 {
+			continue // no channels on this dongle — don't provision an idle device set
+		}
+		lo, hi := freqs[0], freqs[0]
+		for _, f := range freqs {
+			if f < lo {
+				lo = f
+			}
+			if f > hi {
+				hi = f
+			}
+		}
+		center := (lo + hi + 1) / 2 // round-half-up to match the admin client's Math.round
+		for _, f := range freqs {
+			if f == center {
+				center += 100000 // dodge the RTL DC spike at the tuned centre frequency
+				break
+			}
+		}
+		sets = append(sets, SDRangelDeviceSetConfig{
+			Index:             i,
+			HwType:            "RTLSDR",
+			Sequence:          i,
+			Serial:            sdrDongles[i].serial,
+			CenterFrequencyHz: center,
+			SampleRateHz:      2400000,
+			ScannerEnabled:    sdrDongles[i].scan,
+		})
+	}
+
+	// Park any channel whose target set was NOT emitted — e.g. every channel on it had
+	// FrequencyHz==0, so the set was dropped above but the channel still points at it.
+	// Without this it would reach provision() with an index for a device set that was
+	// never created, producing a bad POST to /deviceset/{i}/channel.
+	emitted := map[int]bool{}
+	for _, s := range sets {
+		emitted[s.Index] = true
+	}
+	for i := range channels {
+		if channels[i].DeviceSetIndex >= 0 && !emitted[channels[i].DeviceSetIndex] {
+			msgs = append(msgs, fmt.Sprintf("channel %q: parked — its device set has no usable frequency to tune (set a frequency, then re-assign)", channels[i].Label))
+			park(i)
+		}
+	}
+	return sets, msgs
+}
+
 // provision configures SDRangel device sets and channels to match the bridge
 // config. For each bridge channel it creates a single UDPSink channel: SDRangel's
 // "UDP Sink" RX channel demodulates the signal (NFM/AM/SSB per the channel's
@@ -693,7 +840,15 @@ func (c *sdrangelClient) provision(ctx context.Context, dsCfgs []SDRangelDeviceS
 			if s, ok := serialSeq[dsCfg.Serial]; ok {
 				seq = s
 			} else {
-				add(fmt.Sprintf("warning: dongle serial %s not found in SDRangel — falling back to positional sequence %d, which can grab the wrong dongle (or one trunk-recorder is using). Re-detect dongles or fix the serial.", dsCfg.Serial, dsCfg.Sequence))
+				// The pinned dongle isn't enumerated by SDRangel (unplugged, wrong serial,
+				// or in use by trunk-recorder). Do NOT fall back to a positional sequence:
+				// that ordinal can land on ANY physical dongle in SDRangel's enumeration —
+				// including a trunk-recorder one — which is the exact "scanning on the wrong
+				// dongle" failure this whole change exists to prevent. Skip the set instead;
+				// its channels stay unprovisioned (no audio) until the serial is fixed, and
+				// the next provision/auto-provision retries. Far safer than a wrong guess.
+				add(fmt.Sprintf("error: dongle serial %s is not present in SDRangel — skipping device set %d (its channels won't be provisioned). The dongle is unplugged, has a different serial, or trunk-recorder is holding it. Re-detect dongles or fix the serial, then re-provision.", dsCfg.Serial, dsCfg.Index))
+				continue
 			}
 		} else {
 			// No serial to pin to: the device set takes whatever physical dongle sits at
@@ -798,6 +953,12 @@ func (c *sdrangelClient) provision(ctx context.Context, dsCfgs []SDRangelDeviceS
 		// Scan-group channels are provisioned together (one shared UDPSink + one
 		// FreqScanner) in the group pass after this loop — skip them here.
 		if ch.Scan && scanEnabledDS[ch.DeviceSetIndex] {
+			continue
+		}
+		// Parked/unassigned channel: no device set hosts it (its dongle was removed or
+		// it never got one). Skip — POSTing to /deviceset/-1/channel would just error.
+		// It stays in `updated` with DeviceSetIndex −1 so the UI still shows it parked.
+		if ch.DeviceSetIndex < 0 {
 			continue
 		}
 
@@ -1413,6 +1574,34 @@ func (controller *Controller) runProvisionJob(deviceSets []SDRangelDeviceSetConf
 	}()
 
 	opts := controller.Options
+
+	// Rebuild the device sets from the LIVE dongle assignments rather than trusting the
+	// caller's list — a stale persisted snapshot (auto-provision) or a possibly
+	// out-of-date client payload (manual). This guarantees a device set is only ever
+	// pinned to a dongle currently assigned to SDRangel (never one reassigned to
+	// trunk-recorder) and that scan channels run on a scanner. The channels are also
+	// re-homed/parked to match, so what we provision and persist is internally
+	// consistent. Skip only for a legacy config with no assignments recorded, where the
+	// caller's list is all we have. See reconcileDeviceSets.
+	if len(opts.SDRDeviceAssignments) > 0 {
+		ch := make([]BridgeChannelConfig, len(channels))
+		copy(ch, channels)
+		rebuilt, msgs := reconcileDeviceSets(opts.SDRDeviceAssignments, ch)
+		for _, m := range msgs {
+			controller.Provision.emit(m)
+		}
+		// No SDRangel dongle is assigned (or none has any channels): there is nothing to
+		// provision. Bail BEFORE the persist/restart below — otherwise an empty run would
+		// report success and overwrite the saved BridgeDeviceSets with nothing, wiping the
+		// provisioning snapshot that startup auto-provision needs to replay.
+		if len(rebuilt) == 0 {
+			controller.Provision.emit("provision: nothing to do — no SDRangel dongle is assigned for these channels (assign one on the SDR Devices tab). Saved provisioning left unchanged.")
+			controller.Provision.finish(false)
+			return
+		}
+		deviceSets, channels = rebuilt, ch
+	}
+
 	client := newSDRangelClient(opts.BridgeHost, opts.BridgePort)
 	// Each device/channel REST call blocks on FFTW plan-building on the Pi well past
 	// the 5s default, so give the provision client a generous per-call timeout; the
@@ -1462,6 +1651,47 @@ func (controller *Controller) autoProvisionSDRangel() {
 		return // never provisioned through the admin UI yet — nothing to replay
 	}
 
+	// Rebuild the device sets from the CURRENT dongle assignments instead of replaying
+	// the persisted snapshot verbatim. The snapshot is a point-in-time copy from the
+	// last successful provision; if the operator has since reassigned a dongle (e.g.
+	// moved it to trunk-recorder, or changed which one scans) it can pin a set, by
+	// serial, to a dongle SDRangel no longer owns — replaying it would drive a
+	// trunk-recorder dongle. reconcileDeviceSets re-derives the mapping from the live
+	// assignments and re-homes the channels to match. Legacy configs with no
+	// assignments recorded fall back to the snapshot (it's all we have).
+	channels := make([]BridgeChannelConfig, len(opts.BridgeChannels))
+	copy(channels, opts.BridgeChannels)
+	deviceSets := opts.BridgeDeviceSets
+	if len(opts.SDRDeviceAssignments) > 0 {
+		var msgs []string
+		deviceSets, msgs = reconcileDeviceSets(opts.SDRDeviceAssignments, channels)
+		for _, m := range msgs {
+			controller.Logs.LogEvent(LogLevelInfo, "auto-provision: "+m)
+		}
+		if len(deviceSets) == 0 {
+			controller.Logs.LogEvent(LogLevelWarn, "auto-provision: no SDRangel dongle is assigned for the saved bridge channels — skipping (assign one on the SDR Devices tab)")
+			return
+		}
+		// Heal the persisted snapshot so the corrected mapping survives even if we skip
+		// re-provisioning below — otherwise the stale set keeps mis-pinning every start.
+		// Compare BOTH device sets and channels: reconcile can re-home/park a channel
+		// without changing the set list (e.g. a scan channel moved between scanner sets),
+		// and that correction must persist too or the admin UI shows a stale Dev Set.
+		prevSets, _ := json.Marshal(opts.BridgeDeviceSets)
+		nextSets, _ := json.Marshal(deviceSets)
+		prevChans, _ := json.Marshal(opts.BridgeChannels)
+		nextChans, _ := json.Marshal(channels)
+		if string(prevSets) != string(nextSets) || string(prevChans) != string(nextChans) {
+			controller.Options.BridgeDeviceSets = deviceSets
+			controller.Options.BridgeChannels = channels
+			if err := controller.Options.Write(controller.Database); err != nil {
+				controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("auto-provision: failed to persist reconciled device sets: %v", err))
+			} else {
+				controller.Logs.LogEvent(LogLevelInfo, "auto-provision: reconciled the saved device-set mapping to the current dongle assignments")
+			}
+		}
+	}
+
 	client := newSDRangelClient(opts.BridgeHost, opts.BridgePort)
 
 	// Wait for SDRangel's REST API (it starts alongside us via systemd). At startup
@@ -1478,24 +1708,18 @@ func (controller *Controller) autoProvisionSDRangel() {
 	// Expected count is scanner-aware: each non-scan channel is one UDPSink, but a
 	// scanner-enabled device set with ≥1 scan channel is just one shared UDPSink +
 	// one FreqScanner no matter how many scan channels it covers. Comparing the raw
-	// channel count would make a scanner set always look unprovisioned.
+	// channel count would make a scanner set always look unprovisioned. The channels
+	// are already scan-routed by reconcileDeviceSets above, so count them directly.
 	scanEnabledDS := map[int]bool{}
-	for _, d := range opts.BridgeDeviceSets {
+	for _, d := range deviceSets {
 		scanEnabledDS[d.Index] = d.ScannerEnabled
 	}
-	// Count what provision() will ACTUALLY create — i.e. after scan routing relocates
-	// any stray scan channel (one on a non-scanner set in the persisted config) onto a
-	// scanner set. Counting the raw config would miscount such a channel as a fixed
-	// UDPSink, so `expected` would never match SDRangel and every restart would force a
-	// needless re-provision.
-	routed := make([]BridgeChannelConfig, len(opts.BridgeChannels))
-	copy(routed, opts.BridgeChannels)
-	cf, sr := deviceSetFreqMaps(opts.BridgeDeviceSets)
-	routeScanChannelsToScanners(opts.BridgeDeviceSets, routed, cf, sr)
-
 	expected := 0
 	scanDS := map[int]bool{}
-	for _, ch := range routed {
+	for _, ch := range channels {
+		if ch.DeviceSetIndex < 0 {
+			continue // parked — provision() skips it
+		}
 		if ch.Scan && scanEnabledDS[ch.DeviceSetIndex] {
 			scanDS[ch.DeviceSetIndex] = true
 		} else {
@@ -1517,7 +1741,7 @@ func (controller *Controller) autoProvisionSDRangel() {
 		return // a provision is already running (a manual one raced us)
 	}
 	controller.Logs.LogEvent(LogLevelWarn, "auto-provision: SDRangel came up unprovisioned — re-applying saved provisioning")
-	controller.runProvisionJob(opts.BridgeDeviceSets, opts.BridgeChannels)
+	controller.runProvisionJob(deviceSets, channels)
 }
 
 // SDRangelProvisionStatusHandler returns the current/last async provision's live
