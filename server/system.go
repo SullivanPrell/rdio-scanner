@@ -224,12 +224,20 @@ func (systems *Systems) GetSystemById(id uint64) (system *System, ok bool) {
 	return nil, false
 }
 
+// GetSystemByLabel matches case-INSENSITIVELY. trunk-recorder's short_name is a
+// system identifier that is conventionally upper-cased (GenerateTrunkRecorderConfig
+// emits strings.ToUpper(label), e.g. "DANECOM" for a system labelled "danecom"), and
+// it arrives as call.Meta.SystemLabel on every uploaded/ingested call. A case-
+// sensitive compare here misses the existing system, so auto-populate spawns a
+// duplicate ("DANECOM" alongside "danecom") and the real system's calls/audio vanish
+// onto the orphan. Folding case keeps trunk-recorder calls on the configured system
+// regardless of short_name casing.
 func (systems *Systems) GetSystemByLabel(label string) (system *System, ok bool) {
 	systems.mutex.Lock()
 	defer systems.mutex.Unlock()
 
 	for _, system := range systems.List {
-		if system.Label == label {
+		if strings.EqualFold(system.Label, label) {
 			return system, true
 		}
 	}
