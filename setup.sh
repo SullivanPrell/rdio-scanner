@@ -148,9 +148,12 @@ build_sdrangel_from_source() {
 # We also do NOT skip merely because /usr/bin/sdrangelsrv exists: an existing binary
 # may be stock or built from an older patch set. Idempotency is owned by
 # scripts/sdrangel-source.sh, which returns in seconds when the installed binary
-# already carries the CURRENT patch set (tracked via a sidecar marker) and otherwise
-# rebuilds — so this stays correct whether setup.sh is run for a fresh install or to
-# pull a newer patch set on update.
+# already carries the CURRENT patch set and otherwise rebuilds. That gate checks BOTH
+# a sidecar marker (proves the build came from our patch set, incl. the source-only
+# Patch C) AND re-verifies the FFTW fix is actually present in the installed binary —
+# so a stock package/upgrade that overwrites sdrangelsrv but leaves the marker behind
+# is detected and rebuilt, not silently trusted. This stays correct whether setup.sh
+# is run for a fresh install or to pull a newer patch set on update.
 install_sdrangel() {
     build_sdrangel_from_source
 }

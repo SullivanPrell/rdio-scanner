@@ -119,24 +119,53 @@ step "Pre-flight checks"
 ARCH="$(uname -m)"
 [[ "$ARCH" == "aarch64" ]] || warn "Expected aarch64 (Pi 5 arm64), got '${ARCH}' — continuing anyway."
 
+# verify_threadsafe returns 0 if the binary actually carries the FFTW
+# planner-thread-safety fix (Patch A). We check for an (undefined, runtime-resolved)
+# reference to fftwf_make_planner_thread_safe rather than a baked-in string
+# marker: the build uses -O3 -flto, which strips the unused marker string but
+# NOT the planner call. Falls back to checking the threads lib is a runtime dep.
+# Defined here (before the idempotency gate) so the gate can re-inspect the
+# INSTALLED binary, not just trust the sidecar marker file.
+verify_threadsafe() {
+    local bin="$1"
+    nm -D "$bin" 2>/dev/null | grep -q 'fftwf_make_planner_thread_safe' && return 0
+    ldd "$bin" 2>/dev/null | grep -q 'libfftw3f_threads' && return 0
+    return 1
+}
+
 # ── Idempotency gate: is the CURRENT patched binary already installed? ─────────
 #
 # Skip the 20-40 min rebuild only when the installed binary was produced by THIS
-# script with the CURRENT patch set, tracked by the sidecar marker written at
-# install time (see SDRANGEL_MARKER_FILE). We deliberately do NOT skip merely
-# because /usr/bin/sdrangelsrv exists: a stock apt/release package, or a build from
-# an older patch set, is missing the FFTW and/or FreqScanner fix and must be
+# script with the CURRENT patch set. Two independent conditions must BOTH hold:
+#   1. the sidecar marker (SDRANGEL_MARKER_FILE) equals the current FIX_MARKER —
+#      proves the build came from THIS script's patch set, including the
+#      source-only Patch C (which leaves no symbol/string in the optimised binary,
+#      so the marker is its only durable record); AND
+#   2. verify_threadsafe() passes on the INSTALLED binary — proves the binary on
+#      disk really carries Patch A (the FFTW planner fix) right now.
+# Requiring (2) as well as (1) is what makes this a genuine "are the patches
+# applied?" check rather than blind trust in a sidecar: if an apt/OS upgrade or a
+# reflash swaps /usr/bin/sdrangelsrv for a STOCK binary but leaves the marker file
+# behind, condition (1) still passes but (2) fails — so we rebuild instead of
+# silently shipping a crash-prone, non-scanning server. We deliberately do NOT skip
+# merely because /usr/bin/sdrangelsrv exists: a stock apt/release package, or a build
+# from an older patch set, is missing the FFTW and/or FreqScanner fix and must be
 # replaced. setup.sh delegates here unconditionally, so this gate — not setup.sh —
 # owns the rebuild-vs-skip decision, which is what makes `setup.sh` safe to re-run
 # for updates without either re-flashing every time or silently shipping a stale
 # (non-scanning / crash-prone) sdrangelsrv.
 if [[ -x "$INSTALL_BIN" ]] && [[ -f "$SDRANGEL_MARKER_FILE" ]] \
-   && [[ "$(cat "$SDRANGEL_MARKER_FILE" 2>/dev/null)" == "$FIX_MARKER" ]]; then
-    info "Patched sdrangelsrv already installed (marker '${FIX_MARKER}') — nothing to do."
+   && [[ "$(cat "$SDRANGEL_MARKER_FILE" 2>/dev/null)" == "$FIX_MARKER" ]] \
+   && verify_threadsafe "$INSTALL_BIN"; then
+    info "Patched sdrangelsrv already installed (marker '${FIX_MARKER}', FFTW fix verified in binary) — nothing to do."
     exit 0
 fi
 if [[ -x "$INSTALL_BIN" ]]; then
-    warn "An sdrangelsrv is installed but is missing the current rdio-scanner patch set (FFTW + FreqScanner 'enabled') — it will be rebuilt and replaced."
+    if [[ "$(cat "$SDRANGEL_MARKER_FILE" 2>/dev/null)" == "$FIX_MARKER" ]] && ! verify_threadsafe "$INSTALL_BIN"; then
+        warn "sdrangelsrv has the current marker but the binary itself LACKS the FFTW fix (likely overwritten by a stock package/upgrade) — rebuilding and replacing it."
+    else
+        warn "An sdrangelsrv is installed but is missing the current rdio-scanner patch set (FFTW + FreqScanner 'enabled') — it will be rebuilt and replaced."
+    fi
 fi
 
 warn "Building thread-safe sdrangelsrv ${SDRANGEL_VERSION} from source. Expect 20-40 min on a Pi 5."
@@ -219,17 +248,8 @@ _stub_qt5 Qt5Charts       libqt5charts5-dev
 _stub_qt5 Qt5Gamepad      libqt5gamepad5-dev
 _stub_qt5 Qt5TextToSpeech libqt5texttospeech5-dev
 
-# verify_threadsafe returns 0 if the binary actually carries the FFTW
-# planner-thread-safety fix. We check for an (undefined, runtime-resolved)
-# reference to fftwf_make_planner_thread_safe rather than a baked-in string
-# marker: the build uses -O3 -flto, which strips the unused marker string but
-# NOT the planner call. Falls back to checking the threads lib is a runtime dep.
-verify_threadsafe() {
-    local bin="$1"
-    nm -D "$bin" 2>/dev/null | grep -q 'fftwf_make_planner_thread_safe' && return 0
-    ldd "$bin" 2>/dev/null | grep -q 'libfftw3f_threads' && return 0
-    return 1
-}
+# (verify_threadsafe is defined near the top, before the idempotency gate, so the
+# gate can re-inspect the installed binary — see the Pre-flight section.)
 
 # ── Clone (or reuse) the source tree ─────────────────────────────────────────
 # Reuse an existing compiled build tree so re-runs don't recompile from scratch.
