@@ -659,34 +659,65 @@ async function detectDongles() {
   }
 }
 
-function dongleAssignment(index: number) {
-  return bridge.value.sdrDeviceAssignments.find(a => a.index === index)?.assignTo ?? ''
+// Match a saved assignment to a live dongle by SERIAL, never by USB index. The
+// `index` is only the dongle's position in the last rtl_test enumeration, which
+// changes when dongles are replugged or the Pi reboots in a different USB order. The
+// old index-based join silently mismatched every row after a re-enumeration — the
+// SDRangel/trunk-recorder choice and the Scanning flag showed up on the WRONG dongle,
+// and edits landed on the wrong dongle — which is exactly what made this tab look
+// broken ("assigning SDRs between the two apps doesn't work"). Serial is the stable
+// identity both apps pin dongles by, so we join on it, falling back to index only for
+// a dongle that has no serial at all.
+function assignmentFor(dongle: RTLDongle) {
+  const serial = (dongle.serialNumber || '').trim()
+  const list = bridge.value.sdrDeviceAssignments
+  if (serial) {
+    const bySerial = list.find(a => (a.serialNumber || '').trim() === serial)
+    if (bySerial) return bySerial
+  }
+  return list.find(a => a.index === dongle.index)
+}
+
+function assignmentIndexFor(dongle: RTLDongle): number {
+  const serial = (dongle.serialNumber || '').trim()
+  const list = bridge.value.sdrDeviceAssignments
+  if (serial) {
+    const i = list.findIndex(a => (a.serialNumber || '').trim() === serial)
+    if (i >= 0) return i
+  }
+  return list.findIndex(a => a.index === dongle.index)
+}
+
+function dongleAssignment(dongle: RTLDongle) {
+  return assignmentFor(dongle)?.assignTo ?? ''
 }
 
 function setDongleAssignment(dongle: RTLDongle, assignTo: '' | 'sdrangel' | 'trunk-recorder') {
   const assignments = [...bridge.value.sdrDeviceAssignments]
-  const idx = assignments.findIndex(a => a.index === dongle.index)
+  const idx = assignmentIndexFor(dongle)
   if (idx >= 0) {
     // Clear scanning when the dongle leaves SDRangel — it only applies there.
     const scanEnabled = assignTo === 'sdrangel' ? assignments[idx].scanEnabled : false
-    assignments[idx] = { ...assignments[idx], assignTo, scanEnabled }
+    // Refresh serial + index to the live dongle so this assignment can't drift onto a
+    // stale USB index again (the join above is by serial, but keep index current too).
+    assignments[idx] = { ...assignments[idx], serialNumber: dongle.serialNumber, index: dongle.index, assignTo, scanEnabled }
   } else {
     assignments.push({ index: dongle.index, serialNumber: dongle.serialNumber, assignTo })
   }
   bridge.value = { ...bridge.value, sdrDeviceAssignments: assignments }
 }
 
-function dongleScanEnabled(index: number) {
-  return bridge.value.sdrDeviceAssignments.find(a => a.index === index)?.scanEnabled ?? false
+function dongleScanEnabled(dongle: RTLDongle) {
+  return assignmentFor(dongle)?.scanEnabled ?? false
 }
 
 // Toggle the per-dongle "drive with a Frequency Scanner" flag. Only meaningful for
 // SDRangel-assigned dongles; provisioning ignores it otherwise.
 function setDongleScan(dongle: RTLDongle, scanEnabled: boolean) {
   const assignments = [...bridge.value.sdrDeviceAssignments]
-  const idx = assignments.findIndex(a => a.index === dongle.index)
+  const idx = assignmentIndexFor(dongle)
   if (idx >= 0) {
-    assignments[idx] = { ...assignments[idx], scanEnabled }
+    assignments[idx] = { ...assignments[idx], serialNumber: dongle.serialNumber, index: dongle.index, scanEnabled }
   } else {
     assignments.push({ index: dongle.index, serialNumber: dongle.serialNumber, assignTo: '', scanEnabled })
   }
@@ -1355,7 +1386,7 @@ const trSystemOptions = computed(() => [
               <td class="px-3 py-2 font-mono text-neutral-400">{{ dongle.serialNumber }}</td>
               <td class="px-3 py-2">
                 <USelect
-                  :model-value="dongleAssignment(dongle.index) || 'unassigned'"
+                  :model-value="dongleAssignment(dongle) || 'unassigned'"
                   size="xs"
                   :items="[
                     { label: 'Unassigned', value: 'unassigned' },
@@ -1368,11 +1399,11 @@ const trSystemOptions = computed(() => [
               <td class="px-3 py-2">
                 <div class="flex items-center gap-1.5">
                   <UCheckbox
-                    :model-value="dongleScanEnabled(dongle.index)"
-                    :disabled="dongleAssignment(dongle.index) !== 'sdrangel'"
+                    :model-value="dongleScanEnabled(dongle)"
+                    :disabled="dongleAssignment(dongle) !== 'sdrangel'"
                     @update:model-value="v => setDongleScan(dongle, v === true)"
                   />
-                  <span v-if="dongleAssignment(dongle.index) !== 'sdrangel'" class="text-[10px] text-neutral-600">SDRangel only</span>
+                  <span v-if="dongleAssignment(dongle) !== 'sdrangel'" class="text-[10px] text-neutral-600">SDRangel only</span>
                   <span v-else class="text-[10px] text-neutral-500">Frequency Scanner</span>
                 </div>
               </td>
