@@ -91,12 +91,15 @@ INSTALL_BIN="/usr/bin/sdrangelsrv"
 # compiled binary's .rodata, so we can later detect "is the INSTALLED binary a
 # thread-safe build produced by THIS script?" with a cheap `grep` on the ELF.
 # Bump the suffix whenever the patch set changes so a stale install is rebuilt.
-# v3 = added Patch C (FreqScanner webapi applies per-frequency 'enabled'). The
-# marker is recorded in a SIDECAR FILE next to the binary at install time, NOT in
-# the binary's .rodata: -O3 -flto strips an unused in-binary string, so a sidecar
-# is the only reliable "which patch set is installed?" record across runs/reboots.
-# The idempotency gate below reads it so `setup.sh` is safe to re-run for updates.
-FIX_MARKER="RDIO_FFTW_PLANNER_THREADSAFE_v3"
+# v3 = added Patch C (FreqScanner webapi applies per-frequency 'enabled').
+# v4 = added Patch D (FreqScanner /report guards a null/dangling baseband sink, so
+#      polling the scanner report outside its running window no longer SEGVs the
+#      whole server). The marker is recorded in a SIDECAR FILE next to the binary at
+# install time, NOT in the binary's .rodata: -O3 -flto strips an unused in-binary
+# string, so a sidecar is the only reliable "which patch set is installed?" record
+# across runs/reboots. The idempotency gate below reads it so `setup.sh` is safe to
+# re-run for updates.
+FIX_MARKER="RDIO_FFTW_PLANNER_THREADSAFE_v4"
 SDRANGEL_MARKER_FILE="${INSTALL_BIN}.rdio-marker"
 
 # ── Colours / logging ────────────────────────────────────────────────────────
@@ -254,29 +257,33 @@ _stub_qt5 Qt5TextToSpeech libqt5texttospeech5-dev
 # ── Clone (or reuse) the source tree ─────────────────────────────────────────
 # Reuse an existing compiled build tree so re-runs don't recompile from scratch.
 #
-# A reused tree must carry BOTH source-level fixes, not just the FFTW one:
+# A reused tree must carry ALL source-level fixes, not just the FFTW one:
 #   * verify_threadsafe() proves the FFTW planner fix linked into the binary.
-#   * FREQSCANNER_PATCH_LINE must be present in the freqscanner.cpp SOURCE.
-# The second check is essential: Patch C is a one-line behavioral change with no
-# symbol or string that survives -O3 -flto, so it is INVISIBLE to verify_threadsafe
-# and to any binary probe. Without this guard a tree built before Patch C existed
-# (FFTW-only) would be reused and silently ship a scanner that never scans — the
-# exact failure Patch C exists to fix. If either fix is missing, wipe and rebuild.
+#   * FREQSCANNER_PATCH_LINE (Patch C) must be present in the freqscanner.cpp SOURCE.
+#   * FREQSCANNER_REPORT_GUARD_LINE (Patch D) must be present too.
+# The source checks are essential: Patches C and D are one-line behavioral changes
+# with no symbol or string that survives -O3 -flto, so they are INVISIBLE to
+# verify_threadsafe and to any binary probe. Without these guards a tree built before
+# Patch C existed would be reused and silently ship a scanner that never scans, or a
+# tree built before Patch D would ship a scanner whose /report SEGVs the server — the
+# exact failures these patches exist to fix. If ANY fix is missing, wipe and rebuild.
 FREQSCANNER_PATCH_LINE='freqSetting.m_enabled = frequency->getEnabled();'
+FREQSCANNER_REPORT_GUARD_LINE='(m_running && m_basebandSink) ? m_basebandSink->getChannelSampleRate() : 0'
 FREQSCANNER_CPP_REL='plugins/channelrx/freqscanner/freqscanner.cpp'
 NEED_CLONE=true
 if [[ -d "${SRC_DIR}/.git" ]]; then
     if [[ -x "${SRC_DIR}/build/sdrangelsrv" ]] && \
        verify_threadsafe "${SRC_DIR}/build/sdrangelsrv" && \
-       grep -qF "$FREQSCANNER_PATCH_LINE" "${SRC_DIR}/${FREQSCANNER_CPP_REL}" 2>/dev/null; then
-        info "Existing fully-patched build present at ${SRC_DIR}/build (FFTW + FreqScanner 'enabled') — reusing it (skip clone/patch/compile)."
+       grep -qF "$FREQSCANNER_PATCH_LINE" "${SRC_DIR}/${FREQSCANNER_CPP_REL}" 2>/dev/null && \
+       grep -qF "$FREQSCANNER_REPORT_GUARD_LINE" "${SRC_DIR}/${FREQSCANNER_CPP_REL}" 2>/dev/null; then
+        info "Existing fully-patched build present at ${SRC_DIR}/build (FFTW + FreqScanner 'enabled' + report guard) — reusing it (skip clone/patch/compile)."
         NEED_CLONE=false
         SKIP_PATCH=true
         SKIP_COMPILE=true
     else
-        # A build tree exists but is stale (missing the FFTW fix and/or Patch C) —
-        # wipe and start clean so we never ship a half-patched binary.
-        warn "Existing source tree at ${SRC_DIR} is stale (missing FFTW fix and/or FreqScanner 'enabled' patch) — removing for a clean build."
+        # A build tree exists but is stale (missing the FFTW fix and/or Patch C
+        # and/or Patch D) — wipe and start clean so we never ship a half-patched binary.
+        warn "Existing source tree at ${SRC_DIR} is stale (missing FFTW fix and/or FreqScanner 'enabled' patch and/or /report guard) — removing for a clean build."
         rm -rf "${SRC_DIR}"
     fi
 fi
@@ -499,6 +506,48 @@ with open(path, "w") as f:
 print("  Patched freqscanner.cpp — webapi now applies per-frequency 'enabled'")
 PYEOF
 
+    # ── Patch D: FreqScanner /report null-deref crash (SEGV) ──────────────────
+    # SDRangel's FreqScanner::webapiFormatChannelReport() unconditionally derefs
+    # m_basebandSink->getChannelSampleRate(). But m_basebandSink is nullptr before
+    # FreqScanner::start() and a DANGLING pointer after stop() — stop() sets
+    # m_running=false and lets the worker thread deleteLater() the sink without ever
+    # nulling the member. A GET /deviceset/{i}/channel/{j}/report landing in either
+    # window derefs the null/dangling sink (-> its m_channelizer) on the WebAPI thread
+    # and SEGVs the WHOLE server. rdio-scanner hits this routinely: the provision
+    # verify poll, the bridge's scanner-state poll, and every bridge stop/start or
+    # device retune. Confirmed from a coredump backtrace on v7.26.1:
+    #   FreqScannerBaseband::getChannelSampleRate
+    #     <- FreqScanner::webapiFormatChannelReport <- webapiReportGet <- HTTP GET.
+    # Both crash windows have m_running==false (it is set true only AFTER the sink is
+    # built and false BEFORE teardown), so gating the call on m_running is exact and
+    # race-free enough to match SDRangel's own m_running checks. Present in v7.26.1 AND
+    # master. One line: guard the sample-rate read; report 0 when not running.
+    step "Patching SDRangel source — FreqScanner report guards a null baseband sink"
+    python3 - "${SRC_DIR}" <<'PYEOF' || fatal "FreqScanner report-guard patch (Patch D) failed."
+import sys
+src = sys.argv[1]
+path = f"{src}/plugins/channelrx/freqscanner/freqscanner.cpp"
+with open(path) as f:
+    txt = f.read()
+
+if "(m_running && m_basebandSink) ? m_basebandSink->getChannelSampleRate() : 0" in txt:
+    print("  freqscanner.cpp report guard already present — nothing to change.")
+    sys.exit(0)
+
+anchor = "response.getFreqScannerReport()->setChannelSampleRate(m_basebandSink->getChannelSampleRate());"
+if anchor not in txt:
+    sys.exit("FATAL: report anchor 'setChannelSampleRate(m_basebandSink->getChannelSampleRate())' not found in freqscanner.cpp — SDRangel layout changed; refusing to build a crash-prone scanner.")
+
+guard = ("response.getFreqScannerReport()->setChannelSampleRate("
+         "(m_running && m_basebandSink) ? m_basebandSink->getChannelSampleRate() : 0); "
+         "// rdio-scanner: sink is null before start()/dangling after stop() -> /report SEGV'd the server")
+txt = txt.replace(anchor, guard, 1)
+
+with open(path, "w") as f:
+    f.write(txt)
+print("  Patched freqscanner.cpp — /report no longer derefs a null/dangling baseband sink")
+PYEOF
+
 fi  # end SKIP_PATCH
 
 # ── Source chokepoint: assert Patch C is present BEFORE the 20-40 min compile ──
@@ -511,6 +560,14 @@ if ! grep -qF "$FREQSCANNER_PATCH_LINE" "${SRC_DIR}/${FREQSCANNER_CPP_REL}" 2>/d
     fatal "FreqScanner 'enabled' patch (Patch C) missing from ${SRC_DIR}/${FREQSCANNER_CPP_REL} — refusing to build a scanner that never scans."
 fi
 info "Verified FreqScanner 'enabled' patch (Patch C) present in source."
+
+# Same chokepoint for Patch D (the /report null-deref guard): another one-line change
+# invisible to any binary probe, so assert it at the source on BOTH the fresh-patch
+# and reused-tree paths — a scanner whose /report SEGVs the server must never compile.
+if ! grep -qF "$FREQSCANNER_REPORT_GUARD_LINE" "${SRC_DIR}/${FREQSCANNER_CPP_REL}" 2>/dev/null; then
+    fatal "FreqScanner /report guard (Patch D) missing from ${SRC_DIR}/${FREQSCANNER_CPP_REL} — refusing to build a scanner whose report crashes the server."
+fi
+info "Verified FreqScanner /report guard (Patch D) present in source."
 
 # ── Configure ────────────────────────────────────────────────────────────────
 
