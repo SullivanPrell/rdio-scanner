@@ -35,7 +35,7 @@ type BridgeChannelConfig struct {
 	FrequencyHz    uint   `json:"frequencyHz"`
 	Label          string `json:"label"`
 	Protocol       string `json:"protocol"`  // demod: "nfm" (default), "am", "usb", "lsb"
-	SquelchDB      int    `json:"squelchDb"` // SDRangel squelch threshold, dB (0 ⇒ default -50)
+	SquelchDB      int    `json:"squelchDb"` // SDRangel squelch threshold, dB (0 ⇒ bridgeDefaultSquelchDB)
 	SampleRate     int    `json:"sampleRate"`
 	SystemRef      uint   `json:"systemRef"`
 	TalkgroupRef   uint   `json:"talkgroupRef"`
@@ -43,6 +43,12 @@ type BridgeChannelConfig struct {
 	// Scan marks this channel for inclusion in its device set's Frequency Scanner
 	// (only takes effect when the device set is scanner-enabled). User-set.
 	Scan bool `json:"scan,omitempty"`
+	// ScanThresholdDB overrides the FreqScanner detection threshold (dB) for THIS
+	// frequency only (emitted as SDRangel's per-frequency threshold). 0 ⇒ the
+	// group's derived threshold: sink squelch + bridgeDefaultScanMarginDB.
+	// Detection deliberately sits above the capture squelch — see
+	// bridgeDefaultScanMarginDB in setup.go for why.
+	ScanThresholdDB int `json:"scanThresholdDb,omitempty"`
 	// ScannerChannelIndex is the SDRangel channel index of the FreqScanner that
 	// drives this scan channel's shared UDPSink. Provisioning sets it (>0) for
 	// channels it actually put behind a scanner; the bridge keys scan mode off it,
@@ -116,7 +122,23 @@ const (
 	// bridgeMaxCallDur caps a single call so a stuck-open squelch can't grow
 	// the buffer without bound; longer transmissions are split at this point.
 	bridgeMaxCallDur = 5 * time.Minute
+
+	// bridgeMinCallDur discards a finished call shorter than this instead of
+	// submitting it. A squelch flap — a noise spike riding over the threshold for
+	// an instant — leaves a ~150–250 ms fragment of static that would otherwise
+	// log as a call (230/day measured on the Pi). No voice transmission is this
+	// short; kept well under a clipped one-word reply (~400 ms) so only flaps
+	// are dropped.
+	bridgeMinCallDur = 300 * time.Millisecond
 )
+
+// pcmDurationMs converts an S16LE mono byte count to milliseconds of audio.
+func pcmDurationMs(pcmBytes, sampleRate int) int {
+	if sampleRate <= 0 {
+		return 0
+	}
+	return pcmBytes * 1000 / (2 * sampleRate)
+}
 
 // chunkActive reports whether a block of S16LE mono PCM contains any audio above
 // the silence floor (i.e. SDRangel's squelch was open while it was produced).
@@ -503,6 +525,11 @@ func (b *Bridge) runMonitor(ctx context.Context, udpPort, sampleRate int, logLab
 	seg := &callSegmenter{hangTime: bridgeHangTime, maxDur: bridgeMaxCallDur}
 
 	submit := func(pcm []byte, start time.Time, lbl callLabel) {
+		durMs := pcmDurationMs(len(pcm), sampleRate)
+		if time.Duration(durMs)*time.Millisecond < bridgeMinCallDur {
+			b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: discarded %dms squelch flap (tg=%d, min %dms)", logLabel, durMs, lbl.talkgroupRef, bridgeMinCallDur/time.Millisecond))
+			return
+		}
 		call := NewCall()
 		call.Audio = bridgeBuildWAV(pcm, sampleRate)
 		call.AudioFilename = fmt.Sprintf("%s-%d.wav", lbl.label, start.UnixMilli())
@@ -514,7 +541,7 @@ func (b *Bridge) runMonitor(ctx context.Context, udpPort, sampleRate int, logLab
 			call.Frequencies = []CallFrequency{{Frequency: lbl.frequencyHz}}
 		}
 		b.Controller.Ingest <- call
-		b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: call submitted (tg=%d duration=%dms pcm=%d bytes)", logLabel, lbl.talkgroupRef, len(pcm)*1000/(2*sampleRate), len(pcm)))
+		b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: call submitted (tg=%d duration=%dms pcm=%d bytes)", logLabel, lbl.talkgroupRef, durMs, len(pcm)))
 	}
 
 	audioCh := make(chan []byte, 256)

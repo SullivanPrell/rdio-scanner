@@ -325,3 +325,22 @@ func TestBridgeStopTerminatesWithLiveStream(t *testing.T) {
 		t.Fatal("Stop() did not return within 3s while the port was streaming — reader ignored ctx cancellation")
 	}
 }
+
+// pcmDurationMs is the arithmetic behind the bridgeMinCallDur squelch-flap
+// filter: S16LE mono bytes → milliseconds.
+func TestPCMDurationMs(t *testing.T) {
+	cases := []struct {
+		bytes, rate, want int
+	}{
+		{16000, 8000, 1000}, // 1 s at 8 kHz
+		{2408, 8000, 150},   // a real squelch flap seen in production
+		{4800, 8000, 300},   // exactly bridgeMinCallDur
+		{0, 8000, 0},
+		{16000, 0, 0}, // guard: no crash on a zero sample rate
+	}
+	for _, c := range cases {
+		if got := pcmDurationMs(c.bytes, c.rate); got != c.want {
+			t.Errorf("pcmDurationMs(%d, %d) = %d, want %d", c.bytes, c.rate, got, c.want)
+		}
+	}
+}

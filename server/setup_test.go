@@ -307,3 +307,84 @@ func TestRouteScanChannels_OffBandStillPlacedOnScanner(t *testing.T) {
 		t.Fatalf("expected 1 reassignment message, got %d: %v", len(msgs), msgs)
 	}
 }
+
+// Detection must sit ABOVE capture: with everything defaulted, the sink squelch
+// is -45 and the scanner threshold -35 (squelch + margin). Equal levels were the
+// junk-call generator: ambient carriers idling a few dB over the floor parked
+// the scanner every sweep.
+func TestScanGroupLevels_Defaults(t *testing.T) {
+	sq, th := scanGroupLevels([]BridgeChannelConfig{{}, {}})
+	if sq != bridgeDefaultSquelchDB {
+		t.Errorf("squelch = %d, want %d", sq, bridgeDefaultSquelchDB)
+	}
+	if want := bridgeDefaultSquelchDB + bridgeDefaultScanMarginDB; th != want {
+		t.Errorf("threshold = %d, want %d", th, want)
+	}
+	if th <= sq {
+		t.Errorf("threshold %d must be above squelch %d", th, sq)
+	}
+}
+
+// The most sensitive (most negative) member squelch wins for capture, and the
+// derived detection threshold rides on top of it.
+func TestScanGroupLevels_MostSensitiveSquelchWins(t *testing.T) {
+	sq, th := scanGroupLevels([]BridgeChannelConfig{
+		{SquelchDB: -40},
+		{SquelchDB: -55},
+		{}, // default -45
+	})
+	if sq != -55 {
+		t.Errorf("squelch = %d, want -55", sq)
+	}
+	if th != -55+bridgeDefaultScanMarginDB {
+		t.Errorf("threshold = %d, want %d", th, -55+bridgeDefaultScanMarginDB)
+	}
+}
+
+// A channel's ScanThresholdDB must NOT move the group level — it becomes a
+// per-frequency threshold on that channel's scanner entry instead.
+func TestScanGroupLevels_PerChannelOverrideDoesNotMoveGroup(t *testing.T) {
+	sq, th := scanGroupLevels([]BridgeChannelConfig{
+		{ScanThresholdDB: -30},
+		{},
+	})
+	if sq != bridgeDefaultSquelchDB {
+		t.Errorf("squelch = %d, want %d", sq, bridgeDefaultSquelchDB)
+	}
+	if want := bridgeDefaultSquelchDB + bridgeDefaultScanMarginDB; th != want {
+		t.Errorf("threshold = %d, want %d (group level ignores per-channel overrides)", th, want)
+	}
+}
+
+// ScanThresholdDB is emitted as SDRangel's per-frequency threshold — a STRING
+// (SDRangel parses it to float; absent means "use the global threshold") — only
+// on the frequencies that set it.
+func TestFreqScannerSettings_PerFrequencyThreshold(t *testing.T) {
+	group := []BridgeChannelConfig{
+		{FrequencyHz: 147150000, Label: "beacon-plagued", ScanThresholdDB: -25},
+		{FrequencyHz: 146880000, Label: "normal"},
+	}
+	s := freqScannerSettings(group, -35, "R0:0")
+	freqs, ok := s["frequencies"].([]map[string]interface{})
+	if !ok || len(freqs) != 2 {
+		t.Fatalf("frequencies = %#v, want 2 entries", s["frequencies"])
+	}
+	if got := freqs[0]["threshold"]; got != "-25" {
+		t.Errorf("per-frequency threshold = %#v, want the string \"-25\"", got)
+	}
+	if _, present := freqs[1]["threshold"]; present {
+		t.Errorf("channel without ScanThresholdDB must not emit a per-frequency threshold, got %#v", freqs[1]["threshold"])
+	}
+	if got := s["threshold"]; got != float64(-35) {
+		t.Errorf("global threshold = %#v, want -35.0", got)
+	}
+}
+
+// An empty group still yields sane, ordered levels (defensive: provisioning
+// never builds one, but the derivation must not divide-by-assumption).
+func TestScanGroupLevels_EmptyGroup(t *testing.T) {
+	sq, th := scanGroupLevels(nil)
+	if sq != bridgeDefaultSquelchDB || th != bridgeDefaultSquelchDB+bridgeDefaultScanMarginDB {
+		t.Errorf("got (%d, %d), want (%d, %d)", sq, th, bridgeDefaultSquelchDB, bridgeDefaultSquelchDB+bridgeDefaultScanMarginDB)
+	}
+}

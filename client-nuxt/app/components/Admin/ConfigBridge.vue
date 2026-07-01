@@ -782,6 +782,7 @@ function addChannel() {
       label: '',
       protocol: 'nfm',
       squelchDb: -45,
+      scanThresholdDb: 0,
       sampleRate: 8000,
       systemRef: 0,
       talkgroupRef: 0,
@@ -847,6 +848,7 @@ function addSystemChannels() {
       label: tg.name || tg.label || `TG ${tg.talkgroupRef}`,
       protocol: 'nfm',
       squelchDb: -45,
+      scanThresholdDb: 0,
       sampleRate: 8000,
       systemRef: sys.systemRef,
       talkgroupRef: tg.talkgroupRef,
@@ -1534,6 +1536,7 @@ const trSystemOptions = computed(() => [
               <th class="px-2 py-1.5 text-left">Freq (Hz)</th>
               <th class="px-2 py-1.5 text-left">Protocol</th>
               <th class="px-2 py-1.5 text-left">Squelch (dB)</th>
+              <th class="px-2 py-1.5 text-left" title="Scanner detection threshold (dB) for this frequency; 0 = auto (group squelch + 10 dB). Raise it (e.g. −25) on a frequency that keeps logging static. Only used when Scan is on.">Scan thr. (dB)</th>
               <th class="px-2 py-1.5 text-left">System</th>
               <th class="px-2 py-1.5 text-left">Talkgroup</th>
               <th class="px-2 py-1.5 text-left">UDP Port</th>
@@ -1552,6 +1555,7 @@ const trSystemOptions = computed(() => [
               <td class="px-2 py-1"><UInput v-model.number="ch.frequencyHz" type="number" size="xs" /></td>
               <td class="px-2 py-1"><USelect v-model="ch.protocol" :items="protocolOptions" size="xs" /></td>
               <td class="px-2 py-1"><UInput v-model.number="ch.squelchDb" type="number" size="xs" /></td>
+              <td class="px-2 py-1"><UInput v-model.number="ch.scanThresholdDb" type="number" size="xs" :disabled="!ch.scan" placeholder="auto" /></td>
               <td class="px-2 py-1"><USelect v-model.number="ch.systemRef" :items="systemOptions" size="xs" /></td>
               <td class="px-2 py-1">
                 <USelectMenu
@@ -1577,7 +1581,7 @@ const trSystemOptions = computed(() => [
               </td>
             </tr>
             <tr v-if="!bridge.channels.length">
-              <td colspan="10" class="px-3 py-6 text-center text-neutral-600">
+              <td colspan="11" class="px-3 py-6 text-center text-neutral-600">
                 No channels — add one above, then click Provision SDRangel.
               </td>
             </tr>
@@ -1589,7 +1593,11 @@ const trSystemOptions = computed(() => [
         Each channel maps one SDRangel NFM/AM/USB/LSB demodulator to a rdio-scanner talkgroup via UDP audio relay.
         Squelch (dB) is the per-channel threshold SDRangel uses to gate audio (default −45). If you get constant
         static or never-ending calls, the squelch is passing noise — raise it toward −35/−30. Lower it (e.g. −55)
-        only if real transmissions don't open it. After editing, save config and click Provision SDRangel.
+        only if real transmissions don't open it. For scanned channels, Scan thr. (dB) is the separate level the
+        Frequency Scanner uses to decide a frequency is active — it defaults to the group squelch + 10 dB so
+        ambient carriers a few dB over the noise floor don't park the scanner and log junk static calls. Set it
+        per frequency: raise it (toward −25) on a frequency that keeps logging static, lower it only if the
+        scanner misses genuinely weak transmissions. After editing, save config and click Provision SDRangel.
       </p>
     </div>
   </div>

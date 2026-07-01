@@ -1052,30 +1052,21 @@ func (c *sdrangelClient) provision(ctx context.Context, dsCfgs []SDRangelDeviceS
 			leadOffset = int64(lead.FrequencyHz) - int64(cf)
 		}
 
-		// Scanner threshold + shared-sink squelch: use the most sensitive (most
-		// negative) squelch among the group's channels so the weakest configured
-		// channel still triggers. Keep both equal so the scanner parks exactly when
-		// the sink's squelch opens (and the bridge can segment on the closed-squelch
-		// silence the sink emits between transmissions).
-		threshold := 0
-		for _, mi := range members {
-			sq := updated[mi].SquelchDB
-			if sq == 0 {
-				sq = bridgeDefaultSquelchDB
-			}
-			if threshold == 0 || sq < threshold {
-				threshold = sq
-			}
+		groupCfgs := make([]BridgeChannelConfig, len(members))
+		for k, mi := range members {
+			groupCfgs[k] = updated[mi]
 		}
-		if threshold == 0 {
-			threshold = bridgeDefaultSquelchDB
-		}
+
+		// Two distinct dB levels: the sink squelch gates CAPTURE while the scanner
+		// is parked, the scanner threshold decides DETECTION. They must not be
+		// equal — see scanGroupLevels for why.
+		squelch, threshold := scanGroupLevels(groupCfgs)
 
 		// Shared UDPSink, tuned (initially) to the lead channel; the FreqScanner
 		// retunes it at runtime. Streams to the lead channel's UDP port — the one
 		// the bridge binds for this group.
 		sinkCfg := lead
-		sinkCfg.SquelchDB = threshold
+		sinkCfg.SquelchDB = squelch
 		if err := c.postJSON(fmt.Sprintf("/deviceset/%d/channel", ds), map[string]interface{}{
 			"channelType":              "UDPSink",
 			"direction":                0,
@@ -1110,10 +1101,6 @@ func (c *sdrangelClient) provision(ctx context.Context, dsCfgs []SDRangelDeviceS
 		scannerIdx := chIdxByDS[ds]
 		chIdxByDS[ds]++
 		settle(ctx, "channel creation", 10*time.Second)
-		groupCfgs := make([]BridgeChannelConfig, len(members))
-		for k, mi := range members {
-			groupCfgs[k] = updated[mi]
-		}
 		if err := c.patchJSON(fmt.Sprintf("/deviceset/%d/channel/%d/settings", ds, scannerIdx), map[string]interface{}{
 			"channelType":         "FreqScanner",
 			"direction":           0,
@@ -1141,8 +1128,8 @@ func (c *sdrangelClient) provision(ctx context.Context, dsCfgs []SDRangelDeviceS
 		scannerIdxByDS[ds] = scannerIdx
 
 		add(fmt.Sprintf(
-			"device set %d: FreqScanner idx=%d over %d freq(s) → UDPSink idx=%d on UDP %d (threshold %d dB)",
-			ds, scannerIdx, len(members), sinkIdx, lead.UdpPort, threshold,
+			"device set %d: FreqScanner idx=%d over %d freq(s) → UDPSink idx=%d on UDP %d (squelch %d dB, scan threshold %d dB)",
+			ds, scannerIdx, len(members), sinkIdx, lead.UdpPort, squelch, threshold,
 		))
 	}
 
@@ -1232,6 +1219,47 @@ func (c *sdrangelClient) provision(ctx context.Context, dsCfgs []SDRangelDeviceS
 // passes static AND never emits the closed-squelch silence the bridge segments on,
 // so calls run to the cap. Operators lower it per-channel for genuinely weak signals.
 const bridgeDefaultSquelchDB = -45
+
+// bridgeDefaultScanMarginDB lifts a scan group's FreqScanner detection threshold
+// above its shared-sink squelch. Capture and detection need different
+// sensitivities: the sink squelch only gates audio while the scanner is already
+// parked on a transmission, so it can sit near the noise floor — but the scanner
+// DECIDES a frequency is active, and ambient carriers routinely idle a few dB
+// above the floor (measured on the Pi: 147.150 MHz idles at −47…−43 dB against a
+// −60 dB VHF floor). With detection equal to the −45 dB squelch those carriers
+// parked the scanner every sweep — ~2,700 junk ~1.4 s static calls per day.
+// +10 dB (−35 with the default squelch) clears them while real voice, typically
+// 20+ dB over the floor, still triggers. Override per channel with
+// ScanThresholdDB for genuinely weak scan targets.
+const bridgeDefaultScanMarginDB = 10
+
+// scanGroupLevels derives the two dB levels for one device set's scan group.
+//
+// squelchDB (capture): the most sensitive (most negative) squelch among the
+// group's channels, so once the scanner parks, the weakest configured channel's
+// audio still opens the sink and the bridge can segment on the closed-squelch
+// silence the sink emits between transmissions.
+//
+// thresholdDB (detection): squelchDB + bridgeDefaultScanMarginDB. Detection
+// deliberately sits above capture; see bridgeDefaultScanMarginDB. A channel's
+// explicit ScanThresholdDB does NOT move the group level — it is emitted as a
+// per-frequency threshold on that channel's scanner entry (freqScannerSettings),
+// which SDRangel applies for that frequency only.
+func scanGroupLevels(members []BridgeChannelConfig) (squelchDB, thresholdDB int) {
+	for _, m := range members {
+		sq := m.SquelchDB
+		if sq == 0 {
+			sq = bridgeDefaultSquelchDB
+		}
+		if squelchDB == 0 || sq < squelchDB {
+			squelchDB = sq
+		}
+	}
+	if squelchDB == 0 {
+		squelchDB = bridgeDefaultSquelchDB
+	}
+	return squelchDB, squelchDB + bridgeDefaultScanMarginDB
+}
 
 // bridgeDefaultGainTenthsDB is the fixed RTL tuner gain (tenths of a dB) used when a
 // device set doesn't specify one. The device PATCH forces hardware AGC OFF so the
@@ -1330,12 +1358,21 @@ func freqScannerSettings(group []BridgeChannelConfig, thresholdDB int, channelRe
 	}
 	freqs := make([]map[string]interface{}, 0, len(group))
 	for _, ch := range group {
-		freqs = append(freqs, map[string]interface{}{
+		f := map[string]interface{}{
 			"frequency": ch.FrequencyHz, // absolute Hz
 			"enabled":   1,
 			"notes":     ch.Label,
 			"channel":   channelRef, // per-frequency pairing (top-level `channel` is GUI/preset-only over REST)
-		})
+		}
+		// Per-frequency detection threshold override. SDRangel carries it as a
+		// STRING it parses to float (empty ⇒ use the global threshold), and — unlike
+		// the fields above — the webapi genuinely applies it. This is the knob for a
+		// single noisy frequency (e.g. a data beacon idling over the group
+		// threshold) without deafening the whole scan group.
+		if ch.ScanThresholdDB != 0 {
+			f["threshold"] = fmt.Sprintf("%d", ch.ScanThresholdDB)
+		}
+		freqs = append(freqs, f)
 	}
 	return map[string]interface{}{
 		"channel":           channelRef, // forward-compat; ignored by current SDRangel webapi

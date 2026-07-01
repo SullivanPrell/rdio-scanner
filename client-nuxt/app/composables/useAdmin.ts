@@ -75,6 +75,10 @@ export interface BridgeChannel {
   // Include this channel in its device set's Frequency Scanner (effective only when
   // the device set is scanner-enabled). User-set.
   scan?: boolean
+  // Scanner detection threshold override (dB) for this frequency only;
+  // 0 = auto (group squelch + 10 dB). Detection sits above the capture squelch so
+  // ambient carriers idling a few dB over the noise floor don't park the scanner.
+  scanThresholdDb?: number
   // SDRangel channel index of the FreqScanner driving this scan channel — set by
   // provisioning. Carried through saves so scan mode survives a config round-trip;
   // not user-editable.
