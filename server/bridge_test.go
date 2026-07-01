@@ -11,6 +11,10 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -341,6 +345,89 @@ func TestPCMDurationMs(t *testing.T) {
 	for _, c := range cases {
 		if got := pcmDurationMs(c.bytes, c.rate); got != c.want {
 			t.Errorf("pcmDurationMs(%d, %d) = %d, want %d", c.bytes, c.rate, got, c.want)
+		}
+	}
+}
+
+// The FreqScanner can't mute a UDPSink between parks (its mute uses the audioMute
+// settings key, which UDPSink lacks), so the shared sink streams sweep noise on
+// every device retune. resolveScanLabel must return keep=false when the scanner is
+// verifiably sweeping (scanState < WAIT_FOR_END_TX), keep=true with the max-power
+// label when parked, and keep=true (fallback label) when the report is unreachable
+// — a real park must never be dropped on a REST hiccup.
+func TestResolveScanLabel_SweepNoiseVsParked(t *testing.T) {
+	state := freqScannerStateScanning
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"FreqScannerReport":{"channelSampleRate":150000,"scanState":%d,"channelState":[`+
+			`{"frequency":147150000,"power":-43.5},{"frequency":146880000,"power":-57.0}]}}`, state)
+	}))
+	defer srv.Close()
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	b := &Bridge{Controller: &Controller{Provision: &provisionJob{}, Logs: &Logs{}}}
+	g := &bridgeScanGroup{
+		deviceSetIndex:      0,
+		scannerChannelIndex: 1,
+		label:               "scan test",
+		lead:                BridgeChannelConfig{SystemRef: 1, TalkgroupRef: 1, FrequencyHz: 444000000, Label: "lead"},
+		byFreq: map[uint]BridgeChannelConfig{
+			147150000: {SystemRef: 1, TalkgroupRef: 4, FrequencyHz: 147150000, Label: "W9HSY"},
+			146880000: {SystemRef: 1, TalkgroupRef: 22, FrequencyHz: 146880000, Label: "WR9ABE"},
+		},
+	}
+	client := newSDRangelClient(u.Hostname(), uint(port))
+
+	// Sweeping: audio on the sink is sweep noise — keep must be false.
+	if _, keep := b.resolveScanLabel(g, client); keep {
+		t.Errorf("scanState=%d (sweeping): keep = true, want false", freqScannerStateScanning)
+	}
+
+	// Parked: keep, labeled by the strongest scanned frequency.
+	state = freqScannerStateWaitForEndTx
+	lbl, keep := b.resolveScanLabel(g, client)
+	if !keep {
+		t.Errorf("scanState=%d (parked): keep = false, want true", freqScannerStateWaitForEndTx)
+	}
+	if lbl.talkgroupRef != 4 {
+		t.Errorf("parked label tg = %d, want 4 (max-power frequency)", lbl.talkgroupRef)
+	}
+
+	// Retransmission wait is still parked.
+	state = freqScannerStateWaitRetransmit
+	if _, keep := b.resolveScanLabel(g, client); !keep {
+		t.Errorf("scanState=%d (wait-retransmit): keep = false, want true", freqScannerStateWaitRetransmit)
+	}
+
+	// Report unreachable: conservative keep with the lead fallback label.
+	dead := newSDRangelClient("127.0.0.1", 1) // nothing listens on port 1
+	lbl, keep = b.resolveScanLabel(g, dead)
+	if !keep || lbl.talkgroupRef != g.lead.TalkgroupRef {
+		t.Errorf("unreachable report: (tg=%d, keep=%v), want lead tg=%d keep=true", lbl.talkgroupRef, keep, g.lead.TalkgroupRef)
+	}
+}
+
+// parked() maps the FreqScanner state machine: WAIT_FOR_END_TX and later mean the
+// paired sink is tuned to a detected transmission; anything earlier is idle/sweep.
+func TestFreqScannerReportParked(t *testing.T) {
+	for state, want := range map[int]bool{
+		freqScannerStateIdle:           false,
+		freqScannerStateStartScan:      false,
+		freqScannerStateScanning:       false,
+		freqScannerStateWaitForEndTx:   true,
+		freqScannerStateWaitRetransmit: true,
+		freqScannerStateWaitRxTime:     true,
+	} {
+		r := &sdrangelFreqScannerReport{}
+		r.Report.ScanState = state
+		if got := r.parked(); got != want {
+			t.Errorf("parked() with scanState=%d = %v, want %v", state, got, want)
 		}
 	}
 }

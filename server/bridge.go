@@ -435,7 +435,7 @@ func (b *Bridge) monitorChannel(ctx context.Context, cfg BridgeChannelConfig) {
 		sampleRate = 8000
 	}
 	fixed := callLabel{systemRef: cfg.SystemRef, talkgroupRef: cfg.TalkgroupRef, frequencyHz: cfg.FrequencyHz, label: cfg.Label}
-	b.runMonitor(ctx, cfg.UdpPort, sampleRate, cfg.Label, func() callLabel { return fixed })
+	b.runMonitor(ctx, cfg.UdpPort, sampleRate, cfg.Label, func() (callLabel, bool) { return fixed, true })
 }
 
 // monitorScanGroup runs one device set's scan group: it binds the shared UDPSink
@@ -449,31 +449,37 @@ func (b *Bridge) monitorScanGroup(ctx context.Context, g *bridgeScanGroup) {
 	}
 	opts := b.Controller.Options
 	client := newSDRangelClient(opts.BridgeHost, opts.BridgePort)
-	b.runMonitor(ctx, g.udpPort, sampleRate, g.label, func() callLabel { return b.resolveScanLabel(g, client) })
+	b.runMonitor(ctx, g.udpPort, sampleRate, g.label, func() (callLabel, bool) { return b.resolveScanLabel(g, client) })
 }
 
 // resolveScanLabel asks the FreqScanner which frequency it's parked on and maps it
-// back to the matching scan channel. Called once per call, when the recording opens
-// (the scanner parks before audio flows, so the report is settled). It must NOT
-// probe SDRangel while a provision runs — a concurrent /report GET races the
-// reconstructing main thread — so during provisioning, and on any failure or
-// no-match, it falls back to the group's lead-channel label.
-func (b *Bridge) resolveScanLabel(g *bridgeScanGroup, client *sdrangelClient) callLabel {
+// back to the matching scan channel. Called when a recording opens, and again when
+// one that opened unparked closes (see runMonitor). The second return value is the
+// KEEP verdict: false means the scanner was verifiably mid-sweep (report reached,
+// scanState below parked) — the sink audio is sweep noise, because SDRangel can't
+// mute a UDPSink between parks (see the freqScannerState* doc) and the sink streams
+// whatever crosses its offset on every retune of the sweep. Everything uncertain —
+// provision running, report unreachable — keeps the call (fallback label): a real
+// park must never be dropped on a REST hiccup.
+func (b *Bridge) resolveScanLabel(g *bridgeScanGroup, client *sdrangelClient) (callLabel, bool) {
 	fb := callLabel{systemRef: g.lead.SystemRef, talkgroupRef: g.lead.TalkgroupRef, frequencyHz: g.lead.FrequencyHz, label: g.lead.Label}
 	if b.Controller.Provision.isRunning() {
-		return fb
+		return fb, true
 	}
 	var rep sdrangelFreqScannerReport
 	if err := client.getJSON(fmt.Sprintf("/deviceset/%d/channel/%d/report", g.deviceSetIndex, g.scannerChannelIndex), &rep); err != nil {
 		b.Controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("bridge: %s: scanner report unavailable, labeling as %q: %v", g.label, g.lead.Label, err))
-		return fb
+		return fb, true
+	}
+	if !rep.parked() {
+		return fb, false
 	}
 	freq, ok := rep.activeFrequency()
 	if !ok {
-		return fb
+		return fb, true
 	}
 	if ch, ok := g.byFreq[uint(freq)]; ok {
-		return callLabel{systemRef: ch.SystemRef, talkgroupRef: ch.TalkgroupRef, frequencyHz: ch.FrequencyHz, label: ch.Label}
+		return callLabel{systemRef: ch.SystemRef, talkgroupRef: ch.TalkgroupRef, frequencyHz: ch.FrequencyHz, label: ch.Label}, true
 	}
 	// Nearest configured frequency within tolerance, to ride out report rounding.
 	var best BridgeChannelConfig
@@ -488,19 +494,24 @@ func (b *Bridge) resolveScanLabel(g *bridgeScanGroup, client *sdrangelClient) ca
 		}
 	}
 	if bestDiff <= int64(bridgeScanFreqTolerance) {
-		return callLabel{systemRef: best.SystemRef, talkgroupRef: best.TalkgroupRef, frequencyHz: best.FrequencyHz, label: best.Label}
+		return callLabel{systemRef: best.SystemRef, talkgroupRef: best.TalkgroupRef, frequencyHz: best.FrequencyHz, label: best.Label}, true
 	}
 	b.Controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("bridge: %s: active freq %d Hz matched no scan channel, labeling as %q", g.label, freq, g.lead.Label))
-	return fb
+	return fb, true
 }
 
 // runMonitor binds udpPort, segments the S16LE PCM stream into calls, and submits
-// each one. resolve is invoked once when a recording opens to decide its label
-// (static for a fixed channel, live-resolved for a scan group). logLabel names the
-// stream in diagnostics.
+// each one. resolve is invoked when a recording opens to decide its label and KEEP
+// verdict (static+keep for a fixed channel, live-resolved for a scan group). A
+// recording that opens with keep=false — the scan group's sink was streaming while
+// the scanner swept, so the audio is sweep noise — is re-resolved when it closes:
+// a real park can begin while a noise burst is still open (no squelch gap, the two
+// merge into one recording), and by close the scanner is parked and the report
+// names the frequency. Only when BOTH looks say "not parked" is the call dropped.
+// logLabel names the stream in diagnostics.
 // The caller (monitorChannel / monitorScanGroup) owns b.wg.Done(); runMonitor
 // must not signal it or Stop()'s WaitGroup would go negative.
-func (b *Bridge) runMonitor(ctx context.Context, udpPort, sampleRate int, logLabel string, resolve func() callLabel) {
+func (b *Bridge) runMonitor(ctx context.Context, udpPort, sampleRate int, logLabel string, resolve func() (callLabel, bool)) {
 	udpAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("0.0.0.0:%d", udpPort))
 	if err != nil {
 		b.Controller.Logs.LogEvent(LogLevelError, fmt.Sprintf("bridge: %s: udp resolve: %v", logLabel, err))
@@ -524,11 +535,28 @@ func (b *Bridge) runMonitor(ctx context.Context, udpPort, sampleRate int, logLab
 
 	seg := &callSegmenter{hangTime: bridgeHangTime, maxDur: bridgeMaxCallDur}
 
-	submit := func(pcm []byte, start time.Time, lbl callLabel) {
+	// Sweep-noise discards happen at the sweep cadence (one per device retune, a
+	// few per minute) — log the first few individually, then only milestones, so
+	// the behavior is observable without flooding the journal and the logs table.
+	var sweepDiscards int64
+
+	submit := func(pcm []byte, start time.Time, lbl callLabel, keep bool) {
 		durMs := pcmDurationMs(len(pcm), sampleRate)
 		if time.Duration(durMs)*time.Millisecond < bridgeMinCallDur {
 			b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: discarded %dms squelch flap (tg=%d, min %dms)", logLabel, durMs, lbl.talkgroupRef, bridgeMinCallDur/time.Millisecond))
 			return
+		}
+		if !keep {
+			// Opened while the scanner swept — check whether a park has begun since.
+			lbl2, keep2 := resolve()
+			if !keep2 {
+				sweepDiscards++
+				if sweepDiscards <= 3 || sweepDiscards%50 == 0 {
+					b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: discarded %dms sweep-noise burst (scanner not parked; %d total)", logLabel, durMs, sweepDiscards))
+				}
+				return
+			}
+			lbl = lbl2
 		}
 		call := NewCall()
 		call.Audio = bridgeBuildWAV(pcm, sampleRate)
@@ -662,11 +690,12 @@ func (b *Bridge) runMonitor(ctx context.Context, udpPort, sampleRate int, logLab
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 
-	// pending holds the label resolved when the current recording opened; it's used
-	// when that recording finishes (feed boundary or watchdog tick). A recording
-	// never opens and closes in the same feed (open sets lastAudio=now), so pending
-	// is always set before it's consumed.
+	// pending holds the label + keep verdict resolved when the current recording
+	// opened; both are used when that recording finishes (feed boundary or watchdog
+	// tick). A recording never opens and closes in the same feed (open sets
+	// lastAudio=now), so pending is always set before it's consumed.
 	var pending callLabel
+	pendingKeep := true
 	for {
 		select {
 		case <-ctx.Done():
@@ -678,15 +707,17 @@ func (b *Bridge) runMonitor(ctx context.Context, udpPort, sampleRate int, logLab
 			}
 			was := seg.recording
 			if pcm, start, done := seg.feed(chunk, time.Now()); done {
-				submit(pcm, start, pending)
+				submit(pcm, start, pending, pendingKeep)
 			} else if !was && seg.recording {
-				pending = resolve()
-				b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: recording started (sys=%d tg=%d)", logLabel, pending.systemRef, pending.talkgroupRef))
+				pending, pendingKeep = resolve()
+				if pendingKeep {
+					b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: recording started (sys=%d tg=%d)", logLabel, pending.systemRef, pending.talkgroupRef))
+				}
 			}
 
 		case <-ticker.C:
 			if pcm, start, done := seg.tick(time.Now()); done {
-				submit(pcm, start, pending)
+				submit(pcm, start, pending, pendingKeep)
 			}
 		}
 	}

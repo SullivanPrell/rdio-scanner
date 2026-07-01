@@ -78,11 +78,21 @@ type SDRangelScannerFreq struct {
 	Label       string  `json:"label,omitempty"`
 }
 
-// FreqScanner scanState values (SDRangel FreqScannerReport.scanState).
+// FreqScanner scanState values (FreqScanner::State in the SDRangel source). States
+// from WAIT_FOR_END_TX up mean the scanner has parked its paired sink on an active
+// frequency; below that it is idle or sweeping. The distinction matters because
+// SDRangel's scanner mutes its paired channel while sweeping via the `audioMute`
+// settings key — which UDPSink doesn't have (it uses `channelMute`), so for our
+// sink the mute is a silent no-op and the sink keeps streaming whatever spectrum
+// crosses its offset on every device retune of the sweep. The bridge must therefore
+// treat audio arriving while unparked as sweep noise, not calls (resolveScanLabel).
 const (
-	freqScannerStateIdle         = 0
-	freqScannerStateScanning     = 2
-	freqScannerStateWaitForEndTx = 3 // parked on an active transmission
+	freqScannerStateIdle           = 0
+	freqScannerStateStartScan      = 1
+	freqScannerStateScanning       = 2 // SCAN_FOR_MAX_POWER
+	freqScannerStateWaitForEndTx   = 3 // parked, signal present
+	freqScannerStateWaitRetransmit = 4 // parked, signal dropped, waiting for retransmission
+	freqScannerStateWaitRxTime     = 5 // parked, waiting out the minimum receive time
 )
 
 // sdrangelFreqScannerReport is GET /deviceset/{i}/channel/{j}/report for a
@@ -113,6 +123,12 @@ func (r *sdrangelFreqScannerReport) activeFrequency() (int64, bool) {
 		}
 	}
 	return bestFreq, have
+}
+
+// parked reports whether the scanner is parked on an active frequency — i.e. its
+// paired sink is tuned to a detected transmission rather than riding a sweep.
+func (r *sdrangelFreqScannerReport) parked() bool {
+	return r.Report.ScanState >= freqScannerStateWaitForEndTx
 }
 
 // SDRangelDeviceSetConfig describes one RTL-SDR dongle and its desired center frequency.
@@ -477,8 +493,10 @@ func (c *sdrangelClient) scannerStatuses(channels []BridgeChannelConfig) []SDRan
 			})
 		}
 		// Only surface an "active" frequency when parked on a transmission; while
-		// scanning, the strongest bin is just noise, not a call.
-		if rep.Report.ScanState == freqScannerStateWaitForEndTx {
+		// scanning, the strongest bin is just noise, not a call. parked() covers
+		// WAIT_FOR_END_TX and the retransmission/rx-time waits — the sink stays
+		// tuned to the active frequency through all of them.
+		if rep.parked() {
 			if f, ok := rep.activeFrequency(); ok {
 				s.ActiveFreqHz = f
 			}
