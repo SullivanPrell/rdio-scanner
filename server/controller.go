@@ -57,6 +57,8 @@ type Controller struct {
 	Tags             *Tags
 	clientEvents     chan *clientEvent
 	Ingest           chan *Call
+	ingestStop       chan struct{}
+	ingestDone       chan struct{}
 	running          bool
 }
 
@@ -85,6 +87,8 @@ func NewController(config *Config) *Controller {
 		Tags:         NewTags(),
 		clientEvents: make(chan *clientEvent, 8192),
 		Ingest:       make(chan *Call, 64),
+		ingestStop:   make(chan struct{}),
+		ingestDone:   make(chan struct{}),
 	}
 
 	controller.Admin = NewAdmin(controller)
@@ -202,7 +206,13 @@ func (controller *Controller) IngestCall(call *Call) {
 			call.System.Label = fmt.Sprintf("System %v", call.System.SystemRef)
 		}
 
+		// Guard the append with the same mutex Systems readers take
+		// (GetSystemById/ByRef/ByLabel, EmitConfig, admin GetConfig, Search).
+		// This ingest goroutine is the only writer, but an unlocked append can
+		// reallocate/reassign List out from under a concurrent locked reader.
+		controller.Systems.mutex.Lock()
 		controller.Systems.List = append(controller.Systems.List, call.System)
+		controller.Systems.mutex.Unlock()
 	}
 
 	if controller.Options.AutoPopulate || (call.System != nil && call.System.AutoPopulate) {
@@ -225,7 +235,11 @@ func (controller *Controller) IngestCall(call *Call) {
 
 			for _, groupLabel := range groupLabels {
 				if _, ok := controller.Groups.GetGroupByLabel(groupLabel); !ok {
+					// Guard against concurrent Groups readers; the mutex is
+					// released before Write/Read below (which lock it themselves).
+					controller.Groups.mutex.Lock()
 					controller.Groups.List = append(controller.Groups.List, &Group{Label: groupLabel})
+					controller.Groups.mutex.Unlock()
 
 					if err := controller.Groups.Write(controller.Database); err != nil {
 						logError(err)
@@ -246,7 +260,11 @@ func (controller *Controller) IngestCall(call *Call) {
 			}
 
 			if _, ok := controller.Tags.GetTagByLabel(tagLabel); !ok {
+				// Guard against concurrent Tags readers; the mutex is released
+				// before Write/Read below (which lock it themselves).
+				controller.Tags.mutex.Lock()
 				controller.Tags.List = append(controller.Tags.List, &Tag{Label: tagLabel})
+				controller.Tags.mutex.Unlock()
 
 				if err := controller.Tags.Write(controller.Database); err != nil {
 					logError(err)
@@ -283,7 +301,11 @@ func (controller *Controller) IngestCall(call *Call) {
 				TagId:        tagId,
 			}
 
+			// Guard the append with the same per-system mutex Talkgroups
+			// readers take (GetTalkgroupById/ByRef/ByLabel, EmitConfig, Search).
+			call.System.Talkgroups.mutex.Lock()
 			call.System.Talkgroups.List = append(call.System.Talkgroups.List, call.Talkgroup)
+			call.System.Talkgroups.mutex.Unlock()
 		}
 
 		units := NewUnits()
@@ -325,7 +347,14 @@ func (controller *Controller) IngestCall(call *Call) {
 			return
 
 		} else {
-			call.Talkgroup, _ = call.System.Talkgroups.GetTalkgroupByRef(call.Talkgroup.TalkgroupRef)
+			// call.Talkgroup can still be nil here when populated was set only by
+			// units.Merge (or a new system) and no talkgroup was auto-created —
+			// e.g. a call that passed IsValid via TalkgroupId/Label but whose
+			// Meta.TalkgroupRef is 0. Guard the deref; the nil check below then
+			// drops the call cleanly instead of crashing the ingest goroutine.
+			if call.Talkgroup != nil {
+				call.Talkgroup, _ = call.System.Talkgroups.GetTalkgroupByRef(call.Talkgroup.TalkgroupRef)
+			}
 
 			if call.Talkgroup == nil {
 				return
@@ -598,8 +627,25 @@ func (controller *Controller) Start() error {
 
 	go func() {
 		for {
-			call := <-controller.Ingest
-			controller.IngestCall(call)
+			select {
+			case call := <-controller.Ingest:
+				controller.IngestCall(call)
+
+			case <-controller.ingestStop:
+				// Terminate() asked us to stop. Recorders are acked as soon as a
+				// call is queued onto Ingest (api.go), but the durable WriteCall
+				// happens here — so drain everything still buffered before we let
+				// shutdown close the database, then signal completion.
+				for {
+					select {
+					case call := <-controller.Ingest:
+						controller.IngestCall(call)
+					default:
+						close(controller.ingestDone)
+						return
+					}
+				}
+			}
 		}
 	}()
 
@@ -656,6 +702,21 @@ func (controller *Controller) Terminate() {
 	// after a restart" trap. systemd/docker stop them on a genuine system shutdown.
 	controller.ServiceManager.StopOwned(controller.Options.SDRangelContainerName, controller.Options.SDRangelBinaryPath)
 	controller.TRServiceManager.StopOwned(controller.Options.TrunkRecorderContainerName)
+
+	// Producers (dirwatch, SDRangel/trunk-recorder via the bridge) are stopped
+	// above; now stop the ingest goroutine and let it drain any calls still
+	// buffered/in-flight — those were already acked to their recorder but their
+	// durable WriteCall hasn't run yet — before we close the database. Bounded so
+	// a wedged IngestCall can't hang shutdown forever. (Uploads still arriving on
+	// the HTTP API can't be quiesced from here; that would need main.go to stop
+	// the listener first.)
+	if controller.ingestStop != nil {
+		close(controller.ingestStop)
+		select {
+		case <-controller.ingestDone:
+		case <-time.After(5 * time.Second):
+		}
+	}
 
 	if err := controller.Database.Sql.Close(); err != nil {
 		log.Println(err)

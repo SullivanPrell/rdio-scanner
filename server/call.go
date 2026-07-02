@@ -106,7 +106,11 @@ func (call *Call) IsValid() (ok bool, err error) {
 		ok = false
 		err = errors.New("no audio")
 
-	} else if call.Timestamp.UnixMilli() == 0 {
+	} else if call.Timestamp.UnixMilli() <= 0 {
+		// The Go zero time.Time{} yields UnixMilli() == -62135596800000, not 0,
+		// so a missing/unparseable dateTime (parsers leave Timestamp at its zero
+		// value) must be rejected via <= 0, not == 0. <= 0 also still rejects the
+		// pathological epoch-0 the previous == 0 guard caught.
 		ok = false
 		err = errors.New("no timestamp")
 
@@ -332,6 +336,10 @@ func (calls *Calls) GetCall(id uint64) (*Call, error) {
 		call.Frequencies = append(call.Frequencies, f)
 	}
 
+	if err == nil {
+		err = rows.Err()
+	}
+
 	rows.Close()
 
 	if err != nil {
@@ -355,7 +363,16 @@ func (calls *Calls) GetCall(id uint64) (*Call, error) {
 		call.Units = append(call.Units, u)
 	}
 
+	if err == nil {
+		err = rows.Err()
+	}
+
 	rows.Close()
+
+	if err != nil {
+		tx.Rollback()
+		return nil, formatError(err, query)
+	}
 
 	if err = tx.Commit(); err != nil {
 		tx.Rollback()
@@ -552,6 +569,10 @@ func (calls *Calls) Search(searchOptions *CallsSearchOptions, client *Client) (*
 		searchResult.Timestamp = time.UnixMilli(timestamp)
 
 		searchResults.Results = append(searchResults.Results, searchResult)
+	}
+
+	if err == nil {
+		err = rows.Err()
 	}
 
 	rows.Close()
