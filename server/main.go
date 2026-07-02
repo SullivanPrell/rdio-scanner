@@ -336,3 +336,18 @@ func GetRemoteAddr(r *http.Request) string {
 
 	return r.RemoteAddr
 }
+
+// GetRemoteIP returns the IP of the immediate TCP peer (r.RemoteAddr), ignoring
+// any client-supplied X-Forwarded-For header. Security-sensitive decisions such
+// as the admin login brute-force limiter must key on this rather than
+// GetRemoteAddr: with no trusted reverse proxy in front, an attacker can forge a
+// distinct X-Forwarded-For per request and get a fresh limiter bucket each time.
+func GetRemoteIP(r *http.Request) string {
+	re := regexp.MustCompile(`(.+):.*$`)
+
+	if ip := re.ReplaceAllString(r.RemoteAddr, "$1"); len(ip) > 0 {
+		return ip
+	}
+
+	return r.RemoteAddr
+}

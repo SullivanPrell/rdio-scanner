@@ -36,6 +36,11 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+const (
+	adminTokenTTL  = 7 * 24 * time.Hour
+	adminWriteWait = 10 * time.Second
+)
+
 type Admin struct {
 	Attempts         AdminLoginAttempts
 	AttemptsMax      uint
@@ -47,6 +52,7 @@ type Admin struct {
 	Tokens           []string
 	Unregister       chan *websocket.Conn
 	mutex            sync.Mutex
+	authMutex        sync.Mutex
 	running          bool
 }
 
@@ -95,9 +101,7 @@ func (admin *Admin) AlertsHandler(w http.ResponseWriter, r *http.Request) {
 
 func (admin *Admin) BroadcastConfig() {
 	b, _ := json.Marshal(map[string]string{"event": "config_changed"})
-	for conn := range admin.Conns {
-		conn.WriteMessage(websocket.TextMessage, b)
-	}
+	admin.Broadcast <- &b
 }
 
 func (admin *Admin) ChangePassword(currentPassword any, newPassword string) error {
@@ -488,7 +492,10 @@ func (admin *Admin) LoginHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		remoteAddr := GetRemoteAddr(r)
+		remoteAddr := GetRemoteIP(r)
+
+		admin.authMutex.Lock()
+		defer admin.authMutex.Unlock()
 
 		attempt := admin.Attempts[remoteAddr]
 
@@ -536,7 +543,12 @@ func (admin *Admin) LoginHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{ID: id.String()})
+		now := time.Now()
+		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
+			ID:        id.String(),
+			IssuedAt:  jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(now.Add(adminTokenTTL)),
+		})
 		sToken, err := token.SignedString([]byte(admin.Controller.Options.secret))
 
 		if err != nil {
@@ -581,11 +593,14 @@ func (admin *Admin) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
+		admin.authMutex.Lock()
 		for k, v := range admin.Tokens {
 			if v == t {
 				admin.Tokens = append(admin.Tokens[:k], admin.Tokens[k+1:]...)
+				break
 			}
 		}
+		admin.authMutex.Unlock()
 		w.WriteHeader(http.StatusOK)
 
 	default:
@@ -815,11 +830,16 @@ func (admin *Admin) Start() error {
 					return
 				}
 
+				var dead []*websocket.Conn
 				for conn := range admin.Conns {
-					err := conn.WriteMessage(websocket.TextMessage, *data)
-					if err != nil {
-						admin.Unregister <- conn
+					conn.SetWriteDeadline(time.Now().Add(adminWriteWait))
+					if err := conn.WriteMessage(websocket.TextMessage, *data); err != nil {
+						dead = append(dead, conn)
 					}
+				}
+				for _, conn := range dead {
+					delete(admin.Conns, conn)
+					conn.Close()
 				}
 
 			case conn := <-admin.Register:
@@ -933,5 +953,22 @@ func (admin *Admin) ValidateToken(sToken string) bool {
 		return false
 	}
 
-	return token.Valid
+	if !token.Valid {
+		return false
+	}
+
+	return admin.hasToken(sToken)
+}
+
+func (admin *Admin) hasToken(sToken string) bool {
+	admin.authMutex.Lock()
+	defer admin.authMutex.Unlock()
+
+	for _, t := range admin.Tokens {
+		if t == sToken {
+			return true
+		}
+	}
+
+	return false
 }
