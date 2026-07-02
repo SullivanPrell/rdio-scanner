@@ -55,11 +55,12 @@ type SDRangelChannel struct {
 
 // SDRangelStatus is returned by the status endpoint.
 type SDRangelStatus struct {
-	Connected  bool                `json:"connected"`
-	Version    string              `json:"version,omitempty"`
-	OS         string              `json:"os,omitempty"`
-	DeviceSets []SDRangelDeviceSet `json:"deviceSets,omitempty"`
-	Scanners   []SDRangelScanner   `json:"scanners,omitempty"`
+	Connected    bool                `json:"connected"`
+	Provisioning bool                `json:"provisioning,omitempty"` // a provision is in flight — status is unprobed to avoid racing SDRangel's reconstructing main thread
+	Version      string              `json:"version,omitempty"`
+	OS           string              `json:"os,omitempty"`
+	DeviceSets   []SDRangelDeviceSet `json:"deviceSets,omitempty"`
+	Scanners     []SDRangelScanner   `json:"scanners,omitempty"`
 }
 
 // SDRangelScanner is the live state of one provisioned FreqScanner, joined back to
@@ -284,7 +285,10 @@ func (c *sdrangelClient) setDevice(ctx context.Context, dsIndex int, hwType stri
 			resp.Body.Close()
 			if ack.HwType == hwType {
 				settle(ctx, "device assignment", 45*time.Second) // blind-wait the re-plan, don't probe
-				return nil                                       // the set echoed the device back → assignment took
+				if ctx.Err() != nil {
+					return ctx.Err() // cancelled during the settle — don't report success and race the caller's next REST call
+				}
+				return nil // the set echoed the device back → assignment took
 			}
 			if ack.Message != "" {
 				last = ack.Message
@@ -824,6 +828,12 @@ func (c *sdrangelClient) provision(ctx context.Context, dsCfgs []SDRangelDeviceS
 		}
 	}
 
+	// Device sets skipped (missing/unresolvable serial) or whose device assignment
+	// failed: clearChannels never ran on them, so their channels must NOT be
+	// provisioned — a UDPSink POST + settings PATCH would land on stale channels
+	// (clobbering the wrong one) and the run must not be recorded as a success.
+	failedDS := map[int]bool{}
+
 	// Ensure required device sets exist and are configured
 	for _, dsCfg := range dsCfgs {
 		if cancelled() {
@@ -849,6 +859,9 @@ func (c *sdrangelClient) provision(ctx context.Context, dsCfgs []SDRangelDeviceS
 			// creating several sets back-to-back (a gap in device-set indices) without
 			// settling between them would race that same construction and crash it.
 			settle(ctx, "device-set construction", 90*time.Second)
+			if cancelled() {
+				return result, updated // don't POST another /deviceset back-to-back into a cancel — that races the construction and crashes the REST listener
+			}
 		}
 
 		// Assign the sampling device and confirm it took (see setDevice). When the
@@ -866,6 +879,7 @@ func (c *sdrangelClient) provision(ctx context.Context, dsCfgs []SDRangelDeviceS
 				// its channels stay unprovisioned (no audio) until the serial is fixed, and
 				// the next provision/auto-provision retries. Far safer than a wrong guess.
 				add(fmt.Sprintf("error: dongle serial %s is not present in SDRangel — skipping device set %d (its channels won't be provisioned). The dongle is unplugged, has a different serial, or trunk-recorder is holding it. Re-detect dongles or fix the serial, then re-provision.", dsCfg.Serial, dsCfg.Index))
+				failedDS[dsCfg.Index] = true
 				continue
 			}
 		} else {
@@ -875,7 +889,11 @@ func (c *sdrangelClient) provision(ctx context.Context, dsCfgs []SDRangelDeviceS
 			add(fmt.Sprintf("warning: device set %d has no dongle serial — using positional sequence %d. Set a unique serial (rtl_eeprom) so SDRangel and trunk-recorder don't grab the same dongle.", dsCfg.Index, dsCfg.Sequence))
 		}
 		if err := c.setDevice(ctx, dsCfg.Index, dsCfg.HwType, seq); err != nil {
+			if cancelled() {
+				return result, updated
+			}
 			add(fmt.Sprintf("failed to assign device %d (%s): %v", dsCfg.Index, dsCfg.HwType, err))
+			failedDS[dsCfg.Index] = true
 			continue
 		}
 
@@ -947,6 +965,9 @@ func (c *sdrangelClient) provision(ctx context.Context, dsCfgs []SDRangelDeviceS
 	scanDSOrder := []int{}           // device-set indices with a scan group, first-seen order
 	for i := range updated {
 		ch := updated[i]
+		if failedDS[ch.DeviceSetIndex] {
+			continue // its device set was skipped/failed above — not provisioned, so don't scan-group it
+		}
 		if ch.Scan && scanEnabledDS[ch.DeviceSetIndex] {
 			if _, seen := scanGroupByDS[ch.DeviceSetIndex]; !seen {
 				scanDSOrder = append(scanDSOrder, ch.DeviceSetIndex)
@@ -977,6 +998,11 @@ func (c *sdrangelClient) provision(ctx context.Context, dsCfgs []SDRangelDeviceS
 		// it never got one). Skip — POSTing to /deviceset/-1/channel would just error.
 		// It stays in `updated` with DeviceSetIndex −1 so the UI still shows it parked.
 		if ch.DeviceSetIndex < 0 {
+			continue
+		}
+		// Its device set was skipped/failed above (never cleared, no device assigned):
+		// provisioning onto it would clobber a stale channel and stream nowhere. Skip.
+		if failedDS[ch.DeviceSetIndex] {
 			continue
 		}
 
@@ -1015,6 +1041,9 @@ func (c *sdrangelClient) provision(ctx context.Context, dsCfgs []SDRangelDeviceS
 		// Blind-wait for it to go idle, THEN apply the real settings — verified on
 		// the Pi: the same PATCH applies cleanly to an idle channel.
 		settle(ctx, "channel creation", 10*time.Second)
+		if cancelled() {
+			return result, updated
+		}
 
 		if err := c.patchJSON(fmt.Sprintf("/deviceset/%d/channel/%d/settings", ch.DeviceSetIndex, chIdx), map[string]interface{}{
 			"channelType":     "UDPSink",
@@ -1097,6 +1126,9 @@ func (c *sdrangelClient) provision(ctx context.Context, dsCfgs []SDRangelDeviceS
 		sinkIdx := chIdxByDS[ds]
 		chIdxByDS[ds]++
 		settle(ctx, "channel creation", 10*time.Second)
+		if cancelled() {
+			return result, updated
+		}
 		if err := c.patchJSON(fmt.Sprintf("/deviceset/%d/channel/%d/settings", ds, sinkIdx), map[string]interface{}{
 			"channelType":     "UDPSink",
 			"direction":       0,
@@ -1105,6 +1137,9 @@ func (c *sdrangelClient) provision(ctx context.Context, dsCfgs []SDRangelDeviceS
 			add(fmt.Sprintf("warning: failed to configure scanner UDPSink for device set %d: %v", ds, err))
 		}
 		settle(ctx, "channel settings", 8*time.Second)
+		if cancelled() {
+			return result, updated
+		}
 
 		// FreqScanner that drives the shared UDPSink ("R{ds}:{sinkIdx}").
 		if err := c.postJSON(fmt.Sprintf("/deviceset/%d/channel", ds), map[string]interface{}{
@@ -1119,6 +1154,9 @@ func (c *sdrangelClient) provision(ctx context.Context, dsCfgs []SDRangelDeviceS
 		scannerIdx := chIdxByDS[ds]
 		chIdxByDS[ds]++
 		settle(ctx, "channel creation", 10*time.Second)
+		if cancelled() {
+			return result, updated
+		}
 		if err := c.patchJSON(fmt.Sprintf("/deviceset/%d/channel/%d/settings", ds, scannerIdx), map[string]interface{}{
 			"channelType":         "FreqScanner",
 			"direction":           0,
@@ -1127,6 +1165,9 @@ func (c *sdrangelClient) provision(ctx context.Context, dsCfgs []SDRangelDeviceS
 			add(fmt.Sprintf("warning: failed to configure FreqScanner for device set %d: %v", ds, err))
 		}
 		settle(ctx, "channel settings", 8*time.Second)
+		if cancelled() {
+			return result, updated
+		}
 
 		// Start the scanner running (it doesn't scan until told to).
 		if err := c.postJSON(fmt.Sprintf("/deviceset/%d/channel/%d/actions", ds, scannerIdx), map[string]interface{}{
@@ -1157,6 +1198,9 @@ func (c *sdrangelClient) provision(ctx context.Context, dsCfgs []SDRangelDeviceS
 
 	// Start all configured devices
 	for _, dsCfg := range dsCfgs {
+		if failedDS[dsCfg.Index] {
+			continue // skipped/failed above — no device assigned, so nothing to run
+		}
 		if err := c.postJSON(fmt.Sprintf("/deviceset/%d/device/run", dsCfg.Index), nil, nil); err != nil {
 			add(fmt.Sprintf("warning: failed to start device %d: %v", dsCfg.Index, err))
 		} else {
@@ -1223,10 +1267,12 @@ func (c *sdrangelClient) provision(ctx context.Context, dsCfgs []SDRangelDeviceS
 		return result, updated
 	}
 
-	// A failed scan-group POST leaves SDRangel mid-rebuilt; don't persist a partial
-	// scan provisioning. runProvisionJob skips the persist + bridge restart unless
-	// Success, so the old working config stays put and the operator can retry.
-	result.Success = !groupFailed
+	// A failed scan-group POST leaves SDRangel mid-rebuilt, and a skipped/failed device
+	// set (missing serial or a device-assign failure) leaves its channels unprovisioned
+	// on an uncleared set — either way this is a PARTIAL provision. Don't record it as a
+	// success: runProvisionJob skips the persist + bridge restart unless Success, so the
+	// old working config stays put and the operator can fix the dongle and retry.
+	result.Success = !groupFailed && len(failedDS) == 0
 	return result, updated
 }
 
@@ -1453,11 +1499,21 @@ func (admin *Admin) SDRangelStatusHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 	opts := admin.Controller.Options
+	// While a provision runs, do NOT touch SDRangel at all — not even getStatus's GET /
+	// and GET /devicesets. A provision serially reconstructs device sets/channels on
+	// SDRangel's single, non-thread-safe main thread; even a bare GET probe races that
+	// construction and can kill the REST listener (see settle()). Return a minimal
+	// status flagged provisioning so the UI shows "provisioning" instead of probing.
+	if admin.Controller.Provision.isRunning() {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(SDRangelStatus{Connected: true, Provisioning: true})
+		return
+	}
 	client := newSDRangelClient(opts.BridgeHost, opts.BridgePort)
 	status, _ := client.getStatus()
-	// Attach live scanner state, joined to the bridge config for per-frequency
-	// labels. Skip while a provision runs — a /report GET would race SDRangel's
-	// reconstructing main thread (see settle()).
+	// Attach live scanner state, joined to the bridge config for per-frequency labels.
+	// Re-check isRunning() (a provision may have started since the gate above): the
+	// heavier /report probes must never land inside a construction window.
 	if status.Connected && !admin.Controller.Provision.isRunning() {
 		status.Scanners = client.scannerStatuses(opts.BridgeChannels)
 	}
