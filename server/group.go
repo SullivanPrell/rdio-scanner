@@ -287,6 +287,10 @@ func (groups *Groups) Read(db *Database) error {
 		groups.List = append(groups.List, group)
 	}
 
+	if err == nil {
+		err = rows.Err()
+	}
+
 	rows.Close()
 
 	if err != nil {
@@ -370,13 +374,13 @@ func (groups *Groups) Write(db *Database) error {
 		}
 
 		if count == 0 {
-			query = fmt.Sprintf(`INSERT INTO "groups" ("alert", "label", "led", "order") VALUES ('%s', '%s', '%s', %d)`, group.Alert, escapeQuotes(group.Label), group.Led, group.Order)
+			query = fmt.Sprintf(`INSERT INTO "groups" ("alert", "label", "led", "order") VALUES ('%s', '%s', '%s', %d)`, escapeQuotes(group.Alert), escapeQuotes(group.Label), escapeQuotes(group.Led), group.Order)
 			if _, err = tx.Exec(query); err != nil {
 				break
 			}
 
 		} else {
-			query = fmt.Sprintf(`UPDATE "groups" SET "alert" = '%s', "label" = '%s', "led" = '%s', "order" = %d where "groupId" = %d`, group.Alert, escapeQuotes(group.Label), group.Led, group.Order, group.Id)
+			query = fmt.Sprintf(`UPDATE "groups" SET "alert" = '%s', "label" = '%s', "led" = '%s', "order" = %d where "groupId" = %d`, escapeQuotes(group.Alert), escapeQuotes(group.Label), escapeQuotes(group.Led), group.Order, group.Id)
 			if _, err = tx.Exec(query); err != nil {
 				break
 			}

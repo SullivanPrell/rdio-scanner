@@ -272,6 +272,10 @@ func (tags *Tags) Read(db *Database) error {
 		tags.List = append(tags.List, tag)
 	}
 
+	if err == nil {
+		err = rows.Err()
+	}
+
 	rows.Close()
 
 	if err != nil {
@@ -355,12 +359,12 @@ func (tags *Tags) Write(db *Database) error {
 		}
 
 		if count == 0 {
-			query = fmt.Sprintf(`INSERT INTO "tags" ("alert", "label", "led", "order") VALUES ('%s', '%s', '%s', %d)`, tag.Alert, escapeQuotes(tag.Label), tag.Led, tag.Order)
+			query = fmt.Sprintf(`INSERT INTO "tags" ("alert", "label", "led", "order") VALUES ('%s', '%s', '%s', %d)`, escapeQuotes(tag.Alert), escapeQuotes(tag.Label), escapeQuotes(tag.Led), tag.Order)
 			if _, err = tx.Exec(query); err != nil {
 				break
 			}
 		} else {
-			query = fmt.Sprintf(`UPDATE "tags" SET "alert" = '%s', "label" = '%s', "led" = '%s', "order" = %d WHERE "tagId" = %d`, tag.Alert, escapeQuotes(tag.Label), tag.Led, tag.Order, tag.Id)
+			query = fmt.Sprintf(`UPDATE "tags" SET "alert" = '%s', "label" = '%s', "led" = '%s', "order" = %d WHERE "tagId" = %d`, escapeQuotes(tag.Alert), escapeQuotes(tag.Label), escapeQuotes(tag.Led), tag.Order, tag.Id)
 			if _, err = tx.Exec(query); err != nil {
 				break
 			}

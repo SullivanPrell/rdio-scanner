@@ -454,6 +454,10 @@ func (systems *Systems) Read(db *Database) error {
 		systems.List = append(systems.List, system)
 	}
 
+	if err == nil {
+		err = rows.Err()
+	}
+
 	rows.Close()
 
 	if err != nil {
@@ -589,7 +593,7 @@ func (systems *Systems) Write(db *Database) error {
 		}
 
 		if count == 0 {
-			query = fmt.Sprintf(`INSERT INTO "systems" ("alert", "autoPopulate", "blacklists", "delay", "label", "led", "order", "systemRef", "type") VALUES ('%s', %t, '%s', %d, '%s', '%s', %d, %d, '%s')`, system.Alert, system.AutoPopulate, system.Blacklists, system.Delay, escapeQuotes(system.Label), system.Led, system.Order, system.SystemRef, system.Kind)
+			query = fmt.Sprintf(`INSERT INTO "systems" ("alert", "autoPopulate", "blacklists", "delay", "label", "led", "order", "systemRef", "type") VALUES ('%s', %t, '%s', %d, '%s', '%s', %d, %d, '%s')`, escapeQuotes(system.Alert), system.AutoPopulate, escapeQuotes(string(system.Blacklists)), system.Delay, escapeQuotes(system.Label), escapeQuotes(system.Led), system.Order, system.SystemRef, escapeQuotes(system.Kind))
 
 			if db.Config.DbType == DbTypePostgresql {
 				query = query + ` RETURNING "systemId"`
@@ -609,7 +613,7 @@ func (systems *Systems) Write(db *Database) error {
 			}
 
 		} else {
-			query = fmt.Sprintf(`UPDATE "systems" SET "alert" = '%s', "autoPopulate" = %t, "blacklists" = '%s', "delay" = %d, "label" = '%s', "led" = '%s', "order" = %d, "systemRef" = %d, "type" = '%s' WHERE "systemId" = %d`, system.Alert, system.AutoPopulate, system.Blacklists, system.Delay, escapeQuotes(system.Label), system.Led, system.Order, system.SystemRef, system.Kind, system.Id)
+			query = fmt.Sprintf(`UPDATE "systems" SET "alert" = '%s', "autoPopulate" = %t, "blacklists" = '%s', "delay" = %d, "label" = '%s', "led" = '%s', "order" = %d, "systemRef" = %d, "type" = '%s' WHERE "systemId" = %d`, escapeQuotes(system.Alert), system.AutoPopulate, escapeQuotes(string(system.Blacklists)), system.Delay, escapeQuotes(system.Label), escapeQuotes(system.Led), system.Order, system.SystemRef, escapeQuotes(system.Kind), system.Id)
 			if _, err = tx.Exec(query); err != nil {
 				break
 			}

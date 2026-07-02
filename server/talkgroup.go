@@ -274,6 +274,10 @@ func (talkgroups *Talkgroups) ReadTx(tx *sql.Tx, systemId uint64, dbType string)
 		talkgroups.List = append(talkgroups.List, talkgroup)
 	}
 
+	if err == nil {
+		err = rows.Err()
+	}
+
 	rows.Close()
 
 	if err != nil {
@@ -358,7 +362,7 @@ func (talkgroups *Talkgroups) WriteTx(tx *sql.Tx, systemId uint64, dbType string
 		}
 
 		if count == 0 {
-			query = fmt.Sprintf(`INSERT INTO "talkgroups" ("alert", "delay", "frequency", "label", "led", "name", "order", "systemId", "tagId", "talkgroupRef", "type") VALUES ('%s', %d, %d, '%s', '%s', '%s', %d, %d, %d, %d, '%s')`, talkgroup.Alert, talkgroup.Delay, talkgroup.Frequency, escapeQuotes(talkgroup.Label), talkgroup.Led, escapeQuotes(talkgroup.Name), talkgroup.Order, systemId, talkgroup.TagId, talkgroup.TalkgroupRef, talkgroup.Kind)
+			query = fmt.Sprintf(`INSERT INTO "talkgroups" ("alert", "delay", "frequency", "label", "led", "name", "order", "systemId", "tagId", "talkgroupRef", "type") VALUES ('%s', %d, %d, '%s', '%s', '%s', %d, %d, %d, %d, '%s')`, escapeQuotes(talkgroup.Alert), talkgroup.Delay, talkgroup.Frequency, escapeQuotes(talkgroup.Label), escapeQuotes(talkgroup.Led), escapeQuotes(talkgroup.Name), talkgroup.Order, systemId, talkgroup.TagId, talkgroup.TalkgroupRef, escapeQuotes(talkgroup.Kind))
 
 			if dbType == DbTypePostgresql {
 				query = query + ` RETURNING "talkgroupId"`
@@ -378,7 +382,7 @@ func (talkgroups *Talkgroups) WriteTx(tx *sql.Tx, systemId uint64, dbType string
 			}
 
 		} else {
-			query = fmt.Sprintf(`UPDATE "talkgroups" SET "alert" = '%s', "delay" = %d, "frequency" = %d, "label" = '%s', "led" = '%s', "name" = '%s', "order" = %d, "tagId" = %d, "talkgroupRef" = %d, "type" = '%s' WHERE "talkgroupId" = %d`, talkgroup.Alert, talkgroup.Delay, talkgroup.Frequency, escapeQuotes(talkgroup.Label), talkgroup.Led, escapeQuotes(talkgroup.Name), talkgroup.Order, talkgroup.TagId, talkgroup.TalkgroupRef, talkgroup.Kind, talkgroup.Id)
+			query = fmt.Sprintf(`UPDATE "talkgroups" SET "alert" = '%s', "delay" = %d, "frequency" = %d, "label" = '%s', "led" = '%s', "name" = '%s', "order" = %d, "tagId" = %d, "talkgroupRef" = %d, "type" = '%s' WHERE "talkgroupId" = %d`, escapeQuotes(talkgroup.Alert), talkgroup.Delay, talkgroup.Frequency, escapeQuotes(talkgroup.Label), escapeQuotes(talkgroup.Led), escapeQuotes(talkgroup.Name), talkgroup.Order, talkgroup.TagId, talkgroup.TalkgroupRef, escapeQuotes(talkgroup.Kind), talkgroup.Id)
 			if _, err = tx.Exec(query); err != nil {
 				break
 			}
