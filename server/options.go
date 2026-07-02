@@ -234,8 +234,18 @@ func (options *Options) BridgeFromMap(m map[string]any) {
 		for _, c := range options.BridgeChannels {
 			prevByPort[c.UdpPort] = c
 		}
+		// Decode into a fresh slice and reject the payload on error: encoding/json
+		// keeps decoding past type errors AND merges into the reused slice's
+		// existing elements, so unmarshaling straight into options.BridgeChannels
+		// with the error ignored left a silent mix of old and new channel data
+		// (e.g. a cleared numeric input arriving as "" from the admin client).
 		if b, err := json.Marshal(v); err == nil {
-			json.Unmarshal(b, &options.BridgeChannels)
+			channels := []BridgeChannelConfig{}
+			if err = json.Unmarshal(b, &channels); err != nil {
+				log.Println(errorFormatter("options", "bridgefrommap")(err, "bridge channels payload rejected, keeping current channels"))
+			} else {
+				options.BridgeChannels = channels
+			}
 		}
 		for i := range options.BridgeChannels {
 			nc := &options.BridgeChannels[i]

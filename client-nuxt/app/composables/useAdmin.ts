@@ -365,12 +365,38 @@ export const useAdmin = () => {
     }
   }
 
+  // A cleared numeric input leaves '' in the model (v-model.number falls back to
+  // the raw string when it can't parse), and one non-numeric field makes the
+  // server reject the whole bridge channel list — coerce before sending.
+  const num = (v: unknown): number => {
+    const n = Number(v)
+    return Number.isFinite(n) ? n : 0
+  }
+
+  const sanitizeBridge = (bridge: BridgeConfig): BridgeConfig => ({
+    ...bridge,
+    port: num(bridge.port),
+    channels: bridge.channels.map(ch => ({
+      ...ch,
+      channelIndex: num(ch.channelIndex),
+      deviceSetIndex: num(ch.deviceSetIndex),
+      frequencyHz: num(ch.frequencyHz),
+      squelchDb: num(ch.squelchDb),
+      sampleRate: num(ch.sampleRate),
+      systemRef: num(ch.systemRef),
+      talkgroupRef: num(ch.talkgroupRef),
+      udpPort: num(ch.udpPort),
+      scanThresholdDb: num(ch.scanThresholdDb),
+      scannerChannelIndex: num(ch.scannerChannelIndex),
+    })),
+  })
+
   const saveConfig = async (cfg: Partial<AdminConfig>): Promise<boolean> => {
     try {
       await $fetch('/api/admin/config', {
         method: 'PUT',
         headers: authHeader(),
-        body: cfg,
+        body: cfg.bridge ? { ...cfg, bridge: sanitizeBridge(cfg.bridge) } : cfg,
       })
       toast.add({ title: 'Config saved', color: 'success' })
       return true
