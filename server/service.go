@@ -30,6 +30,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -297,7 +298,9 @@ func reapOrphans(binaryPath string) int {
 	if binaryPath != "" {
 		name = filepath.Base(binaryPath)
 	}
-	out, err := exec.Command("pgrep", "-x", name).Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	out, err := exec.CommandContext(ctx, "pgrep", "-x", name).Output()
+	cancel()
 	if err != nil {
 		return 0 // pgrep missing, or no matching process
 	}
@@ -315,9 +318,10 @@ func reapOrphans(binaryPath string) int {
 	if len(procs) == 0 {
 		return 0
 	}
-	// Mirror nativeStatus's liveness probe: a nil-signal that returns no error
-	// means the process is still alive.
-	alive := func(p *os.Process) bool { return p.Signal(os.Signal(nil)) == nil }
+	// Mirror nativeStatus's liveness probe: a signal-0 (kill(pid, 0)) that returns no
+	// error means the process is still alive. Signalling a nil interface always errors
+	// (the type assertion to syscall.Signal fails), which would mark every process dead.
+	alive := func(p *os.Process) bool { return p.Signal(syscall.Signal(0)) == nil }
 	for _, p := range procs {
 		p.Signal(os.Interrupt)
 	}
@@ -348,7 +352,7 @@ func (m *SDRangelServiceManager) nativeStatus(binaryPath, host string, port uint
 	if managed != nil && managed.Process != nil {
 		pid := managed.Process.Pid
 		proc, err := os.FindProcess(pid)
-		if err == nil && proc.Signal(os.Signal(nil)) == nil {
+		if err == nil && proc.Signal(syscall.Signal(0)) == nil {
 			m.mutex.Unlock()
 			return SDRangelServiceStatus{Mode: "native", Running: true, PID: pid, Message: "running"}
 		}
@@ -582,12 +586,14 @@ func (m *SDRangelServiceManager) Restart(containerName, binaryPath, extraArgs, h
 // systemdStatus reads the sdrangelsrv unit's active state and main PID (no privileges).
 func (m *SDRangelServiceManager) systemdStatus() SDRangelServiceStatus {
 	st := SDRangelServiceStatus{Mode: "systemd"}
-	active, _ := exec.Command("systemctl", "is-active", sdrangelUnit).Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	active, _ := exec.CommandContext(ctx, "systemctl", "is-active", sdrangelUnit).Output()
 	state := strings.TrimSpace(string(active))
 	st.Running = state == "active"
 	if st.Running {
 		st.Message = "running (systemd)"
-		if out, err := exec.Command("systemctl", "show", "-p", "MainPID", "--value", sdrangelUnit).Output(); err == nil {
+		if out, err := exec.CommandContext(ctx, "systemctl", "show", "-p", "MainPID", "--value", sdrangelUnit).Output(); err == nil {
 			if pid, e := strconv.Atoi(strings.TrimSpace(string(out))); e == nil {
 				st.PID = pid
 			}
@@ -604,7 +610,9 @@ func (m *SDRangelServiceManager) systemdStatus() SDRangelServiceStatus {
 // systemdAction drives the sdrangelsrv unit via systemctl. The service user is
 // authorized by the polkit rule setup.sh installs; surface a clear hint if it isn't.
 func (m *SDRangelServiceManager) systemdAction(action string) SDRangelServiceResult {
-	out, err := exec.Command("systemctl", action, sdrangelUnit).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "systemctl", action, sdrangelUnit).CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
 		if msg == "" {

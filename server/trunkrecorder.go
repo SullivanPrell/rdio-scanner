@@ -31,6 +31,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -198,6 +199,13 @@ func GenerateTrunkRecorderConfig(req TrunkRecorderGenRequest, systems []*System,
 	// span sources. Confine them to one band here (all sources stay — voice grants
 	// legitimately span them). The handler reports anything dropped.
 	controlChannels, _ := confineControlChannels(req.ControlChannels, sources)
+
+	// Confinement bails and keeps everything when the FIRST control channel is
+	// covered by no source, so it can still emit a cross-source (crash) set. Reject
+	// it here rather than writing a config that SIGSEGVs trunk-recorder at launch.
+	if err := validateControlChannelCoverage(controlChannels, sources); err != nil {
+		return nil, err
+	}
 
 	cfg := &TrunkRecorderConfig{
 		Ver:     2,
@@ -459,8 +467,11 @@ type RTLDongle struct {
 // DetectRTLDongles runs rtl_test -t and parses its output.
 // Returns an empty slice (not an error) if rtl_test is not installed.
 func DetectRTLDongles() ([]RTLDongle, error) {
-	// rtl_test -t lists devices then exits 0
-	cmd := exec.Command("rtl_test", "-t")
+	// rtl_test -t lists devices then exits 0. Bound it: a wedged USB ioctl (exactly
+	// the dongle-wedge state we debug with this) would otherwise hang the caller.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "rtl_test", "-t")
 	cmd.Env = append(cmd.Environ(), "HOME=/tmp") // avoid X11 warnings
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -839,12 +850,14 @@ func trunkRecorderSystemdInstalled() bool {
 // systemdStatus reads the unit's active state and main PID (no privileges needed).
 func (m *TrunkRecorderServiceManager) systemdStatus() TrunkRecorderServiceStatus {
 	st := TrunkRecorderServiceStatus{Mode: "systemd"}
-	active, _ := exec.Command("systemctl", "is-active", trunkRecorderUnit).Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	active, _ := exec.CommandContext(ctx, "systemctl", "is-active", trunkRecorderUnit).Output()
 	state := strings.TrimSpace(string(active))
 	st.Running = state == "active"
 	if st.Running {
 		st.Message = "running (systemd)"
-		if out, err := exec.Command("systemctl", "show", "-p", "MainPID", "--value", trunkRecorderUnit).Output(); err == nil {
+		if out, err := exec.CommandContext(ctx, "systemctl", "show", "-p", "MainPID", "--value", trunkRecorderUnit).Output(); err == nil {
 			if pid, e := strconv.Atoi(strings.TrimSpace(string(out))); e == nil {
 				st.PID = pid
 			}
@@ -861,7 +874,9 @@ func (m *TrunkRecorderServiceManager) systemdStatus() TrunkRecorderServiceStatus
 // systemdAction runs systemctl start/stop/restart on the unit. The service user
 // needs polkit authorization (setup.sh installs a rule); surface that if missing.
 func (m *TrunkRecorderServiceManager) systemdAction(action string) TrunkRecorderServiceResult {
-	out, err := exec.Command("systemctl", action, trunkRecorderUnit).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "systemctl", action, trunkRecorderUnit).CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
 		if msg == "" {
@@ -878,7 +893,9 @@ func (m *TrunkRecorderServiceManager) systemdAction(action string) TrunkRecorder
 
 // systemdLogs returns the unit's recent journal lines (needs systemd-journal group).
 func systemdLogs(unit string, tail int) []string {
-	out, err := exec.Command("journalctl", "-u", unit, "-n", strconv.Itoa(tail), "--no-pager", "-o", "short-iso").CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "journalctl", "-u", unit, "-n", strconv.Itoa(tail), "--no-pager", "-o", "short-iso").CombinedOutput()
 	if err != nil {
 		return []string{"journalctl unavailable (service user may need the systemd-journal group): " + strings.TrimSpace(string(out))}
 	}
@@ -949,7 +966,7 @@ func (m *TrunkRecorderServiceManager) nativeStatus(binaryPath string) TrunkRecor
 	if managed != nil && managed.Process != nil {
 		pid := managed.Process.Pid
 		proc, err := os.FindProcess(pid)
-		if err == nil && proc.Signal(os.Signal(nil)) == nil {
+		if err == nil && proc.Signal(syscall.Signal(0)) == nil {
 			m.mutex.Unlock()
 			return TrunkRecorderServiceStatus{Mode: "native", Running: true, PID: pid, Message: "running"}
 		}
@@ -964,7 +981,10 @@ func (m *TrunkRecorderServiceManager) nativeStatus(binaryPath string) TrunkRecor
 	if binaryPath != "" {
 		name = binaryPath[strings.LastIndex(binaryPath, "/")+1:]
 	}
-	if out, err := exec.Command("pgrep", "-x", "-n", name).Output(); err == nil {
+	pctx, pcancel := context.WithTimeout(context.Background(), 10*time.Second)
+	out, perr := exec.CommandContext(pctx, "pgrep", "-x", "-n", name).Output()
+	pcancel()
+	if perr == nil {
 		if pid, e := strconv.Atoi(strings.TrimSpace(string(out))); e == nil && pid > 0 {
 			return TrunkRecorderServiceStatus{Mode: "native", Running: true, PID: pid, Message: "running (external)"}
 		}
@@ -997,8 +1017,11 @@ func (m *TrunkRecorderServiceManager) nativeStart(binaryPath, configPath string)
 	if binaryPath != "" {
 		procName = binaryPath[strings.LastIndex(binaryPath, "/")+1:]
 	}
-	if out, err := exec.Command("pgrep", "-x", "-n", procName).Output(); err == nil {
-		if pid := strings.TrimSpace(string(out)); pid != "" {
+	pctx, pcancel := context.WithTimeout(context.Background(), 10*time.Second)
+	pout, perr := exec.CommandContext(pctx, "pgrep", "-x", "-n", procName).Output()
+	pcancel()
+	if perr == nil {
+		if pid := strings.TrimSpace(string(pout)); pid != "" {
 			m.mutex.Unlock()
 			return TrunkRecorderServiceResult{Message: fmt.Sprintf(
 				"trunk-recorder is already running (PID %s) outside this manager — most likely the systemd service. "+
@@ -1034,6 +1057,11 @@ func (m *TrunkRecorderServiceManager) nativeStart(binaryPath, configPath string)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, bin, "--config="+configPath)
+	// Cancel must be SIGINT (not the default SIGKILL) so trunk-recorder closes its
+	// in-progress WAV recordings and releases the rtlsdr USB handles cleanly;
+	// WaitDelay force-kills it only if it ignores the interrupt.
+	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Stdout = io.MultiWriter(os.Stdout, m.nativeLogs)
 	cmd.Stderr = io.MultiWriter(os.Stderr, m.nativeLogs)
 
@@ -1081,20 +1109,23 @@ func (m *TrunkRecorderServiceManager) nativeStop() TrunkRecorderServiceResult {
 	}
 
 	exited := m.nativeExited
+	// nativeCancel triggers cmd.Cancel (SIGINT) for a graceful shutdown; cmd.WaitDelay
+	// force-kills the child if it doesn't exit in time. Firing SIGKILL directly here
+	// would abort trunk-recorder before it can close WAV files and free the dongles.
 	if m.nativeCancel != nil {
 		m.nativeCancel()
 	}
-	m.nativeProcess.Process.Signal(os.Interrupt)
 	m.nativeProcess = nil
 	m.nativeCancel = nil
 	m.nativeExited = nil
 	m.mutex.Unlock()
 
-	// Wait for the process to fully exit so Restart doesn't hit a conflict
+	// Wait for the process to fully exit so Restart doesn't hit a conflict. Allow a
+	// little past cmd.WaitDelay (5s) for the force-kill path to complete.
 	if exited != nil {
 		select {
 		case <-exited:
-		case <-time.After(5 * time.Second):
+		case <-time.After(6 * time.Second):
 		}
 	}
 
@@ -1117,6 +1148,12 @@ func (m *TrunkRecorderServiceManager) Start(containerName, binaryPath, configPat
 	case "docker":
 		return m.dockerStart(containerName)
 	case "systemd":
+		// systemd launches the config straight from disk; validate it first so a
+		// cross-source (crash) config surfaces as a clear message instead of a
+		// status=11/SEGV restart loop. nativeStart runs the same check itself.
+		if err := validateTrunkRecorderConfigFile(configPath); err != nil {
+			return TrunkRecorderServiceResult{Message: "refusing to start trunk-recorder — " + err.Error()}
+		}
 		return m.systemdAction("start")
 	default:
 		return m.nativeStart(binaryPath, configPath)
@@ -1152,6 +1189,9 @@ func (m *TrunkRecorderServiceManager) StopOwned(containerName string) {
 func (m *TrunkRecorderServiceManager) Restart(containerName, binaryPath, configPath string) TrunkRecorderServiceResult {
 	// systemd restarts atomically; native must stop (and wait) before starting.
 	if m.mode(containerName) == "systemd" {
+		if err := validateTrunkRecorderConfigFile(configPath); err != nil {
+			return TrunkRecorderServiceResult{Message: "refusing to restart trunk-recorder — " + err.Error()}
+		}
 		return m.systemdAction("restart")
 	}
 	stop := m.Stop(containerName)
