@@ -22,6 +22,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -29,6 +30,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type FFMpeg struct {
@@ -106,7 +108,10 @@ func (ffmpeg *FFMpeg) Convert(call *Call, systems *Systems, tags *Tags, mode uin
 
 	args = append(args, "-c:a", "aac", "-b:a", "32k", "-movflags", "frag_keyframe+empty_moov", "-f", "ipod", "-")
 
-	cmd := exec.Command("ffmpeg", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	cmd.Stdin = bytes.NewReader(call.Audio)
 
 	stdout := bytes.NewBuffer([]byte(nil))

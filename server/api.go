@@ -21,13 +21,17 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
 	"net/http"
 	"strings"
+	"time"
 )
+
+const maxUploadBytes = 64 << 20
 
 type Api struct {
 	Controller *Controller
@@ -56,6 +60,8 @@ func (api *Api) CallUploadHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+
 		mr := multipart.NewReader(r.Body, params["boundary"])
 
 		for {
@@ -63,12 +69,18 @@ func (api *Api) CallUploadHandler(w http.ResponseWriter, r *http.Request) {
 			if err == io.EOF {
 				break
 			} else if err != nil {
+				if api.exitIfTooLarge(w, err) {
+					return
+				}
 				api.exitWithError(w, http.StatusExpectationFailed, fmt.Sprintf("multipart: %s\n", err.Error()))
 				return
 			}
 
 			b, err := io.ReadAll(p)
 			if err != nil {
+				if api.exitIfTooLarge(w, err) {
+					return
+				}
 				api.exitWithError(w, http.StatusExpectationFailed, fmt.Sprintf("ioread: %s\n", err.Error()))
 				return
 			}
@@ -98,7 +110,13 @@ func (api *Api) HandleCall(key string, call *Call, w http.ResponseWriter) {
 
 	if apikey, ok := api.Controller.Apikeys.GetApikey(key); ok {
 		if apikey.HasAccess(call) {
-			api.Controller.Ingest <- call
+			select {
+			case api.Controller.Ingest <- call:
+			case <-time.After(5 * time.Second):
+				w.WriteHeader(http.StatusServiceUnavailable)
+				w.Write([]byte("Ingest queue is full, try again later.\n"))
+				return
+			}
 
 		} else {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -134,6 +152,8 @@ func (api *Api) TrunkRecorderCallUploadHandler(w http.ResponseWriter, r *http.Re
 			return
 		}
 
+		r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+
 		mr := multipart.NewReader(r.Body, params["boundary"])
 
 		parts := map[*multipart.Part][]byte{}
@@ -143,12 +163,18 @@ func (api *Api) TrunkRecorderCallUploadHandler(w http.ResponseWriter, r *http.Re
 			if err == io.EOF {
 				break
 			} else if err != nil {
+				if api.exitIfTooLarge(w, err) {
+					return
+				}
 				api.exitWithError(w, http.StatusExpectationFailed, fmt.Sprintf("multipart: %s", err.Error()))
 				return
 			}
 
 			b, err := io.ReadAll(p)
 			if err != nil {
+				if api.exitIfTooLarge(w, err) {
+					return
+				}
 				api.exitWithError(w, http.StatusExpectationFailed, fmt.Sprintf("ioread: %s", err.Error()))
 				return
 			}
@@ -181,6 +207,15 @@ func (api *Api) TrunkRecorderCallUploadHandler(w http.ResponseWriter, r *http.Re
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		w.Write([]byte("Unsupported method\n"))
 	}
+}
+
+func (api *Api) exitIfTooLarge(w http.ResponseWriter, err error) bool {
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		api.exitWithError(w, http.StatusRequestEntityTooLarge, "Upload exceeds maximum allowed size")
+		return true
+	}
+	return false
 }
 
 func (api *Api) exitWithError(w http.ResponseWriter, status int, message string) {

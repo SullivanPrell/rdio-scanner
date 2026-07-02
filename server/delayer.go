@@ -58,16 +58,27 @@ func (delayer *Delayer) Delay(call *Call) {
 		remaining := time.Until(timestamp)
 
 		if err := delayer.push(call, timestamp); err == nil {
+			callId := call.Id
+
 			timer := time.AfterFunc(remaining, func() {
-				if err := delayer.pop(call); err != nil {
+				if err := delayer.pop(&Call{Id: callId}); err != nil {
 					logError(err)
 				}
 
 				// Runs in its own goroutine, concurrently with other timers
 				// and with Delay() inserts — the map needs the mutex.
 				delayer.mutex.Lock()
-				delete(delayer.timers, call.Id)
+				delete(delayer.timers, callId)
 				delayer.mutex.Unlock()
+
+				// Re-materialize the audio only now that the delay has elapsed,
+				// instead of pinning the whole *Call (incl. Audio) for the window.
+				call, err := delayer.controller.Calls.GetCall(callId)
+				if err != nil {
+					logError(err)
+					return
+				}
+				call.Delayed = true
 
 				delayer.controller.EmitCall(call)
 			})

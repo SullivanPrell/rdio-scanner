@@ -80,6 +80,10 @@ type Call struct {
 	Talkgroup     *Talkgroup
 	Timestamp     time.Time
 	Units         []CallUnit
+
+	marshalOnce sync.Once
+	marshaled   []byte
+	marshalErr  error
 }
 
 func NewCall() *Call {
@@ -118,13 +122,23 @@ func (call *Call) IsValid() (ok bool, err error) {
 	return ok, err
 }
 
+// MarshalJSON memoizes the serialized call so a single *Call broadcast to N
+// live-feed clients is encoded once instead of once per client write pump. The
+// call is immutable by the time it is emitted, so caching under sync.Once is
+// safe for the concurrent MarshalJSON calls the per-client write goroutines make.
 func (call *Call) MarshalJSON() ([]byte, error) {
-	audio := strings.ReplaceAll(fmt.Sprintf("%v", call.Audio), " ", ",")
+	call.marshalOnce.Do(func() {
+		call.marshaled, call.marshalErr = call.marshalJSON()
+	})
 
+	return call.marshaled, call.marshalErr
+}
+
+func (call *Call) marshalJSON() ([]byte, error) {
 	callMap := map[string]any{
 		"id": call.Id,
 		"audio": map[string]any{
-			"data": json.RawMessage(audio),
+			"data": json.RawMessage(appendByteArray(make([]byte, 0, len(call.Audio)*4+2), call.Audio)),
 			"type": "Buffer",
 		},
 		"audioName": call.AudioFilename,
@@ -178,6 +192,22 @@ func (call *Call) MarshalJSON() ([]byte, error) {
 	}
 
 	return json.Marshal(callMap)
+}
+
+// appendByteArray serializes b as a JSON array of decimal byte values
+// ([12,34,...]) — the "Buffer" wire format the clients decode. It must stay
+// byte-identical to the previous fmt.Sprintf("%v")+ReplaceAll output.
+func appendByteArray(dst, b []byte) []byte {
+	dst = append(dst, '[')
+	for i, v := range b {
+		if i > 0 {
+			dst = append(dst, ',')
+		}
+		dst = strconv.AppendUint(dst, uint64(v), 10)
+	}
+	dst = append(dst, ']')
+
+	return dst
 }
 
 func (call *Call) ToJson() (string, error) {

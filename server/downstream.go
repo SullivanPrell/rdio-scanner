@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -318,6 +319,9 @@ func (downstream *Downstream) Send(call *Call) error {
 		c := http.Client{Timeout: 30 * time.Second}
 
 		if res, err := c.Post(u.String(), mw.FormDataContentType(), &buf); err == nil {
+			defer res.Body.Close()
+			io.Copy(io.Discard, res.Body)
+
 			if res.StatusCode != http.StatusOK {
 				return formatError(fmt.Errorf("bad status: %s", res.Status))
 			}
@@ -414,7 +418,11 @@ func (downstreams *Downstreams) Read(db *Database) error {
 }
 
 func (downstreams *Downstreams) Send(controller *Controller, call *Call) {
-	for _, downstream := range downstreams.List {
+	downstreams.mutex.Lock()
+	list := append([]*Downstream(nil), downstreams.List...)
+	downstreams.mutex.Unlock()
+
+	for _, downstream := range list {
 		logEvent := func(logLevel string, message string) {
 			controller.Logs.LogEvent(logLevel, fmt.Sprintf("downstream: system=%d talkgroup=%d file=%s to %s %s", call.System.SystemRef, call.Talkgroup.TalkgroupRef, call.AudioFilename, downstream.Url, message))
 		}
