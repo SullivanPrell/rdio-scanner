@@ -67,13 +67,15 @@ func (client *Client) Init(controller *Controller, request *http.Request, conn *
 	client.Controller = controller
 	client.Conn = conn
 	client.Livefeed = NewLivefeed()
-	client.Send = make(chan *Message, 8192)
+	client.Send = make(chan *Message, 128)
 	client.request = request
 
 	go func() {
+		// The Unregister send lives in the write goroutine's defer (paired with
+		// the Register send) so both go through controller.clientEvents in order.
+		// Here we only log the disconnect and close the conn, which unblocks the
+		// write goroutine and drives its Unregister.
 		defer func() {
-			controller.Unregister <- client
-
 			if len(client.Access.Ident) > 0 {
 				controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("listener disconnected from ip %s with ident %s", client.GetRemoteAddr(), client.Access.Ident))
 
@@ -122,11 +124,19 @@ func (client *Client) Init(controller *Controller, request *http.Request, conn *
 			client.Conn.Close()
 		})
 
+		registered := false
+
 		defer func() {
 			ticker.Stop()
 
 			if timer != nil {
 				timer.Stop()
+			}
+
+			// Fire Unregister only if we sent Register, and from this same
+			// goroutine so the two land on controller.clientEvents in order.
+			if registered {
+				controller.clientEvents <- &clientEvent{client: client, register: false}
 			}
 
 			client.Conn.Close()
@@ -143,8 +153,9 @@ func (client *Client) Init(controller *Controller, request *http.Request, conn *
 					if timer != nil {
 						timer.Stop()
 						timer = nil
+						registered = true
 
-						controller.Register <- client
+						controller.clientEvents <- &clientEvent{client: client, register: true}
 
 						if len(client.Access.Ident) > 0 {
 							controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("new listener from ip %s with ident %s", client.GetRemoteAddr(), client.Access.Ident))
@@ -267,6 +278,9 @@ func (clients *Clients) Add(client *Client) {
 }
 
 func (clients *Clients) Count() int {
+	clients.mutex.Lock()
+	defer clients.mutex.Unlock()
+
 	return len(clients.Map)
 }
 

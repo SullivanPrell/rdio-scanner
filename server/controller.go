@@ -55,28 +55,36 @@ type Controller struct {
 	TRServiceManager *TrunkRecorderServiceManager
 	Systems          *Systems
 	Tags             *Tags
-	Register         chan *Client
-	Unregister       chan *Client
+	clientEvents     chan *clientEvent
 	Ingest           chan *Call
 	running          bool
 }
 
+// clientEvent carries a client registration change on a single ordered channel.
+// Register and Unregister used to be two channels; a select over both could
+// apply Remove before Add for the same client and leak the disconnected client
+// into Clients.Map, pinning its buffered calls. One FIFO channel, with both
+// sends coming from the same per-client goroutine, guarantees Add precedes Remove.
+type clientEvent struct {
+	client   *Client
+	register bool
+}
+
 func NewController(config *Config) *Controller {
 	controller := &Controller{
-		Clients:    NewClients(),
-		Config:     config,
-		Accesses:   NewAccesses(),
-		Apikeys:    NewApikeys(),
-		Dirwatches: NewDirwatches(),
-		FFMpeg:     NewFFMpeg(),
-		Groups:     NewGroups(),
-		Logs:       NewLogs(),
-		Options:    NewOptions(),
-		Systems:    NewSystems(),
-		Tags:       NewTags(),
-		Register:   make(chan *Client, 8192),
-		Unregister: make(chan *Client, 8192),
-		Ingest:     make(chan *Call, 8192),
+		Clients:      NewClients(),
+		Config:       config,
+		Accesses:     NewAccesses(),
+		Apikeys:      NewApikeys(),
+		Dirwatches:   NewDirwatches(),
+		FFMpeg:       NewFFMpeg(),
+		Groups:       NewGroups(),
+		Logs:         NewLogs(),
+		Options:      NewOptions(),
+		Systems:      NewSystems(),
+		Tags:         NewTags(),
+		clientEvents: make(chan *clientEvent, 8192),
+		Ingest:       make(chan *Call, 64),
 	}
 
 	controller.Admin = NewAdmin(controller)
@@ -598,29 +606,36 @@ func (controller *Controller) Start() error {
 	go func() {
 		var timer *time.Timer
 
+		// The AfterFunc callback runs on its own goroutine, so it signals here
+		// instead of writing timer directly — timer is only touched by this loop.
+		timerDone := make(chan struct{}, 1)
+
 		emitClientsCount := func() {
 			if timer == nil {
-				timer = time.AfterFunc(time.Duration(5)*time.Second, func() {
+				timer = time.AfterFunc(5*time.Second, func() {
 					controller.LogClientsCount()
 
 					if controller.Options.ShowListenersCount {
 						controller.Clients.EmitListenersCount()
 					}
 
-					timer = nil
+					timerDone <- struct{}{}
 				})
 			}
 		}
 
 		for {
 			select {
-			case client := <-controller.Register:
-				controller.Clients.Add(client)
+			case event := <-controller.clientEvents:
+				if event.register {
+					controller.Clients.Add(event.client)
+				} else {
+					controller.Clients.Remove(event.client)
+				}
 				emitClientsCount()
 
-			case client := <-controller.Unregister:
-				controller.Clients.Remove(client)
-				emitClientsCount()
+			case <-timerDone:
+				timer = nil
 			}
 		}
 	}()
