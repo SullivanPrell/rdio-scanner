@@ -714,7 +714,10 @@ func (dirwatch *Dirwatch) Start(controller *Controller) error {
 		return nil
 	}
 
+	dirwatch.mutex.Lock()
+
 	if dirwatch.watcher != nil {
+		dirwatch.mutex.Unlock()
 		return errors.New("dirwatch.start: already started")
 	}
 
@@ -722,8 +725,14 @@ func (dirwatch *Dirwatch) Start(controller *Controller) error {
 	dirwatch.dirs = map[string]bool{}
 
 	if dirwatch.watcher, err = fsnotify.NewWatcher(); err != nil {
+		dirwatch.watcher = nil
+		dirwatch.mutex.Unlock()
 		return err
 	}
+
+	watcher := dirwatch.watcher
+
+	dirwatch.mutex.Unlock()
 
 	go func() {
 		logError := func(err error) {
@@ -750,25 +759,32 @@ func (dirwatch *Dirwatch) Start(controller *Controller) error {
 			}
 
 			dirwatch.mutex.Lock()
-			defer dirwatch.mutex.Unlock()
 
 			for e, t := range dirwatch.timers {
 				t.Stop()
 				delete(dirwatch.timers, e)
 			}
 
-			if dirwatch.watcher != nil {
-				dirwatch.Start(controller)
+			// restart only if this watcher is still current, i.e. not replaced or nil'd by Stop().
+			restart := dirwatch.watcher == watcher
+			if restart {
+				dirwatch.watcher = nil
+			}
+
+			dirwatch.mutex.Unlock()
+
+			if restart {
+				watcher.Close()
+
+				if err := dirwatch.Start(controller); err != nil {
+					controller.Logs.LogEvent(LogLevelError, fmt.Sprintf("dirwatch.start: %v", err))
+				}
 			}
 		}()
 
 		for {
-			if dirwatch.watcher == nil {
-				return
-			}
-
 			select {
-			case event, ok := <-dirwatch.watcher.Events:
+			case event, ok := <-watcher.Events:
 				if !ok {
 					return
 				}
@@ -790,13 +806,15 @@ func (dirwatch *Dirwatch) Start(controller *Controller) error {
 					}
 
 				case fsnotify.Remove:
+					dirwatch.mutex.Lock()
 					if dirwatch.dirs[event.Name] {
-						if err := dirwatch.watcher.Remove(event.Name); err == nil {
+						if err := watcher.Remove(event.Name); err == nil {
 							delete(dirwatch.dirs, event.Name)
 						} else {
 							logError(err)
 						}
 					}
+					dirwatch.mutex.Unlock()
 
 				case fsnotify.Write:
 					dirwatch.mutex.Lock()
@@ -807,7 +825,7 @@ func (dirwatch *Dirwatch) Start(controller *Controller) error {
 					dirwatch.mutex.Unlock()
 				}
 
-			case err, ok := <-dirwatch.watcher.Errors:
+			case err, ok := <-watcher.Errors:
 				if ok {
 					logError(err)
 				}
@@ -831,8 +849,10 @@ func (dirwatch *Dirwatch) Start(controller *Controller) error {
 			fp := filepath.Join(dirwatch.Directory, p)
 
 			if dirwatch.isDir(fp) {
+				dirwatch.mutex.Lock()
 				dirwatch.dirs[fp] = true
-				dirwatch.watcher.Add(fp)
+				watcher.Add(fp)
+				dirwatch.mutex.Unlock()
 
 			} else if dirwatch.DeleteAfter {
 				dirwatch.Ingest(fp)
@@ -848,9 +868,12 @@ func (dirwatch *Dirwatch) Start(controller *Controller) error {
 }
 
 func (dirwatch *Dirwatch) Stop() {
-	if dirwatch.watcher != nil {
-		w := dirwatch.watcher
-		dirwatch.watcher = nil
+	dirwatch.mutex.Lock()
+	w := dirwatch.watcher
+	dirwatch.watcher = nil
+	dirwatch.mutex.Unlock()
+
+	if w != nil {
 		w.Close()
 	}
 }
@@ -871,10 +894,12 @@ func (dirwatch *Dirwatch) walkDir(d string) error {
 	return fs.WalkDir(dfs, ".", func(p string, _ fs.DirEntry, err error) error {
 		fp := filepath.Join(d, p)
 		if dirwatch.isDir(fp) {
-			if !dirwatch.dirs[fp] {
+			dirwatch.mutex.Lock()
+			if !dirwatch.dirs[fp] && dirwatch.watcher != nil {
 				dirwatch.dirs[fp] = true
 				dirwatch.watcher.Add(fp)
 			}
+			dirwatch.mutex.Unlock()
 		}
 		return err
 	})
