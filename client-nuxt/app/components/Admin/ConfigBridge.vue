@@ -165,6 +165,10 @@ const deviceSetOptions = computed(() => {
 // ── Polling ───────────────────────────────────────────────────────────────────
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let provisionPollTimer: ReturnType<typeof setTimeout> | null = null
+// Set once the component is torn down. A provision-status fetch can resolve AFTER
+// onUnmounted has cleared the timer; guarding on this stops pollProvision from
+// re-arming a leaked poll loop (and double-toasting) on a dead instance.
+let disposed = false
 
 async function refreshAll() {
   const [svc, tr, br, sdr] = await Promise.all([
@@ -201,6 +205,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  disposed = true
   if (pollTimer) clearInterval(pollTimer)
   if (provisionPollTimer) clearTimeout(provisionPollTimer)
 })
@@ -384,6 +389,9 @@ async function provision() {
 // panel, and reschedules itself until the job finishes — then toasts the outcome.
 async function pollProvision() {
   const status = await admin.getSDRangelProvisionStatus()
+  // The component may have unmounted while this fetch was in flight — bail before
+  // re-arming the timer or toasting so a leaked loop can't outlive the instance.
+  if (disposed) return
   if (!status) {
     provisioning.value = false
     return
@@ -418,6 +426,19 @@ async function pollProvision() {
     })
   } else {
     toast.add({ title: 'SDRangel provisioned', color: 'success' })
+  }
+  // Provisioning rewrites server-side channel / scanner indices (ChannelIndex,
+  // ScannerChannelIndex) and persists them. Pull the normalized bridge back into
+  // the edit buffer so the next plain Save re-sends those fresh values instead of
+  // the stale ones this tab loaded with (which would mis-point the bridge).
+  const fresh = await admin.getConfig()
+  if (disposed) return
+  if (fresh?.bridge) {
+    bridge.value = {
+      ...fresh.bridge,
+      channels: fresh.bridge.channels ?? [],
+      sdrDeviceAssignments: fresh.bridge.sdrDeviceAssignments ?? [],
+    }
   }
   // Pull any stdout from a managed sdrangelsrv (e.g. a crash during provisioning).
   await refreshSDRangelLogs()
@@ -462,6 +483,7 @@ async function resumeProvisionIfRunning() {
   resuming = true
   try {
     const status = await admin.getSDRangelProvisionStatus()
+    if (disposed) return
     if (status?.running && !provisioning.value) {
       if (status.messages.length) provisionMessages.value = status.messages
       provisioning.value = true

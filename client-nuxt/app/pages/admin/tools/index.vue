@@ -115,9 +115,17 @@ const trLoading = ref(false)
 const trResult = ref<unknown>(null)
 
 const generateTRConfig = async () => {
+  // Accept either Hz or MHz per token: a value < 1e6 is read as MHz and scaled,
+  // so "853.9125" (RadioReference's MHz format) isn't mangled into 8539125 Hz by
+  // a naive digit-strip. Matches ConfigBridge's parseFreqField.
   const channels = trControlChannels.value
     .split(/[\s,]+/)
-    .map(s => parseInt(s.replace(/[^0-9]/g, ''), 10))
+    .map(s => s.trim())
+    .filter(Boolean)
+    .map(s => {
+      const n = parseFloat(s)
+      return n < 1e6 ? Math.round(n * 1e6) : Math.round(n)
+    })
     .filter(n => n > 0)
 
   if (!channels.length) {

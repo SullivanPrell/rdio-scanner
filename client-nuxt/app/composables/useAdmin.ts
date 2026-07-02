@@ -391,12 +391,48 @@ export const useAdmin = () => {
     })),
   })
 
+  // A cleared numeric option leaves '' in the model; the server substitutes its
+  // default for a non-numeric value (pruneDays -> 7), silently re-enabling call
+  // pruning and permanently deleting archived calls. Coerce first so a cleared
+  // field becomes 0 (keep forever / off) rather than the destructive default.
+  const sanitizeOptions = (options: Options): Options => ({
+    ...options,
+    audioConversion: num(options.audioConversion),
+    dimmerDelay: num(options.dimmerDelay),
+    duplicateDetectionTimeFrame: num(options.duplicateDetectionTimeFrame),
+    maxClients: num(options.maxClients),
+    pruneDays: num(options.pruneDays),
+  })
+
   const saveConfig = async (cfg: Partial<AdminConfig>): Promise<boolean> => {
+    // A cleared System Ref / Talkgroup Ref leaves '' → the server persists 0,
+    // which no longer matches ingested calls (they're silently dropped, or a
+    // duplicate system is auto-populated). Reject the save rather than corrupt
+    // routing behind a "Config saved" toast.
+    if (cfg.systems) {
+      for (const sys of cfg.systems) {
+        if (!(Number(sys.systemRef) >= 1)) {
+          handleError(new Error(`System "${sys.label || 'unnamed'}" needs a System Ref of 1 or more.`), 'Save config')
+          return false
+        }
+        for (const tg of sys.talkgroups ?? []) {
+          if (!(Number(tg.talkgroupRef) >= 1)) {
+            handleError(new Error(`A talkgroup in "${sys.label || 'unnamed'}" needs a Talkgroup Ref of 1 or more.`), 'Save config')
+            return false
+          }
+        }
+      }
+    }
+
+    const body: Partial<AdminConfig> = { ...cfg }
+    if (cfg.bridge) body.bridge = sanitizeBridge(cfg.bridge)
+    if (cfg.options) body.options = sanitizeOptions(cfg.options)
+
     try {
       await $fetch('/api/admin/config', {
         method: 'PUT',
         headers: authHeader(),
-        body: cfg.bridge ? { ...cfg, bridge: sanitizeBridge(cfg.bridge) } : cfg,
+        body,
       })
       toast.add({ title: 'Config saved', color: 'success' })
       return true

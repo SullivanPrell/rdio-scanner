@@ -51,7 +51,13 @@ onMounted(async () => {
 const save = async () => {
   if (!cfg.value) return
   saving.value = true
-  await admin.saveConfig(cfg.value)
+  // Re-pull the server-normalized config after a successful save so the edit
+  // buffer can't drift from what was actually persisted (the server rewrites
+  // e.g. bridge channel/scanner indices); a later save then re-sends the fresh
+  // values instead of the stale ones this page loaded with.
+  if (await admin.saveConfig(cfg.value)) {
+    cfg.value = await admin.getConfig()
+  }
   saving.value = false
 }
 
