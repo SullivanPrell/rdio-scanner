@@ -423,19 +423,20 @@ func migrateCalls(db *Database) error {
 			} else if source.Valid && source.Int32 > 0 {
 				var c int
 				query = fmt.Sprintf(`SELECT COUNT(*) FROM "units" WHERE "systemId" = %d AND "unitRef" = %d`, systems[systemRef.Int32], source.Int32)
-				if err = tx.QueryRow(query).Scan(&c); err == nil && c == 0 {
-					query = fmt.Sprintf(`INSERT INTO "units" ("label", "systemId", "unitRef") VALUES(%d, %d, %d)`, source.Int32, systems[systemRef.Int32], source.Int32)
-					if _, err = tx.Exec(query); err != nil {
-						query = fmt.Sprintf(`INSERT INTO "callUnits" ("callId", "offset", "unitRef") VALUES (%d, %d, %d)`, call.Id, 0, source.Int32)
+				if err = tx.QueryRow(query).Scan(&c); err == nil {
+					if c == 0 {
+						query = fmt.Sprintf(`INSERT INTO "units" ("label", "systemId", "unitRef") VALUES(%d, %d, %d)`, source.Int32, systems[systemRef.Int32], source.Int32)
 						if _, err = tx.Exec(query); err != nil {
 							log.Println(formatError(err, query))
 						}
+					}
 
-					} else {
+					query = fmt.Sprintf(`INSERT INTO "callUnits" ("callId", "offset", "unitRef") VALUES (%d, %d, %d)`, call.Id, 0, source.Int32)
+					if _, err = tx.Exec(query); err != nil {
 						log.Println(formatError(err, query))
 					}
 
-				} else if err != nil {
+				} else {
 					log.Println(formatError(err, query))
 				}
 			}
