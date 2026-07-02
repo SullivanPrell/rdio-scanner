@@ -548,6 +548,13 @@ func (options *Options) Read(db *Database) error {
 		}
 	}
 
+	if e := rows.Err(); e != nil {
+		rows.Close()
+		return formatError(e, query)
+	}
+
+	rows.Close()
+
 	return nil
 }
 

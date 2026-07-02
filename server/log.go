@@ -247,7 +247,15 @@ func (logs *Logs) Search(searchOptions *LogsSearchOptions, db *Database) (*LogsS
 		logResults.Logs = append(logResults.Logs, *log)
 	}
 
+	if err == nil {
+		err = rows.Err()
+	}
+
 	rows.Close()
+
+	if err != nil {
+		return nil, formatError(err, query)
+	}
 
 	return logResults, nil
 }

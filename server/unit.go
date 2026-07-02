@@ -200,6 +200,10 @@ func (units *Units) ReadTx(tx *sql.Tx, systemId uint64) error {
 		units.List = append(units.List, unit)
 	}
 
+	if err == nil {
+		err = rows.Err()
+	}
+
 	rows.Close()
 
 	if err != nil {

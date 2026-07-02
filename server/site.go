@@ -182,6 +182,10 @@ func (sites *Sites) ReadTx(tx *sql.Tx, systemId uint64) error {
 		sites.List = append(sites.List, site)
 	}
 
+	if err == nil {
+		err = rows.Err()
+	}
+
 	rows.Close()
 
 	if err != nil {
