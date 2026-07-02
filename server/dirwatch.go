@@ -168,6 +168,20 @@ func (dirwatch *Dirwatch) Ingest(p string) {
 	}
 }
 
+// ingestCall submits a call to the controller with a bounded wait so a full
+// ingest buffer can never stall the watcher/timer goroutines (which hold or
+// contend on dirwatch.mutex). Mirrors the bounded send api.go uses. Returns
+// false (call dropped) on timeout; callers must not delete the source file.
+func (dirwatch *Dirwatch) ingestCall(call *Call) bool {
+	select {
+	case dirwatch.controller.Ingest <- call:
+		return true
+	case <-time.After(5 * time.Second):
+		dirwatch.controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("dirwatch.ingest: ingest queue full, dropping %s", call.AudioFilename))
+		return false
+	}
+}
+
 func (dirwatch *Dirwatch) ingestDefault(p string) error {
 	var (
 		err error
@@ -209,7 +223,9 @@ func (dirwatch *Dirwatch) ingestDefault(p string) error {
 		}
 
 		if ok, err := call.IsValid(); ok {
-			dirwatch.controller.Ingest <- call
+			if !dirwatch.ingestCall(call) {
+				return nil
+			}
 
 			if dirwatch.DeleteAfter {
 				if err = os.Remove(p); err != nil {
@@ -274,7 +290,9 @@ func (dirwatch *Dirwatch) ingestDSDPlus(p string) error {
 	}
 
 	if ok, err := call.IsValid(); ok {
-		dirwatch.controller.Ingest <- call
+		if !dirwatch.ingestCall(call) {
+			return nil
+		}
 
 		if dirwatch.DeleteAfter {
 			if err = os.Remove(p); err != nil {
@@ -317,7 +335,9 @@ func (dirwatch *Dirwatch) ingestSdrTrunk(p string) error {
 	}
 
 	if ok, err := call.IsValid(); ok {
-		dirwatch.controller.Ingest <- call
+		if !dirwatch.ingestCall(call) {
+			return nil
+		}
 
 		if dirwatch.DeleteAfter {
 			if err = os.Remove(p); err != nil {
@@ -400,7 +420,9 @@ func (dirwatch *Dirwatch) ingestTrunkRecorder(p string) error {
 	}
 
 	if ok, err := call.IsValid(); ok {
-		dirwatch.controller.Ingest <- call
+		if !dirwatch.ingestCall(call) {
+			return nil
+		}
 
 	} else {
 		return err
@@ -741,10 +763,14 @@ func (dirwatch *Dirwatch) Start(controller *Controller) error {
 
 		newTimer := func(eventName string) *time.Timer {
 			return time.AfterFunc(delay, func() {
+				// Drop the timer entry under the lock, then release it BEFORE
+				// ingesting. Ingest can block on the controller.Ingest channel;
+				// holding dirwatch.mutex across that would stall the watcher
+				// goroutine (which locks the same mutex on every fsnotify event,
+				// causing dropped events) and Dirwatch.Stop().
 				dirwatch.mutex.Lock()
-				defer dirwatch.mutex.Unlock()
-
 				delete(dirwatch.timers, eventName)
+				dirwatch.mutex.Unlock()
 
 				if _, err := os.Stat(eventName); err == nil {
 					dirwatch.Ingest(eventName)
@@ -965,6 +991,10 @@ func (dirwatches *Dirwatches) Read(db *Database) error {
 		}
 
 		dirwatches.List = append(dirwatches.List, dirwatch)
+	}
+
+	if err == nil {
+		err = rows.Err()
 	}
 
 	rows.Close()
