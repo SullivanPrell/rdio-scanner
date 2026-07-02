@@ -35,19 +35,19 @@ import (
 // produced by the various import tools.  The caller merges it with the live
 // config and re-emits to the config panel for user review before saving.
 type ImportResult struct {
-	Systems  []*System            `json:"systems"`
-	Groups   []*Group             `json:"groups"`
-	Tags     []*Tag               `json:"tags"`
+	Systems  []*System             `json:"systems"`
+	Groups   []*Group              `json:"groups"`
+	Tags     []*Tag                `json:"tags"`
 	Channels []BridgeChannelConfig `json:"channels"`
 }
 
 // ── FRS / GMRS presets ─────────────────────────────────────────────────────
 
 type frsEntry struct {
-	ch      int
-	freqHz  uint
-	label   string
-	gmrs    bool
+	ch       int
+	freqHz   uint
+	label    string
+	gmrs     bool
 	repeater bool // GMRS repeater input only
 }
 
@@ -178,14 +178,15 @@ func ParseChirpCSV(data []byte, systemLabel string, systemRef uint, portBase int
 		name := strings.TrimSpace(rec[1])
 		freqStr := strings.TrimSpace(rec[2])
 		// CHIRP column counts vary by version; guard optional trailing columns.
-		if len(rec) > 15 && strings.TrimSpace(rec[15]) == "S" {
+		// chirp-next layout: Mode=12, TStep=13, Skip=14, Power=15, Comment=16.
+		if len(rec) > 14 && strings.TrimSpace(rec[14]) == "S" {
 			continue
 		}
 		comment := ""
 		if len(rec) > 16 {
 			comment = strings.TrimSpace(rec[16])
 		}
-		mode := strings.ToUpper(strings.TrimSpace(rec[13]))
+		mode := strings.ToUpper(strings.TrimSpace(rec[12]))
 
 		freqMHz, err := strconv.ParseFloat(freqStr, 64)
 		if err != nil {
@@ -209,7 +210,7 @@ func ParseChirpCSV(data []byte, systemLabel string, systemRef uint, portBase int
 		})
 
 		proto := "nfm"
-		if mode == "DSD" || mode == "NXDN" || mode == "P25" || mode == "DMR" {
+		if mode == "DSD" || mode == "NXDN" || mode == "P25" || mode == "DMR" || mode == "DV" || mode == "DN" {
 			proto = "dsd"
 		}
 		if protocolOverride != "" {
@@ -688,10 +689,10 @@ type rrTrunkSystem struct {
 }
 
 type rrCountyInfo struct {
-	ID    int           `xml:"ctid"`
-	Name  string        `xml:"ctname"`
-	Freqs []rrFrequency `xml:"freqs>item"`
-	Subs  []rrCategory  `xml:"subs>item"`
+	ID    int             `xml:"ctid"`
+	Name  string          `xml:"ctname"`
+	Freqs []rrFrequency   `xml:"freqs>item"`
+	Subs  []rrCategory    `xml:"subs>item"`
 	TSys  []rrTrunkSystem `xml:"tsys>item"`
 }
 
@@ -890,14 +891,23 @@ func rrCountyInfoToImportResult(county rrCountyInfo, systemRef uint, portBase in
 		systemRef++
 
 		for _, tg := range tsys.Talkgroups {
-			if tg.Mode == "D" || tg.Mode == "E" {
+			mode := strings.ToUpper(tg.Mode)
+			if strings.HasSuffix(mode, "E") {
 				continue
+			}
+			kind := ""
+			switch mode {
+			case "D":
+				kind = "p25"
+			case "T", "A":
+				kind = "nfm"
 			}
 			tgRef := uint(tg.Dec)
 			sys.Talkgroups.List = append(sys.Talkgroups.List, &Talkgroup{
 				TalkgroupRef: tgRef,
 				Label:        truncate8(tg.Alpha),
 				Name:         tg.Descr,
+				Kind:         kind,
 				GroupIds:     []uint64{1},
 				TagId:        uint64(2),
 			})
