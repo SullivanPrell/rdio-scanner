@@ -112,7 +112,8 @@ if [[ "$YES" == false ]]; then
     echo "   • Run the services as user '${RDIO_USER}'"
     echo "   • Install systemd services (auto-start on boot)"
     echo "   • Configure RTL-SDR udev rules and kernel driver blacklist"
-    echo "   • Patch /boot/firmware/config.txt (gpu_mem, disable-bt, USB power)"
+    echo "   • Patch /boot/firmware/config.txt (gpu_mem, disable-bt, USB power, watchdog, ramoops)"
+    echo "   • Patch /boot/firmware/cmdline.txt (memory cgroup + PSI — enables unit MemoryMax caps)"
     echo "   • Listen on port ${RDIO_PORT}"
     echo ""
     ask "Continue? [y/N]"
@@ -683,7 +684,11 @@ cat > /etc/sysctl.d/99-sdr-perf.conf <<'EOF'
 net.core.rmem_max=2097152
 net.core.wmem_max=2097152
 net.core.rmem_default=1048576
-vm.swappiness=5
+# Swap here is zram-only (RAM-speed). A LOW swappiness makes the kernel evict
+# page cache — including executable pages that must be re-read from the slow SD
+# card — before touching swap, which is the classic "Pi frozen for minutes"
+# thrash. With zram the cheap move is the opposite: swap anon pages early.
+vm.swappiness=100
 vm.dirty_ratio=40
 vm.dirty_background_ratio=10
 EOF
@@ -709,6 +714,13 @@ ExecStart=${RDIO_BIN} \\
     -config ${RDIO_CONF_DIR}/rdio-scanner.ini
 Restart=on-failure
 RestartSec=5
+# Caps need the memory cgroup controller (cgroup_enable=memory in cmdline.txt,
+# added below; reboot to apply) — until then systemd ignores them. Normal RSS is
+# ~55 MB; a runaway (stalled ingest pinning queued call audio) gets killed and
+# restarted here instead of dragging the whole Pi into zram thrash.
+MemoryHigh=512M
+MemoryMax=768M
+OOMPolicy=kill
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=rdio-scanner
@@ -731,6 +743,11 @@ SupplementaryGroups=plugdev dialout audio
 ExecStart=/usr/bin/sdrangelsrv -p ${SDRANGEL_API_PORT}
 Restart=on-failure
 RestartSec=10
+# Needs cgroup_enable=memory (see cmdline.txt step) + reboot; ~180 MB normal,
+# FFTW planning spikes higher — kill+restart beats a box-wide thrash.
+MemoryHigh=1G
+MemoryMax=1536M
+OOMPolicy=kill
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=sdrangelsrv
@@ -755,6 +772,10 @@ WorkingDirectory=${TR_DATA_DIR}
 ExecStart=${TR_BIN} --config ${TR_CONFIG}
 Restart=on-failure
 RestartSec=15
+# Needs cgroup_enable=memory (see cmdline.txt step) + reboot; ~155 MB normal.
+MemoryHigh=768M
+MemoryMax=1G
+OOMPolicy=kill
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=trunk-recorder
@@ -804,14 +825,21 @@ info "polkit rule installed — admin UI can manage trunk-recorder/sdrangelsrv."
 # The journal-group membership applies to rdio-scanner the next time it starts —
 # the "Starting services" step below restarts it, so the UI picks it up this run.
 
-# ── Journal size limit ─────────────────────────────────────────────────────
+# ── Journal: persistent, size-capped ───────────────────────────────────────
+# Raspberry Pi OS ships /usr/lib/systemd/journald.conf.d/40-rpi-volatile-storage.conf
+# (Storage=volatile) which discards ALL logs at reboot — every hard lock erased its
+# own evidence. This drop-in sorts lexically after it, so persistent wins; the size
+# caps bound SD/SSD wear.
 
 mkdir -p /etc/systemd/journald.conf.d
 cat > /etc/systemd/journald.conf.d/sdr-stack.conf <<'EOF'
 [Journal]
+Storage=persistent
 SystemMaxUse=50M
 RuntimeMaxUse=20M
 EOF
+systemctl restart systemd-journald 2>/dev/null || true
+journalctl --flush 2>/dev/null || true
 
 # ── Swap (compressed-RAM cushion) ──────────────────────────────────────────
 # Keep a modest zram (compressed-RAM) swap as an OOM cushion. The SDR stack
@@ -850,6 +878,7 @@ if [[ -f "$BOOT_CFG" ]]; then
       | grep -v '^max_usb_current=' \
       | grep -v '^usb_max_current_enable=' \
       | grep -v '^dtparam=watchdog=' \
+      | grep -v '^dtoverlay=ramoops' \
       > /tmp/config.txt.tmp && mv /tmp/config.txt.tmp "$BOOT_CFG"
     # Raise the downstream USB current budget so several RTL-SDR dongles can run
     # at once. The key is board-specific: Pi 4 uses max_usb_current=1, Pi 5 uses
@@ -866,10 +895,37 @@ max_usb_current=1
 usb_max_current_enable=1
 # hardware watchdog — exposes /dev/watchdog0 so systemd can hard-reset a hung Pi
 dtparam=watchdog=on
+# ramoops: kernel panic/oops text persists in RAM across a reset and reappears
+# under /sys/fs/pstore — the only evidence that survives a hard power cycle
+dtoverlay=ramoops
 BOOTCFG
     info "config.txt updated (USB current budget raised; hardware watchdog enabled — needs an adequate PSU)."
 else
     warn "/boot/firmware/config.txt not found — skipping boot config."
+fi
+
+# ── /boot/firmware/cmdline.txt: memory cgroup + PSI ────────────────────────
+# The Pi kernel boots with the memory cgroup controller DISABLED (no "memory" in
+# /sys/fs/cgroup/cgroup.controllers) and PSI off. Without memcg every MemoryMax=
+# in the units above is silently ignored, so a runaway process thrashes the whole
+# box into a state only a power cycle fixes. cmdline.txt is one single line —
+# append tokens, never add a newline.
+BOOT_CMD="/boot/firmware/cmdline.txt"
+if [[ -f "$BOOT_CMD" ]]; then
+    CMDLINE_CHANGED=false
+    for tok in cgroup_enable=memory cgroup_memory=1 psi=1; do
+        if ! grep -qw "$tok" "$BOOT_CMD"; then
+            sed -i "s/\$/ $tok/" "$BOOT_CMD"
+            CMDLINE_CHANGED=true
+        fi
+    done
+    if $CMDLINE_CHANGED; then
+        info "cmdline.txt: enabled memory cgroup + PSI (takes effect after reboot; unit MemoryMax= caps are inert until then)."
+    else
+        info "cmdline.txt already has memory cgroup + PSI enabled."
+    fi
+else
+    warn "/boot/firmware/cmdline.txt not found — memory caps on the units will be ignored."
 fi
 
 # ── Auto-recovery (watchdog · panic · power) ───────────────────────────────
@@ -906,12 +962,15 @@ fi
 PANIC_CONF="/etc/sysctl.d/99-panic-reboot.conf"
 PANIC_TMP="$(mktemp)"
 cat > "$PANIC_TMP" <<'EOF'
-# Reboot ~10s after a real kernel panic (unrecoverable). We deliberately do NOT reboot
-# on a mere oops: an oops is often survivable, and hard-resetting on one destroys the
-# logs that explain what went wrong. Set explicitly to 0 so a re-run also UNDOES an
-# earlier panic_on_oops=1 on the running kernel.
+# Reboot ~10s after a kernel panic. Earlier this kept panic_on_oops=0 to preserve
+# logs, but with journald persistent and ramoops capturing the panic text across a
+# reset, the calculus flips: an unhandled oops (e.g. in the xhci/RTL-SDR USB path)
+# left running degrades silently or wedges the box until someone pulls power.
+# Panic → ramoops records it → auto-reboot → evidence in /sys/fs/pstore.
 kernel.panic = 10
-kernel.panic_on_oops = 0
+kernel.panic_on_oops = 1
+kernel.softlockup_panic = 1
+kernel.hung_task_panic = 1
 EOF
 if cmp -s "$PANIC_TMP" "$PANIC_CONF" 2>/dev/null; then
     rm -f "$PANIC_TMP"
@@ -919,7 +978,7 @@ if cmp -s "$PANIC_TMP" "$PANIC_CONF" 2>/dev/null; then
 else
     mv "$PANIC_TMP" "$PANIC_CONF"
     sysctl -p "$PANIC_CONF" >/dev/null 2>&1 || true
-    info "kernel panic auto-reboot set (panic=10; panic_on_oops OFF to preserve crash logs)."
+    info "kernel panic auto-reboot set (panic=10; oops/soft-lockup/hung-task now panic → ramoops evidence + reboot)."
 fi
 
 # The watchdog device only appears once the config.txt change is applied at boot.
