@@ -260,7 +260,13 @@ type Bridge struct {
 	Controller *Controller
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
-	mutex      sync.Mutex
+	mutex      sync.Mutex // short-hold: guards cancel + Status, never held across wg.Wait
+	// lifecycle serializes the whole Start/Stop/Restart sequence (drain through
+	// rebind). Without it a concurrent Restart — admin save vs provision job —
+	// could wg.Add while another Stop is parked in wg.Wait (Add-during-Wait panic)
+	// and rebind still-held UDP ports (EADDRINUSE). It is distinct from mutex so
+	// Status never blocks behind a drain.
+	lifecycle sync.Mutex
 }
 
 func NewBridge(controller *Controller) *Bridge {
@@ -268,6 +274,13 @@ func NewBridge(controller *Controller) *Bridge {
 }
 
 func (b *Bridge) Start() {
+	b.lifecycle.Lock()
+	defer b.lifecycle.Unlock()
+	b.startLocked()
+}
+
+// startLocked spawns the monitor goroutines. Caller must hold b.lifecycle.
+func (b *Bridge) startLocked() {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 
@@ -334,6 +347,14 @@ func (b *Bridge) Start() {
 }
 
 func (b *Bridge) Stop() {
+	b.lifecycle.Lock()
+	defer b.lifecycle.Unlock()
+	b.stopLocked()
+}
+
+// stopLocked cancels the monitors and drains them. Caller must hold b.lifecycle
+// so the drain completes before any Start rebinds the ports.
+func (b *Bridge) stopLocked() {
 	b.mutex.Lock()
 
 	if b.cancel == nil {
@@ -365,12 +386,17 @@ func (b *Bridge) Status() BridgeStatus {
 	}
 }
 
-// Restart is called when options are saved via the admin panel.
+// Restart is called when options are saved via the admin panel. The lifecycle
+// mutex is held across the whole stop-then-start so concurrent restarts (admin
+// save vs provision job) can't interleave a Start into another Stop's drain.
 func (b *Bridge) Restart() {
-	b.Stop()
+	b.lifecycle.Lock()
+	defer b.lifecycle.Unlock()
+
+	b.stopLocked()
 
 	if b.Controller.Options.BridgeEnabled {
-		b.Start()
+		b.startLocked()
 	}
 }
 
@@ -568,8 +594,15 @@ func (b *Bridge) runMonitor(ctx context.Context, udpPort, sampleRate int, logLab
 		if lbl.frequencyHz > 0 {
 			call.Frequencies = []CallFrequency{{Frequency: lbl.frequencyHz}}
 		}
-		b.Controller.Ingest <- call
-		b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: call submitted (tg=%d duration=%dms pcm=%d bytes)", logLabel, lbl.talkgroupRef, durMs, len(pcm)))
+		// Never block the monitor on a stalled ingest: if Stop() cancels ctx while
+		// the channel is full, abandon this call so wg.Wait() (and any restart) can
+		// proceed instead of wedging here forever.
+		select {
+		case b.Controller.Ingest <- call:
+			b.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("bridge: %s: call submitted (tg=%d duration=%dms pcm=%d bytes)", logLabel, lbl.talkgroupRef, durMs, len(pcm)))
+		case <-ctx.Done():
+			b.Controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("bridge: %s: dropped call on shutdown (tg=%d duration=%dms)", logLabel, lbl.talkgroupRef, durMs))
+		}
 	}
 
 	audioCh := make(chan []byte, 256)
