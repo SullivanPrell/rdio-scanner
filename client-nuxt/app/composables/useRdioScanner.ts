@@ -95,6 +95,10 @@ const RECONNECT_DELAY = 3000
 const LFM_STORAGE_KEY = 'rdio-scanner-lfm'
 const PIN_STORAGE_KEY = 'rdio-scanner-pin'
 const HISTORY_MAX = 50
+// Queued calls retain their full audio bytes for replay, so an unbounded queue
+// (paused live feed, or a long call playing) pins hundreds of KB per call. Cap
+// it and drop the oldest overflow.
+const QUEUE_MAX = 100
 
 export const useRdioScanner = () => {
   const config          = useState<RdioConfig | null>('rs:config',      () => null)
@@ -246,9 +250,9 @@ export const useRdioScanner = () => {
     // currentCall goes null between calls, which would let the hold drift.
     if (holdSys.value && heldSystem.value    != null && call.system    !== heldSystem.value)    return
     if (holdTg.value  && heldTalkgroup.value != null && call.talkgroup !== heldTalkgroup.value) return
-    if (livefeedPaused.value) { callQueue.value = [...callQueue.value, call]; return }
+    if (livefeedPaused.value) { callQueue.value = [...callQueue.value, call].slice(-QUEUE_MAX); return }
     if (isPlaying.value || isPaused.value) {
-      callQueue.value = [...callQueue.value, call]
+      callQueue.value = [...callQueue.value, call].slice(-QUEUE_MAX)
     } else {
       playCall(call)
     }
