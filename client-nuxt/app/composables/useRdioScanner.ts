@@ -107,6 +107,8 @@ export const useRdioScanner = () => {
   const livefeedPaused  = useState('rs:lfPaused',     () => false)
   const holdSys         = useState('rs:holdSys',      () => false)
   const holdTg          = useState('rs:holdTg',       () => false)
+  const heldSystem      = useState<number | null>('rs:heldSystem',    () => null)
+  const heldTalkgroup   = useState<number | null>('rs:heldTalkgroup', () => null)
   const listenersCount  = useState('rs:listeners',    () => 0)
   const serverVersion   = useState('rs:version',      () => '')
   const pinRequired     = useState('rs:pinRequired',  () => false)
@@ -124,6 +126,9 @@ export const useRdioScanner = () => {
   let progressTimer: ReturnType<typeof setInterval> | null = null
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let clockTimer: ReturnType<typeof setInterval> | null = null
+  // Bumped on every playCall/stopAudio so an out-of-order decodeAudioData
+  // resolution from a superseded call can't hijack the active playback.
+  let playGen = 0
 
   const getAudioCtx = () => {
     if (!audioCtx) {
@@ -165,7 +170,7 @@ export const useRdioScanner = () => {
     switch (cmd) {
       case WsCmd.Config:         handleConfig(rest[0] as RdioConfig); break
       case WsCmd.Call:           handleCall(rest[0] as RdioCall, rest[1] as string); break
-      case WsCmd.Expired:        handleExpired(); break
+      case WsCmd.Expired:        handleAccessExpired(); break
       case WsCmd.ListCall:       listResult.value = normalizeListResult(rest[0]); break
       case WsCmd.ListenersCount: listenersCount.value = rest[0] as number; break
       // The server replies to our LFM with a boolean ack ("livefeed active?"),
@@ -174,13 +179,17 @@ export const useRdioScanner = () => {
       // unchecks every talkgroup and breaks all selection.
       case WsCmd.LivefeedMap:    if (rest[0] && typeof rest[0] === 'object') livefeedMap.value = rest[0] as RdioLivefeedMap; break
       case WsCmd.Max:            maxReached.value = true; break
-      case WsCmd.Pin:            pinRequired.value = rest[0] === 'required'; break
+      // The server sends a bare ["PIN"] frame (no payload) as the auth challenge;
+      // any PIN frame means a code is required. Cleared once CFG arrives.
+      case WsCmd.Pin:            pinRequired.value = true; break
       case WsCmd.Version:        serverVersion.value = String(rest[0]); break
     }
   }
 
   const handleConfig = (cfg: RdioConfig) => {
     config.value = cfg
+    pinRequired.value = false
+    maxReached.value  = false
     if (import.meta.client) {
       const stored = localStorage.getItem(LFM_STORAGE_KEY)
       if (stored) { try { livefeedMap.value = JSON.parse(stored) } catch { /**/ } }
@@ -220,7 +229,9 @@ export const useRdioScanner = () => {
   const handleCall = (raw: RdioCall, flag: string) => {
     const call = normalizeCall(raw)
     if (!call.audio.length) return
-    callHistory.value = [call, ...callHistory.value].slice(0, HISTORY_MAX)
+    // History is display-only (never replayed); drop the audio bytes so 50 calls
+    // don't pin tens of MB of reactive state per tab.
+    callHistory.value = [{ ...call, audio: [] }, ...callHistory.value].slice(0, HISTORY_MAX)
     // An explicitly requested call (search result / playback) carries a flag —
     // play it immediately rather than subjecting it to live-feed holds/queueing.
     if (flag) {
@@ -231,9 +242,11 @@ export const useRdioScanner = () => {
       playCall(call)
       return
     }
-    if (holdSys.value && currentCall.value && call.system !== currentCall.value.system) return
-    if (holdTg.value  && currentCall.value && call.talkgroup !== currentCall.value.talkgroup) return
-    if (livefeedPaused.value) return
+    // Holds compare against a snapshot captured at toggle time, not currentCall —
+    // currentCall goes null between calls, which would let the hold drift.
+    if (holdSys.value && heldSystem.value    != null && call.system    !== heldSystem.value)    return
+    if (holdTg.value  && heldTalkgroup.value != null && call.talkgroup !== heldTalkgroup.value) return
+    if (livefeedPaused.value) { callQueue.value = [...callQueue.value, call]; return }
     if (isPlaying.value || isPaused.value) {
       callQueue.value = [...callQueue.value, call]
     } else {
@@ -268,7 +281,8 @@ export const useRdioScanner = () => {
     }
   }
 
-  const handleExpired = () => {
+  // End of the current call: stop audio and advance to the next queued call.
+  const advanceQueue = () => {
     stopAudio()
     currentCall.value  = null
     isPlaying.value    = false
@@ -280,21 +294,36 @@ export const useRdioScanner = () => {
     }
   }
 
+  // Server XPR: the access code expired. Distinct from end-of-call — clear the
+  // stale PIN and re-open the PIN challenge rather than silently draining.
+  const handleAccessExpired = () => {
+    stopAudio()
+    currentCall.value  = null
+    isPlaying.value    = false
+    playbackMode.value = false
+    callQueue.value    = []
+    if (import.meta.client) localStorage.removeItem(PIN_STORAGE_KEY)
+    pinRequired.value = true
+  }
+
   const playCall = async (call: RdioCall) => {
+    const gen = ++playGen
     currentCall.value      = call
     isPlaying.value        = true
     playbackProgress.value = 0
     try {
       const ctx = getAudioCtx()
       if (ctx.state === 'suspended') await ctx.resume()
+      if (gen !== playGen) return
       const bytes = new Uint8Array(call.audio)
       const audioBuffer = await ctx.decodeAudioData(bytes.buffer)
+      if (gen !== playGen) return
       stopAudio(false)
       audioSource = ctx.createBufferSource()
       audioSource.buffer = audioBuffer
       audioSource.connect(ctx.destination)
       audioStartTime = ctx.currentTime
-      audioSource.onended = () => { if (isPlaying.value) handleExpired() }
+      audioSource.onended = () => { if (isPlaying.value) advanceQueue() }
       audioSource.start(0)
       const duration = audioBuffer.duration
       if (progressTimer) clearInterval(progressTimer)
@@ -304,12 +333,14 @@ export const useRdioScanner = () => {
         if (elapsed >= duration && progressTimer) clearInterval(progressTimer)
       }, 100)
     } catch (err) {
+      if (gen !== playGen) return
       console.error('Audio decode error:', err)
-      handleExpired()
+      advanceQueue()
     }
   }
 
   const stopAudio = (clearState = true) => {
+    playGen++
     if (progressTimer) { clearInterval(progressTimer); progressTimer = null }
     if (audioSource) {
       try { audioSource.onended = null; audioSource.stop(); audioSource.disconnect() } catch { /**/ }
@@ -325,6 +356,7 @@ export const useRdioScanner = () => {
     ws = new WebSocket(url)
     ws.onopen = () => {
       connected.value = true
+      maxReached.value = false
       send(WsCmd.Version)
       send(WsCmd.Config)
       if (import.meta.client) {
@@ -397,12 +429,25 @@ export const useRdioScanner = () => {
     setLivefeedMap(lfm)
   }
 
-  const toggleHoldSystem    = () => { holdSys.value = !holdSys.value }
-  const toggleHoldTalkgroup = () => { holdTg.value  = !holdTg.value  }
-  const toggleLivefeedPause = () => { livefeedPaused.value = !livefeedPaused.value }
+  const toggleHoldSystem = () => {
+    holdSys.value = !holdSys.value
+    heldSystem.value = holdSys.value ? (currentCall.value?.system ?? null) : null
+  }
+  const toggleHoldTalkgroup = () => {
+    holdTg.value = !holdTg.value
+    heldTalkgroup.value = holdTg.value ? (currentCall.value?.talkgroup ?? null) : null
+  }
+  const toggleLivefeedPause = () => {
+    livefeedPaused.value = !livefeedPaused.value
+    if (!livefeedPaused.value && !isPlaying.value && !isPaused.value && callQueue.value.length) {
+      const [next, ...rest] = callQueue.value
+      callQueue.value = rest
+      playCall(next)
+    }
+  }
   const pause  = () => { if (!isPlaying.value) return; stopAudio(false); isPaused.value = true; isPlaying.value = false }
   const resume = () => { if (!isPaused.value || !currentCall.value) return; isPaused.value = false; playCall(currentCall.value) }
-  const skip   = () => { handleExpired() }
+  const skip   = () => { advanceQueue() }
   const replay = () => { if (currentCall.value) playCall(currentCall.value) }
   const avoid  = () => { /* TODO: server-side avoid */ }
 

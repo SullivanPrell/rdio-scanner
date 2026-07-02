@@ -12,6 +12,12 @@ onUnmounted(() => rs.disconnect())
 
 watch(rs.pinRequired, (v) => { if (v) showPin.value = true })
 
+const retryConnection = () => {
+  rs.maxReached.value = false
+  rs.disconnect()
+  rs.connect()
+}
+
 const submitPin = () => {
   if (!pinInput.value) return
   rs.submitPin(pinInput.value)
@@ -49,6 +55,9 @@ useHead({ title: 'Rdio Scanner' })
         <p class="text-sm text-neutral-400">
           The maximum number of simultaneous listeners has been reached. Please try again later.
         </p>
+      </template>
+      <template #footer>
+        <UButton block @click="retryConnection">Retry</UButton>
       </template>
     </UModal>
 

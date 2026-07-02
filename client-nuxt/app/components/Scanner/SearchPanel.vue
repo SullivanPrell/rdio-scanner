@@ -24,7 +24,13 @@ const talkgroupOptions = computed(() => {
   return sys?.talkgroups.map(tg => ({ label: `${tg.id} – ${tg.name}`, value: tg.id })) ?? []
 })
 
-const doSearch = () => emit('search', { ...opts.value })
+// The native date input yields 'YYYY-MM-DD', but the server parses the date
+// filter as RFC3339 (call.go fromMap) and silently drops anything else. Send a
+// UTC midnight timestamp so the day filter actually applies.
+const doSearch = () => emit('search', {
+  ...opts.value,
+  date: opts.value.date ? `${opts.value.date}T00:00:00Z` : undefined,
+})
 
 const formatDateTime = (iso: string) =>
   new Date(iso).toLocaleString('en-US', { dateStyle: 'short', timeStyle: 'medium' })
