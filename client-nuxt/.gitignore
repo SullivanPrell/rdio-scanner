@@ -4,3 +4,6 @@ node_modules/
 dist/
 *.log
 .env
+
+# Yarn local install cache (node-modules linker) — regenerated on every install
+.yarn/install-state.gz
