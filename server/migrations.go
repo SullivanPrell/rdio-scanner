@@ -246,7 +246,7 @@ func migrateCalls(db *Database) error {
 
 	log.Println("migrating calls...")
 
-	query = `SELECT s."systemId", s."systemRef", t."talkgroupId", t."talkgroupRef" FROM "systems" AS s LEFT JOIN "talkgroups" AS t`
+	query = `SELECT s."systemId", s."systemRef", t."talkgroupId", t."talkgroupRef" FROM "systems" AS s LEFT JOIN "talkgroups" AS t ON t."systemId" = s."systemId"`
 	if rows, err = db.Sql.Query(query); err != nil {
 		return formatError(err, query)
 	}
@@ -497,7 +497,7 @@ func migrateDirwatches(db *Database) error {
 
 	log.Println("migrating dirwatches...")
 
-	query = `SELECT s."systemId", s."systemRef", t."talkgroupId", t."talkgroupRef" FROM "systems" AS s LEFT JOIN "talkgroups" AS t`
+	query = `SELECT s."systemId", s."systemRef", t."talkgroupId", t."talkgroupRef" FROM "systems" AS s LEFT JOIN "talkgroups" AS t ON t."systemId" = s."systemId"`
 	if rows, err = db.Sql.Query(query); err != nil {
 		return formatError(err, query)
 	}
@@ -1459,7 +1459,7 @@ func migrateUnits(db *Database) error {
 			unit.UnitRef = uint(unitRef.Int32)
 		}
 
-		query = fmt.Sprintf(`INSERT INTO "units" ("unitId", "label", "order", "systemId", "unitRef") VALUES (%d, '%s', %d, %d, %d)`, unitId.Int64, unit.Label, unit.Order, systems[systemId.Int32], unit.Id)
+		query = fmt.Sprintf(`INSERT INTO "units" ("unitId", "label", "order", "systemId", "unitRef") VALUES (%d, '%s', %d, %d, %d)`, unitId.Int64, unit.Label, unit.Order, systems[systemId.Int32], unit.UnitRef)
 		if _, err = tx.Exec(query); err != nil {
 			log.Println(formatError(err, query))
 		}
