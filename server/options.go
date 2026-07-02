@@ -553,20 +553,21 @@ func (options *Options) Write(db *Database) error {
 	formatError := errorFormatter("options", "write")
 
 	set := func(key string, val any) {
-		if val, err = json.Marshal(val); err == nil {
-			switch v := val.(type) {
-			case string:
-				val = escapeQuotes(v)
-			}
+		var b []byte
+		if b, err = json.Marshal(val); err != nil {
+			log.Println(formatError(err, key))
+			return
+		}
 
-			query := fmt.Sprintf(`UPDATE "options" SET "value" = '%s' WHERE "key" = '%s'`, val, key)
-			if res, err = tx.Exec(query); err == nil {
-				if i, err := res.RowsAffected(); err == nil && i == 0 {
-					query = fmt.Sprintf(`INSERT INTO "options" ("key", "value") VALUES ('%s', '%s')`, key, val)
-					if _, err = tx.Exec(query); err != nil {
-						log.Println(formatError(err, query))
-					}
-				}
+		s := escapeQuotes(string(b))
+
+		query := fmt.Sprintf(`UPDATE "options" SET "value" = '%s' WHERE "key" = '%s'`, s, key)
+		if res, err = tx.Exec(query); err != nil {
+			log.Println(formatError(err, query))
+		} else if i, err := res.RowsAffected(); err == nil && i == 0 {
+			query = fmt.Sprintf(`INSERT INTO "options" ("key", "value") VALUES ('%s', '%s')`, key, s)
+			if _, err = tx.Exec(query); err != nil {
+				log.Println(formatError(err, query))
 			}
 		}
 	}
