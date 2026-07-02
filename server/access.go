@@ -258,6 +258,10 @@ func (accesses *Accesses) Read(db *Database) error {
 		accesses.List = append(accesses.List, access)
 	}
 
+	if err == nil {
+		err = rows.Err()
+	}
+
 	rows.Close()
 
 	if err != nil {

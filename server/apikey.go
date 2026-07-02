@@ -75,6 +75,18 @@ func (apikey *Apikey) FromMap(m map[string]any) *Apikey {
 }
 
 func (apikey *Apikey) HasAccess(call *Call) bool {
+	// This runs from api.go HandleCall, before the controller resolves the
+	// call.System / call.Talkgroup pointers during ingest, so they are still
+	// nil here. Fall back to the refs the parsers populated on call.Meta.
+	systemRef := call.Meta.SystemRef
+	if call.System != nil {
+		systemRef = call.System.SystemRef
+	}
+	talkgroupRef := call.Meta.TalkgroupRef
+	if call.Talkgroup != nil {
+		talkgroupRef = call.Talkgroup.TalkgroupRef
+	}
+
 	switch v := apikey.Systems.(type) {
 	case []any:
 		for _, f := range v {
@@ -82,7 +94,7 @@ func (apikey *Apikey) HasAccess(call *Call) bool {
 			case map[string]any:
 				switch id := v["id"].(type) {
 				case float64:
-					if id == float64(call.System.SystemRef) {
+					if id == float64(systemRef) {
 						switch tg := v["talkgroups"].(type) {
 						case string:
 							if tg == "*" {
@@ -92,7 +104,7 @@ func (apikey *Apikey) HasAccess(call *Call) bool {
 							for _, f := range tg {
 								switch tg := f.(type) {
 								case float64:
-									if tg == float64(call.Talkgroup.TalkgroupRef) {
+									if tg == float64(talkgroupRef) {
 										return true
 									}
 								}
@@ -203,6 +215,10 @@ func (apikeys *Apikeys) Read(db *Database) error {
 		}
 
 		apikeys.List = append(apikeys.List, apikey)
+	}
+
+	if err == nil {
+		err = rows.Err()
 	}
 
 	rows.Close()
