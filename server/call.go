@@ -251,7 +251,11 @@ func (calls *Calls) GetCall(id uint64) (*Call, error) {
 		query = fmt.Sprintf(`SELECT c."audio", c."audioFilename", c."audioMime", c."siteRef", c."timestamp", GROUP_CONCAT(COALESCE(cpt."talkgroupRef", 0)), c."siteRef", sy."systemId", t."talkgroupId" FROM "calls" AS c LEFT JOIN "callPatches" AS cp on cp."callId" = c."callId" LEFT JOIN "talkgroups" AS cpt ON cpt."talkgroupId" = cp."talkgroupId" LEFT JOIN "systems" AS sy ON sy."systemId" = c."systemId" LEFT JOIN "talkgroups" AS t ON t."talkgroupId" = c."talkgroupId" WHERE c."callId" = %d GROUP BY c."callId"`, id)
 	}
 
-	if err = tx.QueryRow(query).Scan(&call.Audio, &call.AudioFilename, &call.AudioMime, &patch, &timestamp, &patch, &call.SiteRef, &systemId, &talkgroupId); err != nil && err != sql.ErrNoRows {
+	if err = tx.QueryRow(query).Scan(&call.Audio, &call.AudioFilename, &call.AudioMime, &patch, &timestamp, &patch, &call.SiteRef, &systemId, &talkgroupId); err == sql.ErrNoRows {
+		tx.Rollback()
+		return nil, formatError(fmt.Errorf("no call with id %d", id), "")
+
+	} else if err != nil {
 		tx.Rollback()
 		return nil, formatError(err, query)
 	}
@@ -270,6 +274,7 @@ func (calls *Calls) GetCall(id uint64) (*Call, error) {
 		call.System = system
 
 	} else {
+		tx.Rollback()
 		return nil, formatError(fmt.Errorf("cannot retrieve system id %d for call id %d", systemId, call.Id), "")
 	}
 
@@ -277,6 +282,7 @@ func (calls *Calls) GetCall(id uint64) (*Call, error) {
 		call.Talkgroup = talkgroup
 
 	} else {
+		tx.Rollback()
 		return nil, formatError(fmt.Errorf("cannot retrieve talkgroup id %d for call id %d", talkgroupId, call.Id), "")
 	}
 
@@ -382,15 +388,18 @@ func (calls *Calls) Search(searchOptions *CallsSearchOptions, client *Client) (*
 				var c string
 				switch v := scope.(type) {
 				case map[string]any:
-					switch v["talkgroups"].(type) {
-					case []any:
-						b := strings.ReplaceAll(fmt.Sprintf("%v", v["talkgroups"]), " ", ", ")
-						b = strings.ReplaceAll(b, "[", "(")
-						b = strings.ReplaceAll(b, "]", ")")
-						c = fmt.Sprintf(`(s."systemRef" = %d AND t."talkgroupRef" IN %v)`, v["id"], b)
-					case string:
-						if v["talkgroups"] == "*" {
-							c = fmt.Sprintf(`s."systemRef" = %d`, v["id"])
+					switch id := v["id"].(type) {
+					case float64:
+						switch v["talkgroups"].(type) {
+						case []any:
+							b := strings.ReplaceAll(fmt.Sprintf("%v", v["talkgroups"]), " ", ", ")
+							b = strings.ReplaceAll(b, "[", "(")
+							b = strings.ReplaceAll(b, "]", ")")
+							c = fmt.Sprintf(`(s."systemRef" = %d AND t."talkgroupRef" IN %v)`, uint(id), b)
+						case string:
+							if v["talkgroups"] == "*" {
+								c = fmt.Sprintf(`s."systemRef" = %d`, uint(id))
+							}
 						}
 					}
 				}
