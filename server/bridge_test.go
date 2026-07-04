@@ -9,6 +9,7 @@ package main
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -429,5 +430,42 @@ func TestFreqScannerReportParked(t *testing.T) {
 		if got := r.parked(); got != want {
 			t.Errorf("parked() with scanState=%d = %v, want %v", state, got, want)
 		}
+	}
+}
+
+// A frequencyHz sent as a fractional number (MHz where Hz was expected — the client
+// bug that rejected whole bridge payloads) must scale to Hz, while an integer Hz value
+// (including legitimate sub-1-MHz direct-sampling frequencies) must round-trip
+// unchanged so repeated saves/restarts can't corrupt it.
+func TestBridgeChannelFrequencyUnmarshal(t *testing.T) {
+	cases := []struct {
+		json string
+		want uint
+	}{
+		{`{"frequencyHz":444.375}`, 444375000},   // MHz float → Hz
+		{`{"frequencyHz":146.52}`, 146520000},    // MHz float → Hz
+		{`{"frequencyHz":444375000}`, 444375000}, // integer Hz unchanged
+		{`{"frequencyHz":475000}`, 475000},       // 475 kHz integer Hz stays put (no ×1e6)
+		{`{"frequencyHz":60000}`, 60000},         // 60 kHz integer Hz stays put
+		{`{"frequencyHz":0}`, 0},                 // parked
+		{`{"frequencyHz":1e300}`, 0},             // absurd → parked, not uint overflow garbage
+	}
+	for _, c := range cases {
+		var ch BridgeChannelConfig
+		if err := json.Unmarshal([]byte(c.json), &ch); err != nil {
+			t.Fatalf("Unmarshal(%s) error: %v", c.json, err)
+		}
+		if ch.FrequencyHz != c.want {
+			t.Errorf("Unmarshal(%s) FrequencyHz = %d, want %d", c.json, ch.FrequencyHz, c.want)
+		}
+	}
+
+	// Other fields must still decode through the embedded alias.
+	var ch BridgeChannelConfig
+	if err := json.Unmarshal([]byte(`{"frequencyHz":444.375,"label":"N9BDR","udpPort":50001,"scan":true}`), &ch); err != nil {
+		t.Fatalf("Unmarshal with fields error: %v", err)
+	}
+	if ch.Label != "N9BDR" || ch.UdpPort != 50001 || !ch.Scan {
+		t.Errorf("sibling fields not decoded: %+v", ch)
 	}
 }
