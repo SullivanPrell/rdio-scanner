@@ -1018,6 +1018,18 @@ func (dirwatches *Dirwatches) Start(controller *Controller) {
 	}
 }
 
+// StopWatchers stops each dir-watch's fsnotify watcher but, unlike Stop, KEEPS
+// the list so a following Start() can bring the same watches back. ConfigHandler
+// brackets every save with a stop/start; using Stop() there also emptied the list,
+// so any save whose payload omitted the "dirwatch" key (e.g. a bridge- or
+// options-only save) left nothing for Start() to restart — silently and
+// permanently killing trunk-recorder ingest until the next process restart.
+func (dirwatches *Dirwatches) StopWatchers() {
+	for i := range dirwatches.List {
+		dirwatches.List[i].Stop()
+	}
+}
+
 func (dirwatches *Dirwatches) Stop() {
 	for i := range dirwatches.List {
 		dirwatches.List[i].Stop()

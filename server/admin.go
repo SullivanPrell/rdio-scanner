@@ -197,7 +197,12 @@ func (admin *Admin) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 			admin.mutex.Lock()
 			defer admin.mutex.Unlock()
 
-			admin.Controller.Dirwatches.Stop()
+			// Stop the watchers (but KEEP the list) for the duration of the save,
+			// then restart them below. Must NOT be Dirwatches.Stop(): that empties
+			// the list, and a save payload without a "dirwatch" key never rebuilds
+			// it, so the Start() below would restart nothing and ingest would stay
+			// dead until the next process restart.
+			admin.Controller.Dirwatches.StopWatchers()
 
 			// Snapshot the bridge-relevant option values so we can restart the
 			// bridge AT MOST ONCE per save, and only when one of them actually
