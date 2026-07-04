@@ -146,6 +146,43 @@ func (tags *Tags) GetTagByLabel(label string) (tag *Tag, ok bool) {
 	return nil, false
 }
 
+// GetOrCreateFallback returns the id of a tag guaranteed to exist in the database,
+// creating a default "Untagged" tag on first need. Config writes attach it to any
+// talkgroup whose tagId is unset or stale: the talkgroups.tagId foreign key would
+// otherwise fail and roll back the ENTIRE systems write, silently blocking every
+// configuration save. Mirrors the auto-populate path, which tags unknown talkgroups
+// "Untagged" for the same reason.
+func (tags *Tags) GetOrCreateFallback(db *Database) (uint64, error) {
+	const fallbackLabel = "Untagged"
+
+	if tag, ok := tags.GetTagByLabel(fallbackLabel); ok && tag.Id > 0 {
+		return tag.Id, nil
+	}
+
+	tags.mutex.Lock()
+	tags.List = append(tags.List, &Tag{Label: fallbackLabel})
+	tags.mutex.Unlock()
+
+	writeErr := tags.Write(db)
+	// Always resync the in-memory list from the DB, even if Write failed: Read rebuilds
+	// List from persisted rows, dropping the just-appended Id==0 entry. Otherwise a failed
+	// create would leave a phantom Id==0 "Untagged" that a later lookup returns as valid,
+	// reintroducing the tagId=0 foreign-key failure this function exists to prevent.
+	readErr := tags.Read(db)
+	if writeErr != nil {
+		return 0, writeErr
+	}
+	if readErr != nil {
+		return 0, readErr
+	}
+
+	if tag, ok := tags.GetTagByLabel(fallbackLabel); ok && tag.Id > 0 {
+		return tag.Id, nil
+	}
+
+	return 0, fmt.Errorf("could not create fallback tag %q", fallbackLabel)
+}
+
 func (tags *Tags) GetTagsData(systemsMap *SystemsMap) []Tag {
 	var list = []Tag{}
 

@@ -336,6 +336,25 @@ func (admin *Admin) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 			switch v := m["systems"].(type) {
 			case []any:
 				admin.Controller.Systems.FromMap(v)
+				// Guarantee every talkgroup references a tag that actually exists. An
+				// unresolved tagId — 0 (e.g. an auto-populated bridge scanner talkgroup
+				// that was never tagged) or a since-deleted tag — otherwise fails the
+				// talkgroups foreign key and rolls back ALL systems, which silently
+				// blocks every configuration save (and, transitively, the dir-watch /
+				// bridge changes that share the same PUT).
+				//
+				// Systems are deliberately written BEFORE tags (below): writing tags
+				// first would let Tags.Write commit a tag DELETE while talkgroups still
+				// reference it, and talkgroups.tagId → tags is ON DELETE CASCADE (which
+				// further cascades to calls) — so deleting a tag whose talkgroups are
+				// reassigned in the SAME save would wipe recorded calls. Writing systems
+				// first performs that reassignment before the tag delete, and this
+				// fallback covers any still-unresolved tagId without needing the reorder.
+				if fallbackTagId, ferr := admin.Controller.Tags.GetOrCreateFallback(admin.Controller.Database); ferr != nil {
+					logError(ferr)
+				} else {
+					admin.Controller.Systems.NormalizeTagIds(admin.Controller.Tags, fallbackTagId)
+				}
 				err = admin.Controller.Systems.Write(admin.Controller.Database)
 				if err != nil {
 					logError(err)
