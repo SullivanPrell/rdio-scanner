@@ -429,11 +429,21 @@ func (dirwatch *Dirwatch) ingestTrunkRecorder(p string) error {
 	}
 
 	if dirwatch.DeleteAfter {
-		if err = os.Remove(p); err != nil {
-			return err
+		// Remove every file trunk-recorder wrote for this call, not just the .json
+		// and the ingested audio: it emits sibling recordings (a .m4a next to the
+		// .wav) that share the call's base name. Deleting only two of them left the
+		// rest to pile up indefinitely — a slow disk leak that rebuilds the same
+		// multi-thousand-file backlog which then stalls a fresh WalkDir on restart.
+		siblings, gerr := filepath.Glob(base + ".*")
+		if gerr != nil {
+			// ErrBadPattern is the only failure mode; fall back to the two files we
+			// already know about so cleanup still happens.
+			siblings = []string{p, audioName}
 		}
-		if err = os.Remove(audioName); err != nil {
-			return err
+		for _, f := range siblings {
+			if rerr := os.Remove(f); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+				dirwatch.controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("dirwatch: trunk-recorder cleanup could not remove %s: %v", filepath.Base(f), rerr))
+			}
 		}
 	}
 
