@@ -716,10 +716,13 @@ Restart=on-failure
 RestartSec=5
 # Caps need the memory cgroup controller (cgroup_enable=memory in cmdline.txt,
 # added below; reboot to apply) — until then systemd ignores them. Normal RSS is
-# ~55 MB; a runaway (stalled ingest pinning queued call audio) gets killed and
-# restarted here instead of dragging the whole Pi into zram thrash.
-MemoryHigh=512M
-MemoryMax=768M
+# ~55 MB, but the SQLite page cache legitimately grows with the DB (multi-GB), so
+# this is a RUNAWAY BACKSTOP, not a working-set limit — set well above normal so we
+# don't thrash on reclaim. An earlier 512M cap throttled rdio-scanner 50k+ times
+# against a box with 6 GB free, stalling ingest. A true runaway still gets killed
+# and restarted here instead of dragging the whole Pi into zram thrash.
+MemoryHigh=2560M
+MemoryMax=3072M
 OOMPolicy=kill
 StandardOutput=journal
 StandardError=journal
@@ -772,9 +775,11 @@ WorkingDirectory=${TR_DATA_DIR}
 ExecStart=${TR_BIN} --config ${TR_CONFIG}
 Restart=on-failure
 RestartSec=15
-# Needs cgroup_enable=memory (see cmdline.txt step) + reboot; ~155 MB normal.
-MemoryHigh=768M
-MemoryMax=1G
+# Needs cgroup_enable=memory (see cmdline.txt step) + reboot; ~155 MB normal, but
+# demod/recorder buffers spike well above that under load — this is a runaway
+# backstop, not a working-set cap (an earlier 768M cap throttled it against 6 GB free).
+MemoryHigh=1536M
+MemoryMax=2G
 OOMPolicy=kill
 StandardOutput=journal
 StandardError=journal

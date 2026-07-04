@@ -496,6 +496,27 @@ func (systems *Systems) Read(db *Database) error {
 	return nil
 }
 
+// NormalizeTagIds points every talkgroup at a tag that actually exists. Any tagId that
+// does not resolve — 0 (never a valid tag) or an id whose tag was since deleted — is
+// reassigned to fallbackTagId. A single dangling tagId otherwise fails the talkgroups
+// foreign key and rolls back the whole systems write, blocking all configuration saves.
+// Lock order is systems → talkgroups → tags (tags being a leaf via GetTagById), matching
+// Systems.Write, so this never deadlocks against a concurrent write.
+func (systems *Systems) NormalizeTagIds(tags *Tags, fallbackTagId uint64) {
+	systems.mutex.Lock()
+	defer systems.mutex.Unlock()
+
+	for _, system := range systems.List {
+		system.Talkgroups.mutex.Lock()
+		for _, talkgroup := range system.Talkgroups.List {
+			if _, ok := tags.GetTagById(talkgroup.TagId); !ok {
+				talkgroup.TagId = fallbackTagId
+			}
+		}
+		system.Talkgroups.mutex.Unlock()
+	}
+}
+
 func (systems *Systems) Write(db *Database) error {
 	var (
 		err       error

@@ -21,6 +21,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"sync"
@@ -56,6 +57,40 @@ type BridgeChannelConfig struct {
 	// fixed UDPSink. Within a device set's scan group, every member shares the same
 	// value, and the first member (in slice order) owns the shared UDP sink port.
 	ScannerChannelIndex int `json:"scannerChannelIndex,omitempty"`
+}
+
+// UnmarshalJSON tolerates a frequencyHz sent as a floating-point number and, like the
+// admin client's frequency parser, reads a value below 1e6 as MHz (converting to Hz).
+// Without this a single channel whose frequency arrived as e.g. 444.375 (MHz, from a
+// manual entry or import that skipped the MHz→Hz conversion) would fail to decode into
+// the uint field and reject the ENTIRE bridge-channels payload — silently freezing the
+// scanner on its previous channel set ("bridge channels payload rejected, keeping
+// current channels" in the log).
+func (c *BridgeChannelConfig) UnmarshalJSON(b []byte) error {
+	type alias BridgeChannelConfig
+	aux := struct {
+		FrequencyHz float64 `json:"frequencyHz"`
+		*alias
+	}{alias: (*alias)(c)}
+	if err := json.Unmarshal(b, &aux); err != nil {
+		return err
+	}
+	f := aux.FrequencyHz
+	// Only a NON-INTEGER sub-1-MHz value can be MHz sent where Hz was expected: real Hz
+	// frequencies are always whole numbers, so an integer (e.g. 475000 = 475 kHz via RTL
+	// direct sampling, or 444375000 Hz) is left as-is and never corrupted on a round-trip
+	// through the DB. A fractional value like 444.375 can only be MHz — scale it to Hz.
+	if f > 0 && f < 1e6 && f != math.Trunc(f) {
+		f *= 1e6
+	}
+	// Guard the uint conversion: a negative or absurd magnitude (far beyond any SDR's
+	// tuning range) becomes a parked 0 rather than letting float→uint overflow produce
+	// garbage. 0 is handled downstream as an unprovisionable/parked channel.
+	if f < 0 || f > 1e10 {
+		f = 0
+	}
+	c.FrequencyHz = uint(f + 0.5)
+	return nil
 }
 
 // Bridge UDP ports are auto-assigned from this pool so every channel always has a
