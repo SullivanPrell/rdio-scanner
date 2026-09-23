@@ -19,3 +19,7 @@ client-nuxt/dist
 # default SQLite database created by running ./rdio-scanner from the root)
 /rdio-scanner
 /rdio-scanner.db
+
+# Agent instructions stay local; they are not published.
+CLAUDE.md
+CLAUDE.local.md
